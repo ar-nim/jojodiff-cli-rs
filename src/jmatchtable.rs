@@ -480,6 +480,7 @@ mod tests {
     use super::*;
     use crate::jfile::{JFileAhead, JFileMem};
     use std::io::Cursor;
+    use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
     /// Deterministic pseudo-random filler byte stream (LCG, bits 8..=15).
     fn lcg_bytes(seed: u32, n: usize) -> Vec<u8> {
@@ -490,6 +491,20 @@ mod tests {
                 (s >> 8) as u8
             })
             .collect()
+    }
+
+    /// Serializes the HSH_RPR-sensitive tests: [`HSH_RPR`] is a process
+    /// global, and cargo runs tests on parallel threads by default.
+    /// `get_selects_nearest_verified` asserts the counter's delta between two
+    /// loads, while `get_soft_eof_recovers_positions` increments it (node B's
+    /// cmp-7 repair); without the lock a sibling repair could land inside the
+    /// asserted window. Poison-immune so a panicking sibling cannot turn into
+    /// a misleading secondary failure.
+    fn hsh_rpr_guard() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Brief step-1 test: return values of `add`, the C trunc-mod bucket math
@@ -762,6 +777,10 @@ mod tests {
     /// hit loses to the accepted best.
     #[test]
     fn get_selects_nearest_verified() {
+        // Hold the HSH_RPR lock across the asserted delta window; see
+        // `hsh_rpr_guard`.
+        let _rpr = hsh_rpr_guard();
+
         // org: filler + 64-byte block B at 1000 and 3000.
         // new: filler + block B at 2000 and 2500.
         let block: Vec<u8> = (0..64).map(|i| 0xC0u8 + i as u8).collect();
@@ -804,6 +823,11 @@ mod tests {
     /// find position estimated from beg/new and can still win.
     #[test]
     fn get_soft_eof_recovers_positions() {
+        // This test increments the process-global HSH_RPR (node B's repair);
+        // take the lock so it cannot land inside the sibling test's asserted
+        // delta window (see `hsh_rpr_guard`).
+        let _rpr = hsh_rpr_guard();
+
         // org as a fresh look-ahead file: every soft read beyond the 16-byte
         // block window EOBs, so all three candidates stop with cmp == 1.
         let mut org = JFileAhead::new(Cursor::new(vec![0u8; 8192]), "Tst", 1024, 16);
