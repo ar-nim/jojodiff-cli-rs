@@ -4,9 +4,13 @@
 //! [`JOut`] mirrors the C++ abstract `JOut` class; [`OutStats`] carries the
 //! six public statistic counters (`gzOutByt*`, `JOut.h:53-57`).
 
+pub mod asc;
 pub mod bin;
+pub mod rgn;
 
+pub use asc::JOutAsc;
 pub use bin::JOutBin;
+pub use rgn::JOutRgn;
 
 /// Statistics about operations (`JOut.h:53-57`). All counters are `off_t`
 /// (`i64`) in the original.
