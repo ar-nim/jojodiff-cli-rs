@@ -13,3 +13,4 @@ pub mod defs;
 pub mod jdebug;
 pub mod jfile;
 pub mod jhashpos;
+pub mod jmatchtable;
