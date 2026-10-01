@@ -22,11 +22,11 @@ pub mod jout;
 pub(crate) mod test_util {
     use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
-    /// Serializes tests that touch process-global state — the [`HSH_RPR`]
-    /// repair counter (`jmatchtable`) and the debug `GB_DBG` flags
-    /// (`jdebug`): cargo runs tests on parallel threads, and guarding such
-    /// tests with per-module mutexes still leaves two modules racing on the
-    /// same global (found in Task 11, where the added `jdebug` tests'
+    /// Serializes all tests that touch the shared process-global test state —
+    /// the [`HSH_RPR`] repair counter (`jmatchtable`) and the debug `GB_DBG`
+    /// flags (`jdebug`): cargo runs tests on parallel threads, and guarding
+    /// such tests with per-module mutexes still leaves two modules racing on
+    /// the same global (found in Task 11, where the added `jdebug` tests'
     /// scheduling perturbation made `jdiff::stats_and_hash_repairs` and the
     /// `jmatchtable` counter tests collide deterministically).
     pub fn hsh_rpr_guard() -> MutexGuard<'static, ()> {

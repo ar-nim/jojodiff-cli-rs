@@ -94,9 +94,9 @@ diff compressed files — diff uncompressed containers and compress afterwards:
 zip -0 archive0000.zip mydir/*            # put mydir in an archive
 zip -0 archive0001.zip mydir/*            # some time later
 jdiff archive0000.zip archive0001.zip archive0001.jdf
-zip -9 archive0001.jdf.zip                # send the compressed difference file
+zip -9 archive0001.jdf.zip archive0001.jdf  # compress the patch for transfer
 # ... later:
-unzip archive0000.zip.zip && unzip archive0001.jdf.zip
+unzip archive0001.jdf.zip
 jptch archive0000.zip archive0001.jdf archive0001b.zip
 unzip archive0001b.zip                    # restore mydir
 ```
@@ -112,6 +112,12 @@ cargo build --release
 ```
 
 produces `target/release/jdiff` and `target/release/jptch`.
+
+For regular use, install both binaries onto your `PATH` (default `~/.cargo/bin`):
+
+```
+cargo install --path .
+```
 
 The library crate (`jojodiff_cli_rs`) exposes the same building blocks as the C++
 classes (readers, hash table, match table, output writers, diff engine). With the

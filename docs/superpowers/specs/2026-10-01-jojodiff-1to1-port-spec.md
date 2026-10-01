@@ -569,9 +569,9 @@ Always returns true (length-mode). The engine's final `put(ESC,…)` flushes the
   lengths crossing 252/253/508/509/65535/65536 boundaries, > 4 GiB-length EQL is covered by a
   unit test on `put_len` only (no such fixture on disk).
 * Option matrix for oracle byte-compare (on both bundled pairs): default, `-f`, `-ff`, `-b`,
-  `-s 1`, `-s 32`, `-bs 512`, `-m 64`, `-m 1`(→0→in-memory), `-min 1 -max 1`, `-a 16`,
-  `-l`, `-lr`, and `-m 0` on the text pair (NUL-free — reference `-m 0` is broken on NUL data,
-  §15.3).
+  `-s 1`, `-s 32`, `-bs 512`, `-m 64`, `-m 1`(→0→in-memory; restricted to the text pair,
+  same as `-m 0` — see §15.3), `-min 1 -max 1`, `-a 16`, `-l`, `-lr`, and `-m 0` on the
+  text pair (NUL-free — reference `-m 0` is broken on NUL data, §15.3).
 
 ## 14. Debug feature (parity with `make debug` / `-D_DEBUG`)
 

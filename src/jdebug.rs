@@ -128,11 +128,13 @@ mod tests {
     }
 
     /// `gbDbg` starts all-zero and is mutated through `dbg_set`
-    /// (`JDebug.cpp:30`); the test restores every flag it touches so
-    /// parallel engine tests never see a stray flag.
+    /// (`JDebug.cpp:30`); the test restores every flag it touches and holds
+    /// the crate-wide test lock while the flags are set, so parallel engine
+    /// tests never observe a stray flag.
     #[cfg(feature = "debug")]
     #[test]
     fn flags_default_false_and_set_roundtrip() {
+        let _guard = crate::test_util::hsh_rpr_guard();
         for idx in 0..16 {
             assert!(!dbg(idx), "gbDbg[{idx}] must default to false");
         }
