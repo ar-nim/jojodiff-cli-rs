@@ -1,0 +1,5 @@
+* text=auto
+
+# Test fixtures and golden files must not be line-ending-normalized or re-encoded:
+# byte-exactness against the C++ oracle is part of the port's contract.
+tests/fixtures/** -text
