@@ -12,6 +12,16 @@ pub const EOF: i32 = -1;
 /// End-Of-Buffer constant, `EOF - 1` = -2 (`JDefs.h:110`).
 pub const EOB: i32 = EOF - 1;
 
+/// Read type for [`JFile::get`](crate::jfile::JFile::get):
+/// `0=read, 1=hard ahead, 2=soft ahead` (`JFileIStream.cpp:46-48`). Only used
+/// for dispatch, never serialized.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReadType {
+    Read = 0,
+    HardAhead = 1,
+    SoftAhead = 2,
+}
+
 /// Sample size in bits, `sizeof(hkey) * 8` on the 32-bit oracle build
 /// (`_LARGESAMPLE` is not set by the Makefile); literal in Rust.
 pub const SMPSZE: i32 = 32;
