@@ -599,13 +599,16 @@ the debug-only `Hash miss!` / `liErr` logic in `jdiff()` (`JDiff.cpp:137-209`).
    target (where it is a data race). Port is serial and deterministic — identical to the default
    oracle build.
 3. **`-m 0` NUL-truncation fixed.** `main.cpp:169` builds `istringstream(char*)`, truncating at
-   the first NUL byte (verified: `-m 0` on bkocomu pair produces a 3-byte patch). The Rust
-   in-memory reader serves the full file. Byte-compare against the C++ reference for `-m 0` is
-   therefore restricted to NUL-free inputs (text pair); NUL inputs are verified by round-trip
-   only.
+   the first NUL byte (verified: `-m 0` on bkocomu pair produces a 3-byte patch); the same
+   C-string construction also strlen-overruns beyond the NUL truncation proper (§15.3
+   family). The Rust in-memory reader serves the full file. Byte-compare against the C++
+   reference for in-memory mode (`-m 0`, and `-m 1` which parses to buffer size 0) is
+   therefore restricted to NUL-free inputs (text pair); NUL inputs are verified by
+   round-trip only.
 4. **jptch stdin buffering.** C++ seeks the stdin `FILE*`; pipes fail there. The Rust port reads
    stdin fully then serves from memory — strictly more permissive, identical output for
-   seekable stdin.
+   seekable stdin. Same family: under verbose, C++ prints the out-position as −1 when
+   stdout is non-seekable (`ftello` on a pipe); the port replicates that faithfully.
 5. **MinGW/`__MINGW32__` ifdefs collapsed.** One uniform buffered implementation (JFileAhead
    semantics) on all platforms; the MinGW-only `-m 0 → buf_sze = blk_sze` special case
    (`main.cpp:398-402`) does not apply since in-memory mode is used everywhere.
@@ -624,6 +627,27 @@ the debug-only `Hash miss!` / `liErr` logic in `jdiff()` (`JDiff.cpp:137-209`).
    seek-&-reset (mode 1) path — 1 seek instead of the scroll-back's 2, and buffer history is
    reset. The port replicates the collapse explicitly at the `get_frombuffer` →
    `get_outofbuffer` boundary and retains the mode-2 arm as dead-code parity.
+9. **Dead `lbFnd < 0` error check replicated.** C++ declares `bool lbFnd`
+   (`JDiff.cpp:132`), so the immediate `lbFnd < 0` error branch after hashing
+   (`JDiff.cpp:212-214`) can never fire — the bool collapses −1 to `true`; input errors
+   surface later via the final EOB min-check instead. The port replicates this control
+   flow (the check exists in the same dead form).
+10. **`JFileIStream` stale-failbit reader defect not ported.** In the C++ in-memory
+    reader, a `seekg` past EOF sets failbit without eofbit, leaving subsequent reads
+    failing even though unread data remains (beyond the §15.3 NUL truncation). The
+    port serves full content from memory.
+11. **jdiff open checks implemented where the stock Linux oracle aborts.** Stock Linux
+    jdiff stats unopenable inputs (garbage `st_size`) and pre-reads on pthreads before
+    the open checks, so a missing input file aborts (`new char[garbage_size]` →
+    `std::bad_alloc`, exit 134) before the documented messages print. The port
+    implements the documented open-check semantics (exit 3/4/5 with exact messages,
+    spec §16.3); `jptch`'s open checks are live in the C++ (no pre-read) and are
+    oracle-faithful.
+12. **32-bit `hkey` target variant.** `JDefs.h:104` `typedef unsigned long int hkey`
+    is 64-bit on LP64 Linux (SMPSZE = 64) but 32-bit on Windows/x86 — the port's
+    target (spec §2). The port implements SMPSZE = 32 throughout, and the Linux oracle
+    build (`scripts/build-oracle.sh`) forces `typedef unsigned int hkey` so goldens
+    and live comparisons match the target variant; stock LP64 oracle builds differ.
 
 ## 16. Acceptance gates
 

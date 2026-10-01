@@ -1,0 +1,35 @@
+JDIFF - Jojo's binary diff version 0.8.1 (beta) December 2011
+Copyright (C) 2002-2005,2009,2011 Joris Heirbaut
+
+JojoDiff is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+File adressing is 64 bit (files up to 8388608 TB), samples are 32 bytes.
+
+Lookahead buffers: 8192 kb. (4096 kb. per file).
+Hastable size    : 12288 kb. (1048573 samples).
+Hashtable size          = 12582876 samples, 12288 KB, 12 MB
+Hashtable prime         = 1048573
+Hashtable hits          = 8061
+Hashtable errors        = 0
+Hashtable repairs       = 0
+Hashtable overloading   = 0
+Reliability distance    = 48
+Random    accesses      = 0
+Delete    bytes         = 38
+Backtrack bytes         = 0
+Escape    bytes written = 0
+Control   bytes written = 15
+Equal     bytes         = 73711
+Data      bytes written = 38
+Overhead  bytes written = 15

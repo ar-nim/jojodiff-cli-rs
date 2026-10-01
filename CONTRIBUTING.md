@@ -31,9 +31,28 @@ specification in `docs/superpowers/specs/2026-10-01-jojodiff-1to1-port-spec.md`.
 Each task follows the same cycle: write failing tests from the spec, port the
 C++ module, make the tests pass, then commit.
 
-The conformance tests skip automatically unless `JOJODIFF_ORACLE` points at a
-directory containing a compiled C++ reference build, so they run in CI's dedicated
-oracle job but stay inert on developer machines without it.
+## Testing and the oracle
+
+`cargo test --all-features` runs the oracle harness layers (see `tests/oracle.rs`):
+
+1. Round-trip gate and francisdb cross-validation — always run.
+2. Golden byte-compares against the committed oracle outputs under
+   `tests/fixtures/golden/` — always run; the goldens are C++-oracle truth,
+   never regenerate them from Rust output (`scripts/gen-golden.sh`).
+3. Live-oracle byte-compares against a compiled C++ reference — skipped
+   automatically unless `$JOJODIFF_ORACLE` points at a directory containing
+   `jdiff`/`jptch`, or `target/oracle` exists. Build it locally with
+   `scripts/build-oracle.sh` (needs g++ and make; Linux/WSL).
+
+```
+scripts/build-oracle.sh
+JOJODIFF_ORACLE=target/oracle cargo test --all-features
+```
+
+CI runs the live compare in a dedicated ubuntu job; the other layers run on
+every OS. Byte-exact compatibility is the contract: if a live comparison
+fails, that is a port bug or an oracle/golden mismatch — investigate, never
+adjust goldens to fit Rust output.
 
 ## Commit messages
 
