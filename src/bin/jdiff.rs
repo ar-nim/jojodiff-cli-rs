@@ -203,10 +203,12 @@ fn real_main() -> i32 {
             o.hsh_mbt = 1; // 1Meg samples
         } else if is(tok, "-do") {
             DBG_TO_STDOUT.store(true, std::sync::atomic::Ordering::Relaxed);
-        /* The `-dhsh` … `-ddst` debug flags are release-inert (`#if debug` in
-         * the C++): they reach this else and are treated as filenames exactly
-         * like in the stock release binary. Task 11 adds them behind the
-         * `debug` feature. */
+        } else if is_dbg_flag(tok) {
+            /* Consumed by `is_dbg_flag`, which set the flag (debug builds).
+             * In default builds `is_dbg_flag` is always false and the token
+             * falls through to the filename branch below, exactly like the
+             * release C++ build whose `#if debug` strcmp arms are compiled
+             * out (`main.cpp:286-309`). */
         } else {
             lb_opt_arg_dne = true;
             li_opt_arg_cnt -= 1;
@@ -445,6 +447,45 @@ fn real_main() -> i32 {
 /// Byte-equality of an option token with a C string (`strcmp == 0`).
 fn is(tok: &OsStr, opt: &str) -> bool {
     tok == OsStr::new(opt)
+}
+
+/// The 11 `-d*` debug flags with their `gbDbg` indices, in `main.cpp:286-308`
+/// order (`DBGHSH..DBGDST`, `JDebug.h:37-47`). Debug builds only.
+#[cfg(feature = "debug")]
+const DBG_FLAGS: &[(&str, usize)] = &[
+    ("-dhsh", jojodiff_cli_rs::jdebug::DBGHSH),
+    ("-dahd", jojodiff_cli_rs::jdebug::DBGAHD),
+    ("-dcmp", jojodiff_cli_rs::jdebug::DBGCMP),
+    ("-dprg", jojodiff_cli_rs::jdebug::DBGPRG),
+    ("-dbuf", jojodiff_cli_rs::jdebug::DBGBUF),
+    ("-dhsk", jojodiff_cli_rs::jdebug::DBGHSK),
+    ("-dahh", jojodiff_cli_rs::jdebug::DBGAHH),
+    ("-dbkt", jojodiff_cli_rs::jdebug::DBGBKT),
+    ("-dred", jojodiff_cli_rs::jdebug::DBGRED),
+    ("-dmch", jojodiff_cli_rs::jdebug::DBGMCH),
+    ("-ddst", jojodiff_cli_rs::jdebug::DBGDST),
+];
+
+/// Recognizes (and consumes) the `-dhsh`…`-ddst` debug flags (`main.cpp:286-309`).
+/// Debug builds only: without the feature this always answers false, so the
+/// tokens fall through to the filename branch like in the release C++ build.
+fn is_dbg_flag(tok: &OsStr) -> bool {
+    #[cfg(feature = "debug")]
+    {
+        DBG_FLAGS.iter().any(|&(name, idx)| {
+            if is(tok, name) {
+                jojodiff_cli_rs::jdebug::dbg_set(idx, true);
+                true
+            } else {
+                false
+            }
+        })
+    }
+    #[cfg(not(feature = "debug"))]
+    {
+        let _ = tok;
+        false
+    }
 }
 
 /// Reads a whole input file for the `-m 0` in-memory reader. A read failure

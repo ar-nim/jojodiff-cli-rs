@@ -518,10 +518,16 @@ const USAGE_PTCH: &str = concat!(
     "\n",
 );
 
-/// `%12lld` (`P8zd` in the release build), used to build the expected verbose
-/// lines.
+/// `P8zd` (`%12lld` in the release build) used to build the expected verbose
+/// lines. Debug-feature builds use `%10lld` (`JDefs.h` `#if debug` branch) —
+/// pinned against the C++ `make debug` oracle, whose jptch shrinks the same
+/// way (`jpatch.c` verbose lines share the engine's `P8zd`).
 fn p12(v: i64) -> String {
-    format!("{v:>12}")
+    if cfg!(feature = "debug") {
+        format!("{v:>10}")
+    } else {
+        format!("{v:>12}")
+    }
 }
 
 fn run_ptch(args: &[&OsStr]) -> Output {

@@ -15,8 +15,12 @@
 //! [`JMatchTable::get`] by design (controller ruling, ledger T5 ↔ spec §6):
 //! [`JMatchTable::new`] takes no arguments.
 //!
-//! Debug prints (`DBGMCH`/`DBGCMP` sites) are Task 11 and intentionally
-//! absent here.
+//! Debug prints (`DBGMCH`/`DBGCMP` sites, spec §14) live behind the `debug`
+//! feature with their exact C++ format strings: "Mch Add"/"Mch Ful"
+//! (`JMatchTable.cpp:166-176`), the per-candidate table dump
+//! (`JMatchTable.cpp:302-319`), "Mch Err" (`JMatchTable.cpp:325-328`) and the
+//! check() prologue/result pair (`JMatchTable.cpp:398-437`). Positions use
+//! the debug-build `P8zd` width 10 (`crate::defs::p8`).
 //!
 //! # Example
 //!
@@ -42,7 +46,11 @@
 
 use std::sync::atomic::{AtomicI32, Ordering};
 
+#[cfg(feature = "debug")]
+use crate::defs::p8;
 use crate::defs::{EOF, MCH_MAX, MCH_PME, ReadType, SMPSZE};
+#[cfg(feature = "debug")]
+use crate::jdebug::{DBGCMP, DBGMCH, c_chr, dbg, dbg_print};
 use crate::jfile::JFile;
 use crate::jhashpos::JHashPos;
 
@@ -133,8 +141,8 @@ impl JMatchTable {
     /// has been added with space left and `0` if a new entry has been added
     /// with the table now full (or not added at all).
     ///
-    /// `base_new` and `eql_new` are unused exactly as in the C++ release
-    /// build (they only feed a `DBGMCH` debug print, Task 11).
+    /// `base_new` feeds only the DBGMCH "Mch Add" print and `eql_new` nothing
+    /// at all, exactly as in the C++ release/debug builds.
     pub fn add(&mut self, fnd_org: i64, fnd_new: i64, _base_new: i64, _eql_new: i32) -> i32 {
         let delta = fnd_org - fnd_new; // lzDlt
 
@@ -197,8 +205,28 @@ impl JMatchTable {
             self.gld = Some(ni);
             self.gld_delta = delta - 1;
 
-            if self.free.is_some() { 1 } else { 0 } // still place?
+            /* Debug: new-match trace (JMatchTable.cpp:166-170); izOrg/izNew
+             * were just filled with fnd_org/fnd_new. */
+            #[cfg(feature = "debug")]
+            if dbg(DBGMCH) {
+                dbg_print(format_args!(
+                    "Mch Add ({},{}) New ({},{}) Bse ({})\n",
+                    p8(fnd_org),
+                    p8(fnd_new),
+                    p8(fnd_org),
+                    p8(fnd_new),
+                    _base_new,
+                ));
+            }
+
+            if self.free.is_some() { 1 } else { 0 } // still place ?
         } else {
+            /* Debug: table-full trace (JMatchTable.cpp:174-176). */
+            #[cfg(feature = "debug")]
+            if dbg(DBGMCH) {
+                dbg_print(format_args!("Mch ({}, {}) Ful\n", p8(fnd_org), p8(fnd_new),));
+            }
+
             0 // not added
         }
     }
@@ -335,13 +363,74 @@ impl JMatchTable {
                             bst_cmp = cmp;
                         }
                     }
+
+                    /* Debug: table dump — inside the better-branch, after the
+                     * evaluation, like the C++ (JMatchTable.cpp:302-310). The
+                     * `%c` is `*` when this node is the current best
+                     * (pointer identity), else the compare-state marker. */
+                    #[cfg(feature = "debug")]
+                    if dbg(DBGMCH) {
+                        let marker = if bst == Some(ci) {
+                            '*'
+                        } else if cmp == 0 {
+                            '='
+                        } else if cmp == 1 {
+                            '?'
+                        } else {
+                            ':'
+                        };
+                        dbg_print(format_args!(
+                            "Mch {:1}{}[{}{},{},{},{:4}]{}:{}:{}\n",
+                            cmp,
+                            marker,
+                            if typ < 0 {
+                                'G'
+                            } else if typ > 0 {
+                                'C'
+                            } else {
+                                ' '
+                            },
+                            p8(node_org),
+                            p8(nnew),
+                            p8(beg),
+                            cnt,
+                            p8(tst_new),
+                            delta,
+                            dst,
+                        ));
+                    }
                 }
-                // (The C++ else arm only prints a DBGMCH line — Task 11.)
+                // Else (not empty/old, not potentially better): only a DBGMCH
+                // line, gated twice in the C++ (JMatchTable.cpp:314-319).
+                else {
+                    #[cfg(feature = "debug")]
+                    if dbg(DBGMCH) && cnt > 0 && beg > 0 {
+                        dbg_print(format_args!(
+                            "Mch  :[{}{},{},{},{:4}] D={}\n",
+                            if typ < 0 {
+                                'G'
+                            } else if typ > 0 {
+                                'C'
+                            } else {
+                                ' '
+                            },
+                            p8(node_org),
+                            p8(nnew),
+                            p8(beg),
+                            cnt,
+                            delta,
+                        ));
+                    }
+                }
                 cur = self.nodes[ci].next;
             }
         }
 
-        // Mch Err (DBGMCH, Task 11); return (lpBst != null).
+        // Mch Err (JMatchTable.cpp:325-328); return (lpBst != null).
+        #[cfg(feature = "debug")]
+        if dbg(DBGMCH) && bst.is_none() {
+            dbg_print(format_args!("Mch Err\n"));
+        }
         if bst.is_some() {
             Some((bst_org, bst_new))
         } else {
@@ -397,6 +486,11 @@ impl JMatchTable {
 ///
 /// Returns `0` = run found, `1` = end-of-buffer reached, `2` = no run of
 /// equal bytes found.
+///
+/// Debug builds print the DBGCMP prologue before comparing and the result
+/// line after it (`JMatchTable.cpp:398-402,430-437`); the result line reports
+/// the *raw* return value before the `1 → 2` soft/hard-eof adjustment of the
+/// final switch, like the C++ print placement.
 fn check(
     org: &mut dyn JFile,
     new: &mut dyn JFile,
@@ -417,6 +511,19 @@ fn check(
     } else {
         ReadType::HardAhead
     };
+
+    /* Debug: compare prologue, "Fnd (…): " without newline
+     * (JMatchTable.cpp:398-402). */
+    #[cfg(feature = "debug")]
+    if dbg(DBGCMP) {
+        dbg_print(format_args!(
+            "Fnd ({},{},{:4},{}): ",
+            p8(*pos_org),
+            p8(*pos_new),
+            len,
+            if soft { 2 } else { 1 },
+        ));
+    }
 
     // Compare bytes: mismatches do not fail here (JMatchTable.cpp:405-415).
     while len > SMPSZE - 8 && ret == 0 && eql < SMPSZE - 8 {
@@ -452,6 +559,29 @@ fn check(
         }
     }
 
+    /* Debug: compare result, before the return-value switch like the C++
+     * (JMatchTable.cpp:430-437): the state word is the RAW ret (0/1/2), the
+     * positions are rewound to the equal run's start, and both bytes print
+     * as (%c)%3o with the printable-ASCII filter. */
+    #[cfg(feature = "debug")]
+    if dbg(DBGCMP) {
+        dbg_print(format_args!(
+            "{} {} {:2} {} ({}){:3o} == ({}){:3o}\n",
+            p8(*pos_org - i64::from(eql)),
+            p8(*pos_new - i64::from(eql)),
+            eql,
+            match ret {
+                0 => "OK!",
+                1 => "EOF",
+                _ => "NOK",
+            },
+            c_chr(lc_org),
+            lc_org as u32,
+            c_chr(lc_new),
+            lc_new as u32,
+        ));
+    }
+
     match ret {
         0 => {
             // Equality found: rewind both positions to the start of the
@@ -480,7 +610,6 @@ mod tests {
     use super::*;
     use crate::jfile::{JFileAhead, JFileMem};
     use std::io::Cursor;
-    use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
     /// Deterministic pseudo-random filler byte stream (LCG, bits 8..=15).
     fn lcg_bytes(seed: u32, n: usize) -> Vec<u8> {
@@ -498,13 +627,11 @@ mod tests {
     /// `get_selects_nearest_verified` asserts the counter's delta between two
     /// loads, while `get_soft_eof_recovers_positions` increments it (node B's
     /// cmp-7 repair); without the lock a sibling repair could land inside the
-    /// asserted window. Poison-immune so a panicking sibling cannot turn into
-    /// a misleading secondary failure.
-    fn hsh_rpr_guard() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+    /// asserted window. Delegates to the crate-wide lock (see
+    /// `crate::test_util`): per-module guards left the jdiff and jmatchtable
+    /// tests racing on the same counter.
+    fn hsh_rpr_guard() -> std::sync::MutexGuard<'static, ()> {
+        crate::test_util::hsh_rpr_guard()
     }
 
     /// Brief step-1 test: return values of `add`, the C trunc-mod bucket math

@@ -6,6 +6,18 @@
 //! when the collision-credit counter reaches the current threshold, and `get`
 //! is an exact-key match at `key % prime` — there is no probing.
 //!
+//! # Debug prints (spec §14, `debug` feature)
+//!
+//! The `#if debug` sites are ported with their exact C++ format strings:
+//! the constructor's "Hash Ini" line (`JHashPos.cpp:66-72`), the per-store
+//! "Hash Add" lines (`JHashPos.cpp:124-130`), the per-hash "Hash Key" lines
+//! (`JHashPos.h:111-116`) and the audit helpers [`JHashPos::print`] /
+//! [`JHashPos::dist`] (`JHashPos.cpp:163-223`; `print` has no call site in
+//! the C++ — dead-code parity). The "Hash Ini" addresses are printed from the
+//! two vectors' allocations like the C++ `mzHshTblPos`/`mkHshTblHsh` bounds;
+//! as everywhere `%p` values are non-reproducible and only the line shape is
+//! pinned.
+//!
 //! # Example
 //!
 //! ```
@@ -24,6 +36,8 @@
 //! ```
 
 use crate::defs::{GIPME, SMPSZE};
+#[cfg(feature = "debug")]
+use crate::jdebug::{DBGHSH, DBGHSK, c_chr, dbg, dbg_print};
 
 /// Override when the collision counter exceeds this threshold
 /// (`JHashPos.cpp:33`).
@@ -78,7 +92,7 @@ impl JHashPos {
         // miHshSze = prime * (sizeof(off_t) + sizeof(hkey)) on the 64-bit
         // off_t / 32-bit hkey build = prime * (8 + 4).
         let size_bytes = prime * 12;
-        JHashPos {
+        let tbl = JHashPos {
             tbl_pos: vec![0i64; prime as usize],
             tbl_hsh: vec![0u32; prime as usize],
             prime,
@@ -88,7 +102,30 @@ impl JHashPos {
             rlb: 48,
             load_cnt: 0,
             hits: 0,
+        };
+
+        /* Debug: allocation bounds like the C++ `mzHshTblPos` /
+         * `mkHshTblHsh` start/end pointers (JHashPos.cpp:66-72); `%p` values
+         * are non-reproducible, only the shape is pinned. */
+        #[cfg(feature = "debug")]
+        if dbg(DBGHSH) {
+            let pos = tbl.tbl_pos.as_ptr_range();
+            let hsh = tbl.tbl_hsh.as_ptr_range();
+            dbg_print(format_args!(
+                "Hash Ini sizeof={:2}+{:2}={:2}, {} samples, {} bytes, address={:p}-{:p},{:p}-{:p}.\n",
+                4,  // sizeof(hkey), 32-bit oracle build
+                8,  // sizeof(off_t)
+                12, // sizeof(hkey) + sizeof(off_t)
+                tbl.prime,
+                tbl.size_bytes,
+                pos.start,
+                pos.end,
+                hsh.start,
+                hsh.end,
+            ));
         }
+
+        tbl
     }
 
     /// The hash function: generate a new hash value by adding a new byte
@@ -97,6 +134,17 @@ impl JHashPos {
     /// wraps exactly like the 32-bit C++ `hkey` of the oracle build.
     pub fn hash(&self, byte: i32, cur: &mut u32) {
         *cur = cur.wrapping_mul(2).wrapping_add(byte as u32);
+
+        /* Debug: hash-function trace (JHashPos.h:111-116). */
+        #[cfg(feature = "debug")]
+        if dbg(DBGHSK) {
+            dbg_print(format_args!(
+                "Hash Key {:x} {:x} {}\n",
+                cur,
+                byte as u32,
+                c_chr(byte)
+            ));
+        }
     }
 
     /// Hashtable add (`JHashPos.cpp:96-137`).
@@ -132,6 +180,21 @@ impl JHashPos {
         if self.col_cnt >= self.col_max {
             // Calculate the index in the hashtable for the given key.
             let idx = (key % self.prime as u32) as usize;
+
+            /* Debug: per-store trace, before the store like the C++
+             * (JHashPos.cpp:124-130); `%c` is `.` for an empty bucket, `!`
+             * for an override. */
+            #[cfg(feature = "debug")]
+            if dbg(DBGHSH) {
+                dbg_print(format_args!(
+                    "Hash Add {:8} {} {:8x} {}\n",
+                    idx as i32,
+                    crate::defs::p8(pos),
+                    key,
+                    if self.tbl_hsh[idx] == 0 { '.' } else { '!' },
+                ));
+            }
+
             self.tbl_hsh[idx] = key;
             self.tbl_pos[idx] = pos;
             self.col_cnt = 0; // reset subsequent lost collisions counter
@@ -183,6 +246,96 @@ impl JHashPos {
     /// `JHashPos.h:152`).
     pub fn hash_hits(&self) -> i32 {
         self.hits
+    }
+
+    /// Print the hashtable content (`JHashPos::print`, `JHashPos.cpp:160-172`).
+    ///
+    /// Debug builds only. The C++ declares this method but never calls it —
+    /// dead-code parity, ported for the audit format alone.
+    #[cfg(feature = "debug")]
+    pub fn print(&self) {
+        for idx in 0..self.prime as usize {
+            if self.tbl_pos[idx] != 0 {
+                dbg_print(format_args!(
+                    "Hash Pnt {:12} {}-{:08}x\n",
+                    idx as i32,
+                    crate::defs::p8(self.tbl_pos[idx]),
+                    self.tbl_hsh[idx],
+                ));
+            }
+        }
+    }
+
+    /// Print the hashtable distribution over `bck` buckets
+    /// (`JHashPos::dist`, `JHashPos.cpp:176-223`); `max` is the largest
+    /// position to find. Debug builds only; called from the prescan under
+    /// DBGDST (`JDiff.cpp:574-577`).
+    ///
+    /// The C++ quirks are preserved: positions beyond the last bucket are
+    /// *not* counted (`liIdx >= aiBck` only assigns `liIdx = 0`, the increment
+    /// is in the `else`), and the `Avg/Min/Max` line divides by `liMax`
+    /// without a zero check — on an empty distribution the C++ dies with
+    /// SIGFPE, this port panics on the same division. (For files smaller than
+    /// the bucket count the divisor `liHshDiv` is 0 as well; the prescan of
+    /// such files stores nothing, so the fill loop never divides.)
+    #[cfg(feature = "debug")]
+    pub fn dist(&self, max: i64, bck: i32) {
+        dbg_print(format_args!(
+            "Hash Dist Overload    = {}\n",
+            self.col_max / 3
+        ));
+        dbg_print(format_args!("Hash Dist Reliability = {}\n", self.rlb));
+
+        // Bucket counters (the C++ mallocs aiBck ints and memsets them).
+        let mut bck_cnt = vec![0i32; bck as usize];
+
+        // Fill the buckets (JHashPos.cpp:195-209).
+        let div = (max / i64::from(bck)) as i32;
+        for idx in 0..self.prime as usize {
+            if self.tbl_pos[idx] > 0 && self.tbl_pos[idx] <= max {
+                let b = (self.tbl_pos[idx] / i64::from(div)) as i32;
+                if b < bck {
+                    bck_cnt[b as usize] += 1;
+                }
+                // else C++ assigns liIdx = 0 — and does not count (the
+                // increment lives in the else arm).
+            }
+        }
+
+        // Printout (JHashPos.cpp:212-222).
+        let mut sum: i32 = 0;
+        let mut min = i32::MAX;
+        let mut max_cnt: i32 = 0;
+        for (b, &cnt) in bck_cnt.iter().enumerate() {
+            sum += cnt;
+            if cnt < min {
+                min = cnt;
+            }
+            if cnt > max_cnt {
+                max_cnt = cnt;
+            }
+            dbg_print(format_args!(
+                "Hash Dist {:8} Pos={}:{} Cnt={:8} Rlb={}\n",
+                b as i32,
+                crate::defs::p8(b as i64 * i64::from(div)),
+                crate::defs::p8((b + 1) as i64 * i64::from(div)),
+                cnt,
+                if cnt == 0 { -1 } else { div / cnt },
+            ));
+        }
+        dbg_print(format_args!(
+            "Hash Dist Avg/Min/Max/% = {}/{}/{}/{}\n",
+            sum / bck,
+            min,
+            max_cnt,
+            100 - (min * 100 / max_cnt),
+        ));
+        dbg_print(format_args!(
+            "Hash Dist Load           = {}/{}={}\n",
+            sum,
+            self.prime,
+            i64::from(sum) * 100 / i64::from(self.prime)
+        ));
     }
 }
 

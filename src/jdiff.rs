@@ -20,14 +20,30 @@
 //!   (`JDiff.cpp:252-255`), after the new file has been drained as INS bytes.
 //! * Deleting the whole original file (`"abc" → ""`) emits nothing but the
 //!   final ESC operand: the main loop never runs because `lcNew` starts at
-//!   `EOF`, and no trailing DEL is generated.
+//!   EOF, and no trailing DEL is generated.
 //!
-//! Debug output (`#if debug` blocks, spec §14) is Task 11 and intentionally
-//! absent; `giHshErr` therefore always stays 0 in this build, like the C++
-//! release build.
+//! # Debug prints (spec §14, `debug` feature)
+//!
+//! The `#if debug` sites are ported with their exact C++ format strings
+//! (debug `P8zd` width 10 via [`crate::defs::p8`]): the DBGPRG "Input" and
+//! "Current position" traces (`JDiff.cpp:145-148,219-221`), the DBGAHD
+//! "Findahead on" line (`:216-218`), the DBGAHH `ufHshAdd` lines in the
+//! find-ahead scroll loop (`:388-392`) and the prescan (`:546-550`), the
+//! DBGDST hashtable distribution (`:574-577`) and the debug-only
+//! malfunction check in the main loop: `liErr` flags a find-ahead that
+//! persisted with a zero ahead counter, a following round then reports
+//! "Hash miss!" (only when `verbose > 2` or compare-all) and counts it in
+//! `hsh_err` — the "Hashtable errors" statistic, which therefore stays 0 in
+//! release builds like the C++. When DBGAHD or DBGMCH is set, the loop also
+//! flushes the output buffer and emits an empty ESC operand before each
+//! find-ahead (`:193-199`), which is a no-op for the binary/listing writers.
 
+#[cfg(feature = "debug")]
+use crate::defs::p8;
 use crate::defs::{BKT, DEL, EOB, EOF, EQL, ESC, INS, MOD, ReadType, SMPSZE};
 use crate::jdebug::dbg_print;
+#[cfg(feature = "debug")]
+use crate::jdebug::{DBGAHD, DBGAHH, DBGDST, DBGMCH, DBGPRG, dbg};
 use crate::jfile::JFile;
 use crate::jhashpos::JHashPos;
 use crate::jmatchtable::JMatchTable;
@@ -181,10 +197,28 @@ impl<'a> JDiff<'a> {
         let mut lz_skp_org: i64 = 0;
         let mut lz_skp_new: i64 = 0;
 
+        /* Debug: malfunction check (JDiff.cpp:137-139): 0 = not checking,
+         * 1 = checking, 2 = error. */
+        #[cfg(feature = "debug")]
+        let mut li_err: i32 = 0;
+
         /* Take one byte from each file ... (JDiff.cpp:141-143) */
         lc_org = self.org.get(lz_pos_org, ReadType::Read);
         lc_new = self.r#new.get(lz_pos_new, ReadType::Read);
         while lc_new >= 0 {
+            /* Debug: input trace (JDiff.cpp:145-148). The C++ prints
+             * `lzPosOrg - 1`, so the very first line reports position -1. */
+            #[cfg(feature = "debug")]
+            if dbg(DBGPRG) {
+                dbg_print(format_args!(
+                    "Input {}->{:2x} {}->{:2x}.\n",
+                    p8(lz_pos_org - 1),
+                    lc_org as u32,
+                    p8(lz_pos_new - 1),
+                    lc_new as u32,
+                ));
+            }
+
             if lc_org == lc_new {
                 /* Output or count equals (JDiff.cpp:151-157) */
                 if lb_eql {
@@ -229,7 +263,33 @@ impl<'a> JDiff<'a> {
                  * lzSkpOrg, lzSkpNew, lzAhd all zero, JDiff.cpp:186-191) */
                 lz_ahd = i64::from(SMPSZE);
                 lb_fnd = false;
+                /* Debug: the pending solution pointed nowhere
+                 * (JDiff.cpp:193-195). */
+                #[cfg(feature = "debug")]
+                {
+                    li_err = 2;
+                }
             } else {
+                /* Debug-only prelude (JDiff.cpp:197-209): flush the output
+                 * buffer for the trace when ahead/hash debugging is on, and
+                 * report a find-ahead that failed to reach its equal region. */
+                #[cfg(feature = "debug")]
+                {
+                    if dbg(DBGAHD) || dbg(DBGMCH) {
+                        self.uf_put_eql(lz_pos_org, lz_pos_new, &mut lz_eql, &mut lb_eql);
+                        self.out.put(ESC, 0, 0, 0, lz_pos_org, lz_pos_new);
+                    }
+
+                    /* An expected equal block has not been reached; in normal
+                     * (compare-all) mode this should never happen
+                     * (JDiff.cpp:201-208). */
+                    if li_err == 2 && (self.verbose > 2 || self.cmp_all) {
+                        dbg_print(format_args!("Hash miss!\n"));
+                        self.hsh_err += 1;
+                    }
+                    li_err = 0; // clear error state
+                }
+
                 /* Find a new equals-region (JDiff.cpp:211-214).
                  *
                  * The C++ assigns the int return to the bool lbFnd, turning
@@ -244,6 +304,24 @@ impl<'a> JDiff<'a> {
                     &mut lz_skp_new,
                     &mut lz_ahd,
                 ) != 0;
+
+                /* Debug: find-ahead result and progress traces
+                 * (JDiff.cpp:216-222). */
+                #[cfg(feature = "debug")]
+                {
+                    if dbg(DBGAHD) {
+                        dbg_print(format_args!(
+                            "Findahead on {} {} skip {} {} ahead {}\n",
+                            lz_pos_org, lz_pos_new, lz_skp_org, lz_skp_new, lz_ahd,
+                        ));
+                    }
+                    if dbg(DBGPRG) {
+                        dbg_print(format_args!(
+                            "Current position in new file= {}\n",
+                            lz_pos_new
+                        ));
+                    }
+                }
 
                 /* Output accumulated equals (JDiff.cpp:224-225) */
                 self.uf_put_eql(lz_pos_org, lz_pos_new, &mut lz_eql, &mut lb_eql);
@@ -457,6 +535,20 @@ impl<'a> JDiff<'a> {
                     hsh.hash(*mi_val_org, ml_hsh_org);
                     hsh.add(*ml_hsh_org, *mz_ahd_org, *mi_eql_org);
 
+                    /* Debug: ahead-hash trace (JDiff.cpp:388-392); both
+                     * trailing fields are P8zd here (unlike the prescan's
+                     * %8d tail). */
+                    #[cfg(feature = "debug")]
+                    if dbg(DBGAHH) {
+                        dbg_print(format_args!(
+                            "ufHshAdd({:2x} -> {:8x}, {}, {})\n",
+                            *mi_val_org as u32,
+                            ml_hsh_org,
+                            p8(*mz_ahd_org),
+                            p8(lz_bse_org),
+                        ));
+                    }
+
                     /* get next value from file */
                     *mz_ahd_org += 1;
                     uf_fnd_ahd_get(&mut **org, *mz_ahd_org, mi_val_org, mi_eql_org, li_sft);
@@ -610,6 +702,19 @@ impl<'a> JDiff<'a> {
             hsh.hash(lc_val_org, &mut lk_hsh_org);
             hsh.add(lk_hsh_org, lz_pos_org, li_eql_org);
 
+            /* Debug: prescan hash trace (JDiff.cpp:546-550); the trailing
+             * field is `%8d` of the literal 0 here, not a P8zd position. */
+            #[cfg(feature = "debug")]
+            if dbg(DBGAHH) {
+                dbg_print(format_args!(
+                    "ufHshAdd({:2x} -> {:8x}, {}, {:8})\n",
+                    lc_val_org as u32,
+                    lk_hsh_org,
+                    p8(lz_pos_org),
+                    0,
+                ));
+            }
+
             lz_pos_org += 1;
             uf_fnd_ahd_get(
                 &mut **org,
@@ -635,6 +740,12 @@ impl<'a> JDiff<'a> {
 
         if *verbose > 0 {
             dbg_print(format_args!(".\n"));
+        }
+
+        /* Debug: hashtable distribution (JDiff.cpp:574-577). */
+        #[cfg(feature = "debug")]
+        if dbg(DBGDST) {
+            hsh.dist(lz_pos_org, 128);
         }
 
         /* (JDiff.cpp:579-582) */
@@ -672,8 +783,8 @@ mod tests {
     use crate::jout::{JOutBin, OutStats};
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::sync::MutexGuard;
     use std::sync::atomic::Ordering;
-    use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
     /// Deterministic pseudo-random filler byte stream (LCG, bits 8..=15),
     /// identical to the C++ oracle harness used to pin the expected sequences
@@ -781,14 +892,11 @@ mod tests {
     }
 
     /// Serializes the HSH_RPR-sensitive test: [`HSH_RPR`] is a process global
-    /// and cargo runs tests on parallel threads by default (same discipline as
-    /// the `jmatchtable` tests' `hsh_rpr_guard`). Poison-immune so a panicking
-    /// sibling cannot turn into a misleading secondary failure.
+    /// and cargo runs tests on parallel threads by default. Delegates to the
+    /// crate-wide lock (see `crate::test_util`): per-module guards left the
+    /// jdiff and jmatchtable tests racing on the same counter.
     fn hsh_rpr_guard() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        crate::test_util::hsh_rpr_guard()
     }
 
     /// Drives the engine over the given file pair and returns (ret, ops).

@@ -16,12 +16,28 @@
 //! 0.8.1 build (spec §15.8). This port replicates that collapse explicitly at
 //! the `get_frombuffer` → `get_outofbuffer` boundary; the mode-2 arm is
 //! retained, mirroring the dead C++ code.
+//!
+//! # Debug prints (spec §14, `debug` feature)
+//!
+//! The `#if debug` sites are ported verbatim: the DBGBUF `ufFabOpn` open line
+//! (`JFileAhead.cpp:50-54`) and `ufFabGet: Seek` line (`:270-273`), and the
+//! DBGRED `ufFabGet` fast-path, in-buffer, EOF and EOB lines (`:76-81`,
+//! `:118-122`, `:146-151`, `:165-170`) plus the store-fill pair in
+//! `get_outofbuffer` (`:283-298`). `%p` values print the equivalent Rust
+//! addresses (buffer start/end, per-byte buffer slot, fid string pointer);
+//! only the line *shape* is oracle-pinnable. Two sites pass the fid STRING to
+//! `%p` in the C++ (`:165-170`, `:283-288`) — the port preserves the shape by
+//! printing the fid's address (`String::as_ptr`).
 
 use std::io::{Read, Seek, SeekFrom};
 use std::process;
 
 use super::{JFile, ReadType};
+#[cfg(feature = "debug")]
+use crate::defs::p8;
 use crate::defs::{EOB, EOF, EXI_SEK};
+#[cfg(feature = "debug")]
+use crate::jdebug::{DBGBUF, DBGRED, dbg, dbg_print};
 
 /// Buffered look-ahead byte source, 1:1 with C++ `JFileAhead`
 /// (`src/JFileAhead.cpp`).
@@ -34,9 +50,9 @@ use crate::defs::{EOB, EOF, EXI_SEK};
 /// of file (`i64::MAX` = unknown).
 pub struct JFileAhead<R: Read + Seek> {
     file: R,
-    /// File identifier for debug prints (C++ `msFid`); consumed from Task 11
-    /// on, like the C++ debug printfs that read it.
-    #[allow(dead_code)]
+    /// File identifier for debug prints (C++ `msFid`); read by the DBGBUF/
+    /// DBGRED sites (`JFileAhead.cpp:52,78,119,147,166,285,295`).
+    #[cfg_attr(not(feature = "debug"), allow(dead_code))]
     fid: String,
     buf_sze: i64,
     blk_sze: i64,
@@ -61,7 +77,7 @@ impl<R: Read + Seek> JFileAhead<R> {
         } else {
             buf_sze
         };
-        JFileAhead {
+        let fab = JFileAhead {
             file,
             fid: fid.to_string(),
             buf_sze,
@@ -75,7 +91,20 @@ impl<R: Read + Seek> JFileAhead<R> {
             pos_red: 0,
             pos_eof: i64::MAX, // MAX_OFF_T
             seeks: 0,
+        };
+
+        /* Debug: open trace (JFileAhead.cpp:50-54); the pointers are the
+         * buffer allocation's start/end like the C++ `mpBuf`/`mpMax`. */
+        #[cfg(feature = "debug")]
+        if dbg(DBGBUF) {
+            let range = fab.buf.as_ptr_range();
+            dbg_print(format_args!(
+                "ufFabOpn({}):(buf={:p},max={:p},sze={})\n",
+                fab.fid, range.start, range.end, fab.buf_sze,
+            ));
         }
+
+        fab
     }
 
     /// C `fread` at the current file position: fills `buf[idx..idx+want]`,
@@ -139,6 +168,20 @@ impl<R: Read + Seek> JFileAhead<R> {
                     self.pos_inp - self.pos_red
                 };
 
+                /* Debug: in-buffer trace (JFileAhead.cpp:118-122). */
+                #[cfg(feature = "debug")]
+                if dbg(DBGRED) {
+                    let mem = self.buf.as_ptr().wrapping_add(lp as usize);
+                    dbg_print(format_args!(
+                        "ufFabGet({},{},{})->{:2x} (mem {:p}).\n",
+                        self.fid,
+                        p8(pos),
+                        typ as i32,
+                        self.buf[lp as usize] as u32,
+                        mem,
+                    ));
+                }
+
                 // return data (JFileAhead.cpp:137)
                 return self.buf[lp as usize] as i32;
             } else {
@@ -153,6 +196,17 @@ impl<R: Read + Seek> JFileAhead<R> {
             }
         } else if pos >= self.pos_eof {
             // eof (JFileAhead.cpp:145-157)
+            /* Debug: EOF trace (JFileAhead.cpp:146-151). */
+            #[cfg(feature = "debug")]
+            if dbg(DBGRED) {
+                dbg_print(format_args!(
+                    "ufFabGet({},{},{})->EOF (mem).\n",
+                    self.fid,
+                    p8(pos),
+                    typ as i32,
+                ));
+            }
+
             self.pos_red = -1;
             self.ptr_red = 0; // C++: mpRed = null; kept safe by red_sze == 0
             self.red_sze = 0;
@@ -165,6 +219,18 @@ impl<R: Read + Seek> JFileAhead<R> {
 
         // Soft ahead: continue only if no seek (JFileAhead.cpp:163-171)
         if typ == ReadType::SoftAhead && li_sek != 0 {
+            /* Debug: end-of-buffer trace (JFileAhead.cpp:165-170). The C++
+             * passes the fid STRING to `%p` (formatting quirk); the port
+             * preserves the shape with the fid's address. */
+            #[cfg(feature = "debug")]
+            if dbg(DBGRED) {
+                dbg_print(format_args!(
+                    "ufFabGet({:p},{},{})->EOB.\n",
+                    self.fid.as_ptr(),
+                    p8(pos),
+                    typ as i32,
+                ));
+            }
             return EOB;
         }
 
@@ -271,6 +337,13 @@ impl<R: Read + Seek> JFileAhead<R> {
         };
 
         if sek != 0 {
+            /* Debug: repositioning trace, before the seek like the C++
+             * (JFileAhead.cpp:270-273); prints the original `azPos`
+             * UNPADDED (`%"PRIzd"`, not `P8zd`). */
+            #[cfg(feature = "debug")]
+            if dbg(DBGBUF) {
+                dbg_print(format_args!("ufFabGet: Seek {}.\n", pos));
+            }
             self.seeks += 1;
         } /* if liSek */
 
@@ -286,11 +359,37 @@ impl<R: Read + Seek> JFileAhead<R> {
             Err(sentinel) => return sentinel, // -EXI_SEK
         };
         if done < li_tdo {
-            // End of file reached (JFileAhead.cpp:283-293)
+            // End of file reached (JFileAhead.cpp:283-293). The C++ prints
+            // the fid STRING with `%p` here (formatting quirk, shape kept).
+            /* Debug: short-read EOF trace (JFileAhead.cpp:284-288). */
+            #[cfg(feature = "debug")]
+            if dbg(DBGRED) {
+                dbg_print(format_args!(
+                    "ufFabGet({:p},{},{})->EOF.\n",
+                    self.fid.as_ptr(),
+                    p8(pos),
+                    typ as i32,
+                ));
+            }
             self.pos_eof = lz_pos + done;
             if done == 0 {
                 return EOF;
             }
+        }
+
+        /* Debug: store-fill trace with the byte just read and its buffer
+         * address (`*mpInp`/`mpInp`, JFileAhead.cpp:294-298). */
+        #[cfg(feature = "debug")]
+        if dbg(DBGRED) {
+            let sto = self.buf.as_ptr().wrapping_add(lp_inp);
+            dbg_print(format_args!(
+                "ufFabGet({},{},{})->{:2x} (sto {:p}).\n",
+                self.fid,
+                p8(pos),
+                typ as i32,
+                self.buf[lp_inp] as u32,
+                sto,
+            ));
         }
 
         match sek {
@@ -356,6 +455,22 @@ impl<R: Read + Seek> JFile for JFileAhead<R> {
             self.pos_red += 1;
             self.red_sze -= 1;
             let byte = self.buf[self.ptr_red] as i32;
+
+            /* Debug: fast-path trace with the byte's buffer address, printed
+             * before `mpRed++` like the C++ (JFileAhead.cpp:76-81). */
+            #[cfg(feature = "debug")]
+            if dbg(DBGRED) {
+                let mem = self.buf.as_ptr().wrapping_add(self.ptr_red);
+                dbg_print(format_args!(
+                    "ufFabGet({},{},{})->{:2x} (mem {:p}).\n",
+                    self.fid,
+                    p8(pos),
+                    typ as i32,
+                    byte as u32,
+                    mem,
+                ));
+            }
+
             // C++ advances mpRed unwrapped; red_sze == 0 keeps it from ever
             // being dereferenced past mpMax, so wrapping here is equivalent.
             self.ptr_red = (self.ptr_red + 1) % self.buf.len();

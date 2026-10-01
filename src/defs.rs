@@ -70,9 +70,15 @@ pub const GIPME: [i32; 20] = [
     131071, 65521, 32749, 16381, 8191, 4093, 2039, 1021, 509, 251,
 ];
 
-/// Width used by P8zd in release builds (debug builds use 10, see jdebug).
+/// Width used by `P8zd` (`JDefs.h:80-88`): `%12lld` in release builds,
+/// `%10lld` in `-D_DEBUG`/debug-feature builds. The feature switch is a
+/// compile-time constant, so both branches fold in their respective builds.
 pub fn p8(v: i64) -> String {
-    format!("{:>12}", v)
+    if cfg!(feature = "debug") {
+        format!("{:>10}", v)
+    } else {
+        format!("{:>12}", v)
+    }
 }
 
 /// C `atoi` semantics on the lossy form of an [`OsStr`]: skip leading C
@@ -146,7 +152,16 @@ mod tests {
 
     #[test]
     fn width_formatting() {
-        assert_eq!(p8(0), "           0");
-        assert_eq!(p8(57751), "       57751");
+        // `P8zd` is `%10lld` in debug-feature builds, `%12lld` in release
+        // (JDefs.h:80-88); both pinned against the respective oracle builds.
+        if cfg!(feature = "debug") {
+            assert_eq!(p8(0), "         0");
+            assert_eq!(p8(57751), "     57751");
+            assert_eq!(p8(-1), "        -1");
+        } else {
+            assert_eq!(p8(0), "           0");
+            assert_eq!(p8(57751), "       57751");
+            assert_eq!(p8(-1), "          -1");
+        }
     }
 }
