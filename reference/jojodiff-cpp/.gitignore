@@ -1,0 +1,5 @@
+*.o
+*.swp
+jdiff
+jptch
+tests/*MB

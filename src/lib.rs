@@ -9,5 +9,5 @@
 //! for project status and the docs in `docs/superpowers/` for the port plan and
 //! functional specification.
 
-/// Version string, byte-exact with JojoDiff 0.8.1 (part of the compatibility contract).
-pub const VERSION: &str = "0.8.1 (beta) December 2011";
+pub mod defs;
+pub mod jdebug;

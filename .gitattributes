@@ -3,3 +3,7 @@
 # Test fixtures and golden files must not be line-ending-normalized or re-encoded:
 # byte-exactness against the C++ oracle is part of the port's contract.
 tests/fixtures/** -text
+
+# Vendored C++ reference must stay byte-exact (pristine oracle material,
+# jpatch.cpp has mixed CRLF/LF and tests/ holds golden outputs):
+reference/jojodiff-cpp/** -text
