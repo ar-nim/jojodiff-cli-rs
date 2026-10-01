@@ -9,11 +9,13 @@
 //! true out-of-buffer accesses seek. Soft-ahead reads outside the buffer
 //! return [`EOB`] before any file access.
 //!
-//! Seek modes (`JFileAhead.cpp:108`, `get_outofbuffer`): 0 = append, 1 = seek
-//! & reset, 2 = scroll back. NB: the C++ declares the mode variable as `bool`
-//! and assigns 2 for "just before buffer", so a literal build collapses mode 2
-//! to 1; spec §10 keeps the scroll-back mode reachable and this port follows
-//! the spec (see `.superpowers/.../task-3-report.md` for the analysis).
+//! Seek modes (`JFileAhead.cpp:108`): 0 = append, 1 = seek & reset, 2 = scroll
+//! back. NB: the C++ declares the mode variable as `bool` (`liSek`) and passes
+//! it to an `int` parameter, so any non-zero mode arrives as exactly 1: the
+//! mode-2 scroll-back arm is compiled but unreachable in every real JojoDiff
+//! 0.8.1 build (spec §15.8). This port replicates that collapse explicitly at
+//! the `get_frombuffer` → `get_outofbuffer` boundary; the mode-2 arm is
+//! retained, mirroring the dead C++ code.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::process;
@@ -108,8 +110,11 @@ impl<R: Read + Seek> JFileAhead<R> {
     /// [`get_outofbuffer`](Self::get_outofbuffer) if that is not possible
     /// (C++ `get_frombuffer`, `JFileAhead.cpp:103-174`).
     fn get_frombuffer(&mut self, pos: i64, typ: ReadType) -> i32 {
-        // reposition on file? 0=no, 1=yes, 2=scroll back (JFileAhead.cpp:108)
-        let mut sek = 0_i32;
+        // C++ `bool liSek` (JFileAhead.cpp:108): reposition on file?
+        // 0=no, 1=yes, 2=scroll back. The C++ type collapses 2 to `true`
+        // at assignment; the int conversion happens at the call boundary
+        // below (see spec §15.8).
+        let mut li_sek = 0_i32;
 
         /* Get data from buffer? */
         if pos < self.pos_inp {
@@ -138,13 +143,12 @@ impl<R: Read + Seek> JFileAhead<R> {
                 return self.buf[lp as usize] as i32;
             } else {
                 // Seek & reset when reading before the buffer
-                // (JFileAhead.cpp:139-143). NB: the C++ declares `bool liSek`
-                // and assigns 2 here, so a literal build collapses this to
-                // mode 1; spec §10 keeps the scroll-back mode reachable.
+                // (JFileAhead.cpp:139-143): the C++ assigns 2 ("just before
+                // buffer") to a bool here, which stores `true` (spec §15.8).
                 if pos + self.blk_sze >= self.pos_inp - self.buf_usd {
-                    sek = 2; /* reading just before buffer */
+                    li_sek = 2; /* reading just before buffer */
                 } else {
-                    sek = 1; /* seek & reset buffer */
+                    li_sek = 1; /* seek & reset buffer */
                 }
             }
         } else if pos >= self.pos_eof {
@@ -156,21 +160,30 @@ impl<R: Read + Seek> JFileAhead<R> {
             return EOF;
         } else if pos >= self.pos_inp + self.blk_sze {
             // Reset when reading "after" the buffer (JFileAhead.cpp:158-161)
-            sek = 1;
+            li_sek = 1;
         }
 
         // Soft ahead: continue only if no seek (JFileAhead.cpp:163-171)
-        if typ == ReadType::SoftAhead && sek != 0 {
+        if typ == ReadType::SoftAhead && li_sek != 0 {
             return EOB;
         }
 
-        self.get_outofbuffer(pos, typ, sek)
+        // C++ passes `liSek` — declared `bool` (JFileAhead.cpp:108) — to
+        // `get_outofbuffer(const int aiSek, ...)` (JFileAhead.cpp:173): the
+        // bool→int conversion delivers any non-zero mode as exactly 1, so the
+        // case-(2) scroll-back arm never executes in any real build (spec
+        // §15.8). Replicated explicitly; the arm is retained as dead-code
+        // parity.
+        let li_sek: i32 = if li_sek != 0 { 1 } else { 0 };
+        self.get_outofbuffer(pos, typ, li_sek)
     }
 
     /// Read data from the file into the buffer, then read from the buffer
     /// (C++ `get_outofbuffer`, `JFileAhead.cpp:179-346`).
     ///
-    /// `sek`: 0 = append, 1 = seek & reset, 2 = scroll back.
+    /// `sek`: 0 = append, 1 = seek & reset, 2 = scroll back. Mode 2 never
+    /// arrives through `get_frombuffer` (bool collapse, spec §15.8); the arm
+    /// is kept as dead-code parity with the C++.
     fn get_outofbuffer(&mut self, pos: i64, typ: ReadType, sek: i32) -> i32 {
         // Set reading position: lz_pos (position to seek), lp_inp (place in
         // buffer to read to) and li_tdo (number of bytes to read)
@@ -198,6 +211,9 @@ impl<R: Read + Seek> JFileAhead<R> {
                 (pos, 0, self.blk_sze)
             }
 
+            // Dead in every real build (spec §15.8): `get_frombuffer` only
+            // ever delivers 0 or 1 across the bool bottleneck; kept for 1:1
+            // parity with the compiled-but-dead C++ case (2).
             2 => {
                 /* make room in buffer */
                 let drop = self.buf_usd + self.blk_sze - self.buf_sze;
@@ -387,7 +403,7 @@ mod tests {
 
     /// Brief step-1 test: soft-ahead reads outside the buffer window return
     /// `EOB` before any file access (both far before and just before the
-    /// window); the hard retry then scrolls back and returns the real byte.
+    /// window); the hard retry then seek-&-resets and returns the real byte.
     ///
     /// NB: the brief sketches this as "read to 200", but with the brief's own
     /// buffer size (1024) position 0 is still *inside* the window then, and
@@ -412,14 +428,20 @@ mod tests {
         assert_eq!(f.seekcount(), 0, "EOB must not access the file");
         // The first byte inside the window still reads from the buffer.
         assert_eq!(f.get(80, ReadType::SoftAhead), pat(80));
-        // A hard read scrolls back (2 seeks: reposition and restore) ...
+        // A hard read takes the seek-&-reset path (1 seek): the C++ `bool
+        // liSek` collapse makes near-before-buffer behave like far (§15.8).
         assert_eq!(f.get(70, ReadType::HardAhead), pat(70));
-        assert_eq!(f.seekcount(), 2);
+        assert_eq!(f.seekcount(), 1);
+        // The reset dropped all history: position 69 is outside the new
+        // window [70, 86), so even a soft read must EOB now. (Under the
+        // unreachable scroll-back mode 2 the window would still cover it.)
+        assert_eq!(f.get(69, ReadType::SoftAhead), EOB);
+        assert_eq!(f.seekcount(), 1);
         // ... and the following bytes are served sequentially again.
         for i in 71..80 {
             assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
         }
-        assert_eq!(f.seekcount(), 2);
+        assert_eq!(f.seekcount(), 1);
     }
 
     /// Brief step-1 test: hard-ahead far past the buffer resets it, seeks and
@@ -467,7 +489,11 @@ mod tests {
         assert_eq!(f.get(300, ReadType::Read), EOF);
         assert_eq!(f.seekcount(), 1, "later EOFs come from pos_eof");
         assert_eq!(f.get(255, ReadType::Read), pat(255));
-        assert_eq!(f.seekcount(), 3, "scroll back: seek there and restore");
+        assert_eq!(
+            f.seekcount(),
+            2,
+            "seek-&-reset (bool collapse, §15.8): one repositioning seek"
+        );
         assert_eq!(f.get(255, ReadType::Read), pat(255));
         assert_eq!(f.get(256, ReadType::Read), EOF);
     }
@@ -488,8 +514,9 @@ mod tests {
     }
 
     /// Brief step-1 test: with a small wrapping buffer (64 bytes, 16-byte
-    /// blocks), a full pass over a 256-byte file followed by scroll-back and
-    /// a re-read of the first 64 bytes serves every byte exactly.
+    /// blocks), a full pass over a 256-byte file followed by a near-before-
+    /// window read and a re-read of the first 64 bytes serves every byte
+    /// exactly.
     #[test]
     fn wraparound_buffer_integrity() {
         let mut f = JFileAhead::new(Cursor::new(data(256)), "Tst", 64, 16);
@@ -498,10 +525,13 @@ mod tests {
             assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
         }
         assert_eq!(f.seekcount(), 0);
-        // Window is [192, 256): 190 is just before it, so the buffer scrolls
-        // back (2 seeks), the tail is served from the buffer and appended.
+        // Window is [192, 256): 190 is just before it, so the buffer takes
+        // the seek-&-reset path (1 seek; §15.8 bool collapse — the retained
+        // scroll-back arm would need 2). The window head is served from the
+        // reset buffer, the rest appended through the wrapped ring, ending
+        // in a partial read at the file end.
         assert_eq!(f.get(190, ReadType::Read), pat(190));
-        assert_eq!(f.seekcount(), 2);
+        assert_eq!(f.seekcount(), 1);
         for i in 191..256 {
             assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
         }
@@ -512,24 +542,27 @@ mod tests {
         for i in 0..64 {
             assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
         }
-        assert_eq!(f.seekcount(), 3);
+        assert_eq!(f.seekcount(), 2);
     }
 
-    /// Brief step-1 test: a failing `Seek` makes `get` return `-EXI_SEK`,
-    /// both for the initial repositioning and for the scroll-back restore.
+    /// Brief step-1 test: a failing `Seek` makes `get` return `-EXI_SEK`:
+    /// both for the very first repositioning read and for any later
+    /// out-of-window read (each mode-1 reset performs exactly one seek).
     #[test]
     fn seek_error_returns_neg_exi_sek() {
         // Every seek fails: append reads still work (no seek), resets fail.
         let mut f = JFileAhead::new(FlakySeek::failing(0), "Tst", 1024, 16);
         assert_eq!(f.get(0, ReadType::Read), pat(0));
         assert_eq!(f.get(5000, ReadType::HardAhead), -EXI_SEK);
-        // The first seek succeeds, the second fails: scroll-back reaches the
-        // read, then fails to restore the input position.
+        // The first seek succeeds, further seeks fail: the near-before-window
+        // read spends its single seek-&-reset seek (§15.8 bool collapse), the
+        // next out-of-window read then fails on its own seek.
         let mut f = JFileAhead::new(FlakySeek::failing(1), "Tst", 1024, 16);
         for i in 0..1100 {
             assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
         }
-        assert_eq!(f.get(70, ReadType::Read), -EXI_SEK);
+        assert_eq!(f.get(70, ReadType::Read), pat(70));
+        assert_eq!(f.get(0, ReadType::Read), -EXI_SEK);
     }
 
     /// Cursor whose `seek` fails after `ok` successful seeks, like a `FILE*`

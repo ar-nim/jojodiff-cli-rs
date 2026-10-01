@@ -479,7 +479,9 @@ State: `pos_inp` (file offset of next unread chunk byte), `buf_usd` (valid bytes
        if `lp - todo >= 0` → `lp -= todo` (case 4) else `todo = lp; lp = 0` (case 3); else (lp
        wrapped negative) → `lp += buf_len - todo` (case 2). `buf_usd += todo; lz_pos -= todo`;
        seek to `lz_pos`, read `todo` at `lp`; `seekcount++`; reset read cursor
-       (`ptr_red=null, pos_red=-1, red_sze=0`).
+       (`ptr_red=null, pos_red=-1, red_sze=0`). Unreachable in every real build:
+       the C++ `bool liSek` collapses mode 2 to 1 at the call (see §15.8); the
+       port replicates the collapse and keeps this arm as dead code.
      * Partial read (`done < todo`): `pos_eof = lz_pos + done`; if `done == 0` return `EOF`.
      * Bookkeeping: mode 2 partial → repair buffer (`ptr_inp = lp+done (wrap); pos_inp =
        lz_pos+done; ptr_red=lp; pos_red=lz_pos; buf_usd=done; red_sze=done`); mode 2 full →
@@ -613,6 +615,15 @@ the debug-only `Hash miss!` / `liErr` logic in `jdiff()` (`JDiff.cpp:137-209`).
 7. **francisdb/jojodiff-rs edge cases are NOT authoritative.** Known divergences from C++
    jptch (bare leading bytes treated as MOD data vs. silently dropped; `ESC`+same-operand
    emitted as data vs. operand restart) exist there; the Rust port follows C++ everywhere.
+8. **Scroll-back mode 2 is dead code.** `get_frombuffer` declares its seek-mode variable as
+   `bool liSek` (`JFileAhead.cpp:108`, same in `JFileIStreamAhead.cpp:113`) and passes it to
+   `get_outofbuffer(const int aiSek, ...)` (`JFileAhead.cpp:173`): the bool→int conversion
+   makes any non-zero seek mode (including the assigned 2 for "just before buffer") arrive as
+   exactly 1, so the `case (2)` scroll-back code never executes in any real JojoDiff 0.8.1
+   build (MinGW and Linux, both twins). Observable effect: near-before-buffer reads take the
+   seek-&-reset (mode 1) path — 1 seek instead of the scroll-back's 2, and buffer history is
+   reset. The port replicates the collapse explicitly at the `get_frombuffer` →
+   `get_outofbuffer` boundary and retains the mode-2 arm as dead-code parity.
 
 ## 16. Acceptance gates
 
