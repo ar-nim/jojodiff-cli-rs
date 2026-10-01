@@ -2,9 +2,11 @@
 //! and patch engines (C++ `JFile` / `JFileIStream*`; spec §9 for `-m 0`, §10
 //! for buffered look-ahead).
 
+pub mod ahead;
 pub mod mem;
 
 pub use crate::defs::ReadType;
+pub use ahead::JFileAhead;
 pub use mem::JFileMem;
 
 /// Byte-source abstraction for the diff and patch engines, 1:1 with the C++
