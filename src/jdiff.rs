@@ -31,7 +31,7 @@ use crate::jdebug::dbg_print;
 use crate::jfile::JFile;
 use crate::jhashpos::JHashPos;
 use crate::jmatchtable::JMatchTable;
-use crate::jout::JOut;
+use crate::jout::{JOut, OutStats};
 
 /// JDiff engine (`JDiff.h:153`): owns the two file readers, the output sink,
 /// the hashtable and the matching table.
@@ -139,6 +139,26 @@ impl<'a> JDiff<'a> {
     /// release build, like the C++.
     pub fn hsh_err(&self) -> i32 {
         self.hsh_err
+    }
+
+    /// Output statistics snapshot (`lpOut->gzOutByt*`): the C++ `main` reads
+    /// these fields on its own output pointer after `jdiff()` returns
+    /// (`main.cpp:546-567,610`); here the engine owns the writer, so the
+    /// statistics are served through this accessor instead.
+    pub fn out_stats(&self) -> OutStats {
+        self.out.stats()
+    }
+
+    /// Out-of-order access count of the original-file reader
+    /// (`lpFilOrg->seekcount()`, read by the CLI at `main.cpp:557`).
+    pub fn org_seekcount(&self) -> i64 {
+        self.org.seekcount()
+    }
+
+    /// Out-of-order access count of the new-file reader
+    /// (`lpFilNew->seekcount()`, read by the CLI at `main.cpp:557`).
+    pub fn new_seekcount(&self) -> i64 {
+        self.r#new.seekcount()
     }
 
     /// Difference function (`JDiff::jdiff`, `JDiff.cpp:122-256`): compares both
