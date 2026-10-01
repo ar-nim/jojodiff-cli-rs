@@ -1,0 +1,34 @@
+[package]
+name = "jojodiff-cli-rs"
+version = "0.8.1"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+description = "Independent Rust port of JojoDiff 0.8.1: byte-compatible jdiff and jptch binary diff/patch CLIs (not affiliated with the jojodiff crate)"
+repository = "https://github.com/ar-nim/jojodiff-cli-rs"
+readme = "README.md"
+keywords = ["jojodiff", "binary-diff", "patch", "cli", "diff"]
+categories = ["command-line-utilities", "development-tools"]
+authors = ["Arif Rahman Ibrahim <1311330+ar-nim@users.noreply.github.com>"]
+
+[lib]
+name = "jojodiff_cli_rs"
+
+[[bin]]
+name = "jdiff"
+path = "src/bin/jdiff.rs"
+
+[[bin]]
+name = "jptch"
+path = "src/bin/jptch.rs"
+
+[features]
+default = []
+debug = []
+
+[dependencies]
+# none — std only
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+jojodiff = "0.1.2"   # francisdb crate, cross-validation only (tests/oracle.rs)
