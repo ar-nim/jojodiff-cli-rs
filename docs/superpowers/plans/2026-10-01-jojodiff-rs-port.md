@@ -971,8 +971,8 @@ patches (compatibility — spec §22.3 vectors from `tests/fixtures/golden/`).
 - Modify: `Cargo.toml` if adding the module path
 - Test: `tests/roundtrip.rs` (major update)
 
-**Interfaces (spec §18.A/§18.D):** argv[0] dispatch (`jpatch*` → Patch; `jdedup`/
-`jtst` routes not ported — spec §21.2); `-j`/`-u`/`-t`/`-y` function options; full
+**Interfaces (spec §18.A/§18.D):** argv[0] dispatch (`jpatch*` → Patch per upstream, **plus `jptch*` → Patch as a port extension** so existing scripts work against any copy of the binary — spec §21.2; `jdedup`/
+`jtst` routes not ported — spec §21.3/§21.4); `-j`/`-u`/`-t`/`-y` function options; full
 option table of §18.D incl. multiplicative presets in parse order; defaults
 (mchMax 128, mchMin 2, hshMbt 32 MB, buf 1MB+1MB, blk 32K) and buffer normalization +
 sequential defaults 32/16 MB (`main.cpp:617-620`); `-` = stdin/stdout, both-`-` → exit 2;
@@ -988,7 +988,8 @@ exit per stats; debug feature: getbuf assert → exit 6 — spec §21.3); `-y` �
   swap both ways; `-Z a b c` prints help then diffs (exit 1); `-h a b c` help + diff;
   `- a b` (stdin org) and both-`-` (exit 2); pipe flows (source pipe → `-p` warning +
   round-trip; dest pipe → `-q` warning; `cat p | jdiff -u org -`); argv[0] `jpatch`
-  symlink applies patches; `-m 0`/`-m 7`/`-m 2048` echo lines; `-i 1`, `-k 0` clamp;
+  symlink applies patches, and a `jptch` symlink does too (port extension, spec §21.2 —
+  upstream's `jpatch`-only match would leave it in Diff mode); `-m 0`/`-m 7`/`-m 2048` echo lines; `-i 1`, `-k 0` clamp;
   `-x 5` runs; `-vv` stats block byte-exact vs the 0.8.5 oracle capture; `-t` release
   output shape; `-y` exit 20; usage text contains `disbale` and `(in KB)` verbatim.
 - [ ] **Step 2: Implement.** Copy all literal strings from the vendored `main.cpp` —
@@ -1028,7 +1029,8 @@ across the full §22.1 matrix (live-oracle path identical); `crossver.rs` applie
 `golden/` (0.8.1) patch with the new `jptch` and `jdiff -u` and asserts exact restore;
 CI oracle job builds the 0.8.5 oracle (Task 13 script); README: 0.8.5 usage/option
 table, **breaking wire-format note** (patches from ≥0.8.5 unreadable by 0.8.1-era
-patchers; 0.8.1 patches still apply), `-u`/argv[0] patch modes, `-t` upstream-broken
+patchers; 0.8.1 patches still apply), `-u`/argv[0] patch modes (`jpatch` upstream,
+`jptch` port extension), `-t` upstream-broken
 note, updated deviations (spec §20/§21), version-history section (0.8.1 → 0.8.5
 re-target with upstream changelog summary).
 

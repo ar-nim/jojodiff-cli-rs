@@ -757,8 +757,11 @@ Headline verdicts (all verified against the C++ source and live builds; details 
 * **Port ruling (R2):** keep both Rust binaries. `jdiff` implements the full 0.8.5 CLI
   including `-u`/`--undiff` and the argv[0]=`jpatch` alias. `jptch` remains as a packaging
   extra: it behaves exactly like `jdiff` invoked with argv[0]=`jpatch` (same option
-  parser, function pre-forced to Patch, same exits). `jdedup`/`jtst` argv[0] routes are
-  NOT ported (§21.3/§21.4).
+  parser, function pre-forced to Patch, same exits). **The argv[0] match is extended
+  beyond upstream:** a basename starting `jptch` also routes to Patch (§21.2) — upstream
+  matches `jpatch` only (`strncasecmp(lcCmd, "jpatch", 6)`, `main.cpp:303-315`), under
+  which a `jptch`-named copy of the binary would silently run in Diff mode. `jdedup`/
+  `jtst` argv[0] routes are NOT ported (§21.3/§21.4).
 
 ### 18.C Wire format (supersedes Part I §3)
 
@@ -1013,10 +1016,14 @@ upstream option matrix informs §22's test matrix. The de-facto changelog is the
    (§18.C). The decoder accepts both 0.8.1-style explicit and 0.8.5 implicit patches
    (one-way compatibility, verified). Release notes must flag: patches produced by this
    port ≥0.8.5 are NOT applicable by 0.8.1-era patchers.
-2. **`jptch` binary retained; `jdiff -u` + argv[0]=`jpatch` added (R2).** Upstream ships
-   one binary; keeping `jptch` is this project's packaging choice (Part I §5's `jptch`
+2. **`jptch` binary retained; `jdiff -u` + argv[0]=`jpatch`/`jptch` added (R2).** Upstream
+   ships one binary; keeping `jptch` is this project's packaging choice (Part I §5's `jptch`
    CLI is superseded: `jptch` now parses the full 0.8.5 option grammar with the function
-   pre-forced to Patch). The `jdedup` and `jtst` argv[0] routes are not ported.
+   pre-forced to Patch). The argv[0] dispatch additionally accepts a basename starting
+   `jptch` as Patch — upstream matches `jpatch` only (`main.cpp:303-315`), so without this
+   extension a `jptch`-named copy of `jdiff` would default to Diff; it exists so existing
+   0.8.1-era scripts keep working against any copy of the binary (user ruling, 2026-10-02).
+   The `jdedup` and `jtst` argv[0] routes are not ported.
 3. **`-t`/`--test` ported faithfully although broken upstream.** Release semantics:
    after diffing, JPatcht is fed the **destination** file as the patch, appending
    misparsed data to the already-written patch output (observed: 283-byte corrupt output,
@@ -1094,7 +1101,8 @@ upstream option matrix informs §22's test matrix. The de-facto changelog is the
    `-f`, `-ff`, `-p`, `-q`, `-p -q`, `-s`, `-i 1`, `-i 8`, `-i 512`, `-k 0`, `-k 1`,
    `-k 65565`, `-n 1 -x 2`, `-x 5` (miMchFre quirk), `-m 0`, `-m 7`, `-m 2048`, `-a 0`,
    `-a 1`, `-l`, `-r`, and pipe variants (`cat new | jdiff org -`, `cat org | jdiff -p -
-   new`, `cat p | jptch org -`, `cat p | jdiff -u org -`, argv[0]=`jpatch` symlink).
+   new`, `cat p | jptch org -`, `cat p | jdiff -u org -`, argv[0]=`jpatch` and
+   argv[0]=`jptch` symlinks).
    Plus `--compat-081` (§21.16): its patches must contain zero implicit-MOD segments
    (structural property, verified by a decoder walk in tests), must round-trip through
    `jptch`/`jdiff -u`, and — where a 0.8.1 oracle is present (`JOJODIFF_ORACLE_081`,
