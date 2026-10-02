@@ -21,7 +21,7 @@ Use -h for additional help and usage description.
 Warning: Source buffer size misaligned with block size: set to 983475.
 Warning: Destination buffer size misaligned with block size: set to 983475.
 
-Index table size (default: 64Mb) (-s): 24Mb (2097143 samples)
+Index table size (default: 64Mb) (-s): 32Mb (2796181 samples)
 Search size     (0 = buffersize) (-a): 896kb
 Buffer size       (default  2Mb) (-m): 1Mb
 Block  size       (default 32kb) (-b): 64kb
@@ -33,7 +33,7 @@ Backtrace allowed     (-p to disable): yes
 Comparing : ...           
 Indexing  : ...                      0Mb
 Comparing : ...           Comparing :            0Mb
-Index table hits        = 9589
+Index table hits        = 9629
 Index table repairs     = 0
 Index table overloading = 0
 Reliability distance    = 48

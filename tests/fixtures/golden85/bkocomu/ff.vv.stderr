@@ -19,7 +19,7 @@ File adressing is 64 bit for files up to 8388607TB, samples are 32 bytes.
 
 Use -h for additional help and usage description.
 
-Index table size (default: 64Mb) (-s): 6Mb (524287 samples)
+Index table size (default: 64Mb) (-s): 8Mb (699037 samples)
 Search size     (0 = buffersize) (-a): 16352kb
 Buffer size       (default  2Mb) (-m): 32Mb
 Block  size       (default 32kb) (-b): 32kb
@@ -29,21 +29,21 @@ Compare out-of-buffer (-f to disable): no
 Full indexing scan   (-ff to disbale): no
 Backtrace allowed     (-p to disable): yes
 Comparing : ...           Comparing :            1MbComparing :            2Mb
-Index table hits        = 304660
-Index table repairs     = 2029
-Index table overloading = 3
-Reliability distance    = 60
+Index table hits        = 369873
+Index table repairs     = 2009
+Index table overloading = 2
+Reliability distance    = 56
 Inaccurate  solutions   = (masked)
 Source      seeks       = 0
 Destination seeks       = 0
-Delete      bytes       = 1038544792
-Backtrack   bytes       = 1038543839
+Delete      bytes       = 987190072
+Backtrack   bytes       = 987188856
 Escape      bytes       = 1
-Control     bytes       = 57679
+Control     bytes       = 57329
 
-Equal       bytes       = 1899927
-Data        bytes       = 23657
-Control-Esc bytes       = 57680
-Total       bytes       = 81337
+Equal       bytes       = 1901415
+Data        bytes       = 22169
+Control-Esc bytes       = 57330
+Total       bytes       = 79499
 
 Not all data has been found in source file.
