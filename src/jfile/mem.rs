@@ -46,6 +46,22 @@ impl JFile for JFileMem {
     fn seekcount(&self) -> i64 {
         self.seeks
     }
+
+    /// C++ `JFileIStream::set_lookahead_base` (`src/JFileIStream.cpp:63-70`):
+    /// "no need to do anything" — ported as the no-op it is.
+    fn set_lookahead_base(&mut self, _base: i64) {}
+
+    /// In-memory data is always seekable: `chkSeq` keeps `mbSeq` false when
+    /// `jeofpos` succeeds (`JFile.cpp:37-46`, `JFileIStream.cpp:30-34`).
+    fn is_sequential(&self) -> bool {
+        false
+    }
+
+    /// EOF position = data length (`JFileIStream::jeofpos` end-seek result,
+    /// `JFileIStream.cpp:43-57`).
+    fn jeofpos(&mut self) -> i64 {
+        self.data.len() as i64
+    }
 }
 
 #[cfg(test)]

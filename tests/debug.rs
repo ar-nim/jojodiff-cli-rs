@@ -147,32 +147,21 @@ fn buf_open_lines() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
-/// DBGRED (`-dred`): the four `ufFabGet` line shapes — store-fill, memory
-/// fast path, memory EOF and the short-read EOF line (which prints the fid's
-/// address with `%p`, a C++ formatting quirk preserved in shape).
+/// DBGRED (`-dred`) at 0.8.5 (spec §18.G): the 0.8.1 `ufFabGet` trace sites
+/// are gone; the only DBGRED code left in `JFileAhead` is the double-verify
+/// block (`JFileAhead.cpp:149-186`), which prints `pos-error !` /
+/// `len-error !` / `buf-error !` lines **only** when the buffer logic or its
+/// contents are wrong. On the tiny pair the debug stream must therefore stay
+/// completely empty — a negative invariant over every buffer read.
 #[test]
-fn red_get_lines_tiny() {
+fn red_double_verify_silent_tiny() {
     let dir = temp_dir("red-tiny");
     let (stdout, out) = run_dbg(&dir, ORG_A, NEW_B, &["-dred"], "red");
     assert_eq!(out.status.code(), Some(0));
     assert!(
-        stdout.contains("ufFabGet(Org,         0,0)->68 (sto 0x"),
-        "sto line: {stdout:?}"
-    );
-    assert!(
-        stdout.contains("ufFabGet(Org,         0,0)->68 (mem 0x"),
-        "mem line: {stdout:?}"
-    );
-    assert!(
-        stdout.lines().last() == Some("ufFabGet(New,        18,0)->EOF (mem)."),
-        "final EOF line: {stdout:?}"
-    );
-    // Short read at buffer fill: `%p` of the fid string, then the position.
-    assert!(
-        stdout
-            .lines()
-            .any(|l| l.starts_with("ufFabGet(0x") && l.ends_with(",         0,0)->EOF.")),
-        "short-read EOF line (fid as %p): {stdout:?}"
+        stdout.is_empty(),
+        "no DBGRED output expected (sites removed at 0.8.5, double-verify\n\
+         silent on correct buffer contents): {stdout:?}"
     );
     fs::remove_dir_all(&dir).unwrap();
 }
@@ -356,66 +345,52 @@ fn dst_distribution_lines_big() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
-/// DBGBUF seek lines (`JFileAhead.cpp:270-273`) on the 100000-byte pair with
-/// an 8 kB buffer: the backtrack verification seeks to 85536 and 60000
-/// (oracle-pinned values).
+/// DBGBUF at 0.8.5 on the 100000-byte pair with an 8 kB buffer (spec §18.G):
+/// the 0.8.1 `ufFabGet: Seek` trace site is gone — the only DBGBUF output is
+/// the two `ufFabOpn` lines, even across the heavy reset/scrollback traffic
+/// of this pair.
 #[test]
-fn buf_seek_lines_sek() {
+fn buf_open_only_no_seek_lines_sek() {
     let dir = temp_dir("buf-sek");
     let (org, new) = sek_pair();
     let (stdout, out) = run_dbg(&dir, &org, &new, &["-m", "16", "-dbuf"], "sekB");
     assert_eq!(out.status.code(), Some(0));
-    assert!(
-        stdout.contains("ufFabGet: Seek 0.\n"),
-        "first reset: {stdout:?}"
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "only the two ufFabOpn lines (Seek trace removed at 0.8.5): {stdout:?}"
     );
     assert!(
-        stdout.contains("ufFabGet: Seek 85536.\n"),
-        "verify seek: {stdout:?}"
+        lines[0].starts_with("ufFabOpn(Org):(buf=0x"),
+        "Org open line: {stdout:?}"
     );
     assert!(
-        stdout.contains("ufFabGet: Seek 60000.\n"),
-        "copy seek: {stdout:?}"
+        lines[1].starts_with("ufFabOpn(New):(buf=0x"),
+        "New open line: {stdout:?}"
     );
     fs::remove_dir_all(&dir).unwrap();
 }
 
-/// DBGRED on the sek pair: the memory-EOF line at the file end (width-10
-/// position `100000`) and the short-read line at 140000 (fid as `%p`).
+/// DBGRED on the sek pair (plain and with `-f`, exercising reset, scrollback,
+/// EOF latching and soft-ahead bounds): the double-verify block stays silent
+/// — the buffer contents match fresh reads everywhere, and EOF/EOB are no
+/// longer traced at 0.8.5.
 #[test]
-fn red_eof_lines_sek() {
+fn red_double_verify_silent_sek() {
     let dir = temp_dir("red-sek");
     let (org, new) = sek_pair();
-    let (stdout, out) = run_dbg(&dir, &org, &new, &["-m", "16", "-dred"], "sekR");
-    assert_eq!(out.status.code(), Some(0));
-    assert!(
-        stdout.contains("ufFabGet(Org,    100000,0)->EOF (mem).\n"),
-        "file-end line: {stdout:?}"
-    );
-    assert!(
-        stdout
-            .lines()
-            .any(|l| l.starts_with("ufFabGet(0x") && l.ends_with(",    140000,0)->EOF.")),
-        "short read at 140000: {stdout:?}"
-    );
-    fs::remove_dir_all(&dir).unwrap();
-}
-
-/// DBGRED soft-ahead out-of-buffer (`-f -m 16 -dred`, `JFileAhead.cpp:165-170`):
-/// the EOB line prints the fid's address with `%p` (C++ quirk preserved in
-/// shape) and the read type 2.
-#[test]
-fn red_eob_lines_sek_fast() {
-    let dir = temp_dir("red-eob");
-    let (org, new) = sek_pair();
-    let (stdout, out) = run_dbg(&dir, &org, &new, &["-f", "-m", "16", "-dred"], "sekE");
-    assert_eq!(out.status.code(), Some(0));
-    assert!(
-        stdout
-            .lines()
-            .any(|l| l.starts_with("ufFabGet(0x") && l.ends_with(",     85536,2)->EOB.")),
-        "EOB line: {stdout:?}"
-    );
+    for (tag, extra) in [("sekR", vec!["-m", "16"]), ("sekE", vec!["-f", "-m", "16"])] {
+        let mut opts = extra;
+        opts.push("-dred");
+        let (stdout, out) = run_dbg(&dir, &org, &new, &opts, tag);
+        assert_eq!(out.status.code(), Some(0), "{tag}");
+        assert!(
+            stdout.is_empty(),
+            "{tag}: no DBGRED output expected (sites removed at 0.8.5,\n\
+             double-verify silent on correct buffer contents): {stdout:?}"
+        );
+    }
     fs::remove_dir_all(&dir).unwrap();
 }
 

@@ -777,7 +777,7 @@ fn uf_fnd_ahd_get(file: &mut dyn JFile, pos: i64, val: &mut i32, eql: &mut i32, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::defs::EXI_RED;
+    use crate::defs::{EXI_RED, EXI_SEK};
     use crate::jfile::JFileMem;
     use crate::jmatchtable::HSH_RPR;
     use crate::jout::{JOutBin, OutStats};
@@ -864,6 +864,16 @@ mod tests {
 
         fn seekcount(&self) -> i64 {
             0
+        }
+
+        fn set_lookahead_base(&mut self, _base: i64) {}
+
+        fn is_sequential(&self) -> bool {
+            false
+        }
+
+        fn jeofpos(&mut self) -> i64 {
+            i64::from(EXI_SEK)
         }
     }
 
