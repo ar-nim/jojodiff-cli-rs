@@ -1,22 +1,30 @@
 #![cfg(feature = "debug")]
-//! Integration tests for the `debug` cargo feature (port plan Task 11, spec
-//! §14): the 11 `-d*` CLI flags and the `#if debug` print sites, at parity with
-//! the C++ `make debug` (`-D_DEBUG`) builds.
+//! Integration tests for the `debug` cargo feature (spec §18.G): the
+//! `-d <name>` CLI syntax, the 11 flag indices and every `#if debug` print
+//! site of the 0.8.5 site census, at parity with the C++ `-D_DEBUG` build.
 //!
-//! Every expected string below was pinned against the vendored C++ oracle
-//! (`reference/jojodiff-cpp`) built with `make debug` (forced 32-bit `hkey`
-//! and the spec §15.1 2-line seek fix, like every other task's oracle). The
-//! `-dprg` "Input" lines confirmed the debug-build `P8zd` width of 10
-//! (`%10lld`, `JDefs.h` `#if debug` branch) on the very first line, which
-//! prints position `-1` (the C++ prints `lzPosOrg - 1` before the first
-//! increment — quirk preserved).
+//! Every expected string below is pinned against the 0.8.5 debug-variant
+//! oracle (`target/oracle-dbg/jdiff`, the `g++ -g -D_DEBUG` build of
+//! `reference/jojodiff-0.8.5`; re-verified byte-for-byte with a full
+//! flag × fixture matrix in Task 21). The debug-build `P8zd` width of 10
+//! (`%10lld`, `JDefs.h` `#if debug` branch) shows on the first "Input" line,
+//! which prints position `-1` (the C++ prints `lzPosOrg - 1` before the
+//! first increment — quirk preserved).
 //!
-//! The tests spawn the real binary with `-c`, which redirects the debug
-//! stream to stdout (`JDebug::stddbg = stdout`, `main.cpp:283-284`), so
-//! `Command::output()` captures it deterministically and no test leaks output
-//! into the test log. The patch always goes to a file, leaving stdout purely
-//! debug output. Pointer values (`%p`, buffer addresses) are inherently
-//! non-reproducible; such lines are matched by prefix/suffix only.
+//! The tests spawn the real binary with `-c`, which sends the debug stream
+//! to stdout (`JDebug::stddbg = stdout`, `main.cpp:360-362`; `-c` replaces
+//! the 0.8.1 `-do`), so `Command::output()` captures it deterministically
+//! and no test leaks output into the test log. The patch always goes to a
+//! file, leaving stdout purely debug output. 0.8.5 CLI syntax: `-d <name>`
+//! (the name may also be attached, `-dmch` — one getopt option either way),
+//! and unknown names are silently ignored (`main.cpp:446-472`). Pointer
+//! values (`%p`, buffer addresses) are inherently non-reproducible; such
+//! lines are matched by prefix/suffix only. The dead flags `hsk`, `bkt`,
+//! `dst` are accepted with **zero** print sites (§18.G/§21.13); the
+//! always-on `getbuf` invariant asserts are pinned from the outside in
+//! tests/roundtrip.rs (`t_option_debug_matches_release` — reachable-behavior
+//! parity) and stay documented as unreachable on the violation paths (spec
+//! §21.3/§21.17).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -118,6 +126,13 @@ fn run_dbg(dir: &Path, org: &[u8], new: &[u8], extra: &[&str], tag: &str) -> (St
 /// 0.8.1 `ESC MOD` pair. Debug flags must not change it (the debug flush's
 /// `put(ESC, 0, …)` is a writer no-op).
 const PATCH_BIG: &[u8] = &[0xA7, 0xA3, 0xF9, 0xC3, 0xA7, 0xA3, 0xFD, 0x02, 0xED];
+
+/// The tiny-pair patch (ESC EQL 11 "byeby" ESC INS "e"), as pinned in
+/// tests/roundtrip.rs (`PATCH_AB`) — used here to show `-d` handling leaves
+/// the diff itself untouched.
+const PATCH_AB_TINY: &[u8] = &[
+    0xA7, 0xA3, 0x0B, b'b', b'y', b'e', b'b', b'y', 0xA7, 0xA5, b'e',
+];
 
 /// DBGPRG (`-dprg`, `JDiff.cpp:145-148`): "Input " lines with the debug-width
 /// `P8zd` (= 10) positions; the C++ prints `lzPosOrg - 1`, so the first line
@@ -271,18 +286,36 @@ fn ahh_findahead_lines_ff() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
-/// DBGHSK (`-dhsk`) at 0.8.5: the hash moved from `JHashPos` into `JDiff`
-/// (`JDiff.cpp:361-371`) and the "Hash Key" trace site was dropped — the
-/// flag is accepted with **zero print sites** (spec §18.G/§21.13).
+/// DBGHSK (`-dhsk`) and DBGBKT (`-dbkt`) at 0.8.5: the hash moved from
+/// `JHashPos` into `JDiff` (`JDiff.cpp:361-371`) and the "Hash Key" trace
+/// site was dropped; the bucket/seek trace never existed at 0.8.5 — both
+/// flags are accepted with **zero print sites** (spec §18.G/§21.13).
 #[test]
-fn hsk_flag_is_silent() {
+fn dead_flags_hsk_bkt_are_silent() {
     let dir = temp_dir("hsk-tiny");
-    let (stdout, out) = run_dbg(&dir, ORG_A, NEW_B, &["-dhsk"], "hsk");
+    for (tag, flag) in [("hsk", "-dhsk"), ("bkt", "-dbkt")] {
+        let (stdout, out) = run_dbg(&dir, ORG_A, NEW_B, &[flag], tag);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(
+            stdout.is_empty(),
+            "{flag} has zero print sites at 0.8.5: {stdout:?}"
+        );
+    }
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Unknown `-d <name>` names are **silently ignored** (`main.cpp:446-472`:
+/// the strcmp chain simply matches nothing — there is no else arm), and the
+/// diff runs normally. Oracle-verified (`-d bogus` matches the C++ byte
+/// stream, empty debug output, exit 1).
+#[test]
+fn unknown_name_is_silently_ignored() {
+    let dir = temp_dir("d-bogus");
+    let (stdout, out) = run_dbg(&dir, ORG_A, NEW_B, &["-d", "bogus"], "bog");
     assert_eq!(out.status.code(), Some(1));
-    assert!(
-        stdout.is_empty(),
-        "-dhsk has zero print sites at 0.8.5: {stdout:?}"
-    );
+    assert!(stdout.is_empty(), "no output for an unknown name: {stdout:?}");
+    // The patch is the normal tiny-pair patch (the run is a plain diff).
+    assert_eq!(fs::read(dir.join("bogp.bin")).unwrap(), PATCH_AB_TINY);
     fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -343,6 +376,20 @@ fn mch_lines_big() {
         ),
         "exact Mch output"
     );
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// DBGMCH on the tiny pair (`JMatchTable.cpp:156`): the table is empty at the
+/// single mismatch (12), so getbest elects nothing and the debug stream is
+/// exactly the "Match Failure at" verdict line — the brief's new-format pin,
+/// oracle-verified (`target/oracle-dbg/jdiff -c -dmch` prints the same single
+/// line, exit 1).
+#[test]
+fn mch_match_failure_tiny() {
+    let dir = temp_dir("mch-tiny");
+    let (stdout, out) = run_dbg(&dir, ORG_A, NEW_B, &["-dmch"], "mchT");
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(stdout, "Match Failure at 12\n", "exact getbest failure line");
     fs::remove_dir_all(&dir).unwrap();
 }
 

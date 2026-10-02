@@ -1046,6 +1046,54 @@ mod tests {
         assert_eq!(f.seekcount(), 0);
     }
 
+    /// The always-on debug-build invariant asserts (`JFileAhead.cpp:240-251`,
+    /// `exit(-EXI_SEK)` → exit 6) hold at their exact boundaries: the oldest
+    /// buffered byte (`pos == mzPosInp - miBufUsd`, assert 2's lower bound),
+    /// the newest (`off == mlBufSze - 1`, assert 1's upper bound) and the
+    /// fully-wrapped ring all serve correct data without firing — the
+    /// property every other debug test implicitly relies on. The violation
+    /// sides are unreachable in the port (spec §21.3/§21.17): `get()` gates
+    /// negative positions to EOF before `getbuf` (the 0.8.5 mid-cursor −1
+    /// that trips the C++ debug `-t` assert can never form), and after
+    /// `get_fromfile` returns `Added` the position is buffered by
+    /// construction — the C++ prints (`"...out of bounds !"` /
+    /// `"...failed !"`) live in `getbuf_off`, documented there and pinned
+    /// shape-side only, since an in-process test cannot survive the C++'s
+    /// (and the port's) `exit(6)`.
+    #[cfg(feature = "debug")]
+    #[test]
+    fn debug_asserts_silent_at_invariant_boundaries() {
+        let mut f = JFileAhead::new(Cursor::new(data(256)), "Tst", 64, 16);
+        for i in 0..256 {
+            assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
+        }
+        // pos_inp = 256, buffer window [192, 256), ptr_inp wrapped to 0.
+        // Oldest buffered byte: assert 2's `pos < pos_inp - buf_usd` is an
+        // exact boundary (192 == 256 - 64) — must not fire.
+        let mut len: i64 = -999;
+        let run = f.getbuf(192, &mut len, ReadType::Read).expect("buffered");
+        assert_eq!(len, 64, "full window available from the oldest byte");
+        assert_eq!(run[0] as i32, pat(192));
+        // Newest buffered byte: off lands on buf_sze - 1 (assert 1's
+        // `off >= buf.len()` boundary).
+        let mut len: i64 = -999;
+        let run = f.getbuf(255, &mut len, ReadType::Read).expect("buffered");
+        assert_eq!(len, 1);
+        assert_eq!(run[0] as i32, pat(255));
+        // Mid-window byte across the ring seam (ptr_inp == 0): off wraps.
+        let mut len: i64 = -999;
+        let run = f.getbuf(224, &mut len, ReadType::Read).expect("buffered");
+        assert_eq!(len, 32);
+        assert_eq!(run[0] as i32, pat(224));
+        assert_eq!(run[31] as i32, pat(255));
+        // The EOF gate precedes the asserts: a negative position returns
+        // EOF (§21.17) rather than reaching the `pos < pos_inp - buf_usd`
+        // assert arm that the C++ debug build dies on (exit 6).
+        let mut len: i64 = -999;
+        assert!(f.getbuf(-1, &mut len, ReadType::Read).is_none());
+        assert_eq!(len, i64::from(EOF));
+    }
+
     /// Cursor whose `seek` fails after `ok` successful `SeekFrom::Start`
     /// seeks, like a `FILE*` whose `fseek` returns nonzero. End-seeks (the
     /// constructor's EOF probe) do not consume the budget — with `ok == 0`

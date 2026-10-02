@@ -99,7 +99,8 @@ pub fn dbg_set(idx: usize, val: bool) {
 }
 
 /// C `%c` with JojoDiff's printable-ASCII filter
-/// `(v >= 32 && v <= 127) ? v : ' '` (used by the DBGHSK/DBGCMP sites).
+/// `(v >= 32 && v <= 127) ? v : ' '` (used by the DBGCMP result site,
+/// `JMatchTable.cpp:857-864`).
 #[cfg(feature = "debug")]
 pub fn c_chr(v: i32) -> char {
     if (32..=127).contains(&v) {
