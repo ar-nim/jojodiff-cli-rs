@@ -4,13 +4,18 @@
 #
 # Since the 0.8.5 re-target (plan Task 13) the active oracle is built by
 # scripts/build-oracle.sh from reference/jojodiff-0.8.5; this script is kept
-# for regenerating the committed 0.8.1 goldens (scripts/gen-golden.sh) and for
-# 0.8.1-era comparisons.
+# for 0.8.1-era comparisons — notably the optional --compat-081 acceptance
+# gate (tests/oracle.rs, $JOJODIFF_ORACLE_081). The committed 0.8.1 goldens
+# (tests/fixtures/golden/) are frozen and never regenerated (there is no
+# gen-golden equivalent for them anymore).
+#
+# Writes to target/oracle081/ — NOT target/oracle/, which holds the 0.8.5
+# oracle the suite uses (gen-golden.sh, tests/oracle.rs).
 #
 # Copies the pristine vendored tree (reference/jojodiff-cpp) to target/oracle-src/,
-# applies exactly the three patches that make the Linux build the canonical
+# applies exactly the two patches that make the Linux build the canonical
 # verification build of the port (spec §2, §15.1, §15.12), compiles it and places
-# the binaries in target/oracle/{jdiff,jptch}.
+# the binaries in target/oracle081/{jdiff,jptch}.
 #
 # The applied patches (and nothing else):
 #   1. src/main.cpp: re-position both ifstreams after the pthread pre-read
@@ -31,7 +36,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/reference/jojodiff-cpp"
 DST="$ROOT/target/oracle-src"
-OUT="$ROOT/target/oracle"
+OUT="$ROOT/target/oracle081"
 
 for tool in g++ make python3; do
     if ! command -v "$tool" >/dev/null 2>&1; then
@@ -102,15 +107,23 @@ make -C "$DST" all
 mkdir -p "$OUT"
 cp "$DST/jdiff" "$DST/jptch" "$OUT/"
 
-# Sanity check: the §15.1 fix must yield a non-empty patch on the bundled
-# text pair (the stock unpatched Linux build emits a 0-byte patch here).
+# Sanity check (mirrors build-oracle.sh): the greeting must be the 0.8.1 one,
+# and the §15.1 fix must yield a non-empty patch on the bundled text pair
+# (the stock unpatched Linux build emits a 0-byte patch here).
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-"$OUT/jdiff" "$ROOT/tests/fixtures/test2.001.txt" \
-             "$ROOT/tests/fixtures/test2.002.txt" "$TMP/sanity.jdf" >/dev/null 2>&1 || true
+printf 'hello world hello' > "$TMP/a.bin"
+printf 'hello world byebye' > "$TMP/b.bin"
+"$OUT/jdiff" -v "$TMP/a.bin" "$TMP/b.bin" "$TMP/sanity.jdf" \
+    > "$TMP/sanity.out" 2>&1 || true
+if ! grep -Fq "0.8.1 (beta) December 2011" "$TMP/sanity.out"; then
+    echo "build-oracle: sanity check failed - '0.8.1 (beta) December 2011' missing from jdiff -v output:" >&2
+    cat "$TMP/sanity.out" >&2
+    exit 1
+fi
 if [ ! -s "$TMP/sanity.jdf" ]; then
     echo "build-oracle: sanity check failed - empty patch on text pair (§15.1 fix not effective?)" >&2
     exit 1
 fi
 
-echo "build-oracle: oracle ready at $OUT/jdiff and $OUT/jptch"
+echo "build-oracle: 0.8.1 oracle ready at $OUT/jdiff and $OUT/jptch (0.8.5 oracle stays at target/oracle)"
