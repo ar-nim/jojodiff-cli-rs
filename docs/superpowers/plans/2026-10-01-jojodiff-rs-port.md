@@ -4,8 +4,11 @@
 > version 0.8.1 (merged to main, CI green). The port is RE-TARGETED to JojoDiff 0.8.5
 > (upstream commit 66a2806, vendored at `reference/jojodiff-0.8.5/`): spec PART II
 > (`docs/superpowers/specs/2026-10-01-jojodiff-1to1-port-spec.md` §17–§22) is normative.
-> Tasks 13–22 below upgrade the existing implementation to 0.8.5 parity. Tasks 1–12 are
-> retained unchanged as the historical record of the 0.8.1 port.**
+> Tasks 13–22 upgrade the existing implementation to 0.8.5 parity; Task 23 adds a
+> port-only `--compat-081` flag so newly generated patches can also be produced in the
+> 0.8.1 format when compatibility with old 0.8.1-only patchers is needed (the patch
+> reader is 0.8.1-compatible either way). Tasks 1–12 are retained unchanged as the
+> historical record of the 0.8.1 port.**
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -15,7 +18,7 @@
 
 **Tech Stack:** Rust edition 2024 (MSRV 1.85, declared via `rust-version`), std-only (zero runtime dependencies). Dev-dependencies: `jojodiff` v0.1.2 (francisdb crate, cross-validation only), `pretty_assertions`. CI: GitHub Actions matrix ubuntu/windows/macos; oracle-compare job on ubuntu only.
 
-**Spec:** `docs/superpowers/specs/2026-10-01-jojodiff-1to1-port-spec.md` (functional inventory — every §number cited below is a section of that spec). The C++ tree is vendored pristine at `reference/jojodiff-cpp/` (Task 1); all `file:line` references point into it. **For Tasks 13–22:** spec PART II (§17–§22) is normative; the 0.8.5 tree is vendored at `reference/jojodiff-0.8.5/` and its `file:line` references point there; the verified change analysis is `docs/superpowers/research/2026-10-02-jojodiff-0.8.5-analysis.md`.
+**Spec:** `docs/superpowers/specs/2026-10-01-jojodiff-1to1-port-spec.md` (functional inventory — every §number cited below is a section of that spec). The C++ tree is vendored pristine at `reference/jojodiff-cpp/` (Task 1); all `file:line` references point into it. **For Tasks 13–23:** spec PART II (§17–§22) is normative; the 0.8.5 tree is vendored at `reference/jojodiff-0.8.5/` and its `file:line` references point there; the verified change analysis is `docs/superpowers/research/2026-10-02-jojodiff-0.8.5-analysis.md`.
 
 ## Global Constraints
 
@@ -26,7 +29,7 @@
 - Byte-exact compatibility targets: patch files, `-l`/`-lr` listings, greeting/help/verbose/error text, exit codes 0/1/2/3/4/5/6/7/8/9/10/20 (spec §2–§5). **0.8.5 re-target (Tasks 13–22):** patch files per spec §18.C (implicit MOD, MINEQL=2 — breaking vs 0.8.1), `-l` hex + `-r` listings (§18.F), all new greeting/help/stats text (§18.A/D/F), exit codes with **0/1 swapped** (identical→0, differences→1; §18.D).
 - Formatting convention: `P8zd` = `format!("{:>12}", v)` in release (default) builds; `{:>10}` when the `debug` feature is on (spec §14). (Unchanged at 0.8.5, now on `%zd`-style values — spec §18.A.)
 - Integer quirks are part of the contract: `-m`/`-a` compute `atoi(v)/2*1024` (integer division first); `-s` divides by 1024 while `> 1024`; `-min`/`-max` clamp to 256; hash ops wrap on `u32` (spec §2, §4.1). **0.8.5 re-target:** the option set changes wholesale (spec §18.D table is normative — `-a`×1024, `-i` MB floor 1, `-k` floor 4096, `-m` MB-total split, `-n` floor 0, `-x` floor 1024, multiplicative presets, `c_atoi` still C-semantics).
-- Deviations from C++ are only the seven documented in spec §15 (Linux fork bug, OpenMP, `-m 0` NUL fix, jptch stdin buffering, MinGW ifdefs collapsed, Ahead-impl unification, francisdb non-authoritative). **0.8.5 re-target:** deviations are the fifteen rulings of spec §21 (which also closes §15.1/2/3/10/11 as fixed upstream); §20 maps every 0.8.1 quirk's fate.
+- Deviations from C++ are only the seven documented in spec §15 (Linux fork bug, OpenMP, `-m 0` NUL fix, jptch stdin buffering, MinGW ifdefs collapsed, Ahead-impl unification, francisdb non-authoritative). **0.8.5 re-target:** deviations are the sixteen rulings of spec §21 (§21.1–15 port 0.8.5 behavior; §21.16 adds a port-only `--compat-081` output flag; §21 also closes §15.1/2/3/10/11 as fixed upstream); §20 maps every 0.8.1 quirk's fate.
 
 ## File Structure (final state)
 
@@ -77,7 +80,7 @@ jojodiff-cli-rs/
 
 Tasks 1–8 build the library bottom-up; 9–10 the CLIs; 11 the debug feature; 12 the oracle
 harness, goldens, CI and docs. Every task compiles and tests green before its commit.
-**Tasks 13–22 (spec Part II) re-target the completed 0.8.1 implementation to 0.8.5** —
+**Tasks 13–23 (spec Part II) re-target the completed 0.8.1 implementation to 0.8.5** —
 reference/jojodiff-0.8.5/ is vendored pristine (see `reference/PROVENANCE.md`), and
 `src/jfile/stdio.rs` (T14 note: the C++ stdio/istream adapters collapse into the single
 Rust `JFileAhead` over seekable-or-sequential I/O, spec §21.11 — no new file unless the
@@ -755,7 +758,7 @@ source of the algorithm, wire format, and test data.
 
 ---
 
-# PART II — Tasks 13–22: the 0.8.5 re-target (spec Part II)
+# PART II — Tasks 13–23: the 0.8.5 re-target (spec Part II) + compat extension
 
 **Transition rules (bind every task below):**
 
@@ -1036,6 +1039,51 @@ re-target with upstream changelog summary).
   cargo test --all-features` — all green; manual pipe/argv[0] smoke per §22.1.
 - [ ] **Step 3: Docs/CI/README. Commit** `test: 0.8.5 goldens, cross-version compatibility suite, CI and docs (re-target release)`
 
+### Task 23: `--compat-081` — 0.8.1-format patch output (port-only extension, spec §21.16)
+
+**Files:**
+- Modify: `src/jout/bin.rs` (writer policy), `src/cli/opts.rs` + `src/bin/jdiff.rs` (option, plumbing, README flag docs land in this task's README edit)
+- Test: inline in `src/jout/bin.rs`; extend `tests/roundtrip.rs`
+
+**Interfaces:**
+- `JOutBin` gains a compat switch (e.g. `JOutBin::new(out)` keeps 0.8.5 behavior; add
+  `pub fn with_compat_081(out, bool)` or an option on `new` — implementer's choice, document
+  in the module doc). Compat mode = byte-exact 0.8.1 writer policy: `opr_cur` seeds `ESC`
+  (not `MOD`), `put_opr` emits `ESC <opr>` unconditionally for every non-ESC operator
+  (0.8.1 `JOutBin.cpp:118-123`), EQL flush threshold `eql_cnt > 4` with `eql_buf[4]`
+  (0.8.1 `:162,214-216`). Everything else (length tiers, ESC escaping, `ESC ESC` flush,
+  stats counters) identical to 0.8.5 mode.
+- CLI: long-only option `--compat-081` added to `src/cli/opts.rs`'s option table (no short
+  letter — upstream's single-letter space is fully allocated). Diff-side: selects the
+  compat writer. Patch side (`jdiff -u`/`jptch`): accepted and ignored.
+- **Scope (binding):** format-level compatibility only. Engine match decisions stay 0.8.5 —
+  patch content still differs from what the 0.8.1 engine emits; byte-identity with the
+  0.8.1 engine is NOT a goal (the shipped 0.8.1 package covers that). Listings (`-l`/`-r`)
+  are unaffected. >4GiB lengths use the 9-byte tier, only readable by LARGEFILE-built 0.8.1
+  patchers — README documents this caveat.
+
+- [ ] **Step 1: Failing writer tests (RED):** the Task 18 op sequence that yields the
+  0.8.5 vector `a7 a3 18 "MODIFIED" a7 a3 0a "XYZ..."` yields, in compat mode, the 0.8.1
+  vector `a7 a3 18 a7 a6 "MODIFIED" a7 a3 0a a7 a6 "XYZ..."` (explicit `ESC MOD` after
+  EQL and at every run start after EQL/DEL/BKT); a 3-byte equal run after MOD stays MOD
+  data in compat mode (0.8.5 mode emits EQL); INS→MOD still switches opcode exactly once.
+- [ ] **Step 2: Failing structural test (RED):** port the implicit-MOD decoder walk as a
+  test helper (reuse the Task 19 JPatcht byte grammar); over a corpus of op sequences
+  (all fixtures × a few option sets), assert compat output has **zero** data runs outside
+  an explicit MOD/INS operator, and every corpus patch round-trips through JPatcht.
+- [ ] **Step 3: Failing CLI tests (RED):** `jdiff --compat-081 A B p` produces an
+  explicit-only patch that `jptch A p out` and `jdiff -u A p` both restore; option works
+  after filenames (GNU permutation); `jptch --compat-081 …` accepts-and-ignores (patch
+  still applies); optional oracle gate: if `$JOJODIFF_ORACLE_081` (0.8.1 oracle build)
+  is set, its `jptch` applies every `--compat-081` patch and restores exactly
+  (skip-if-absent, like the other oracle gates).
+- [ ] **Step 4: Implement** the writer switch + option; README: add `--compat-081` to the
+  option table and a "Patch format compatibility" paragraph (default output = 0.8.5
+  format, unreadable by 0.8.1-era patchers; reading side accepts both styles regardless;
+  `--compat-081` for old-patcher interop; 9-byte-length caveat).
+- [ ] **Step 5: `cargo test` (both feature modes) green. Commit**
+  `feat: --compat-081 flag emitting 0.8.1-format patches (port-only extension)`
+
 ---
 
 ## Coverage checklist (functionality → task)
@@ -1072,10 +1120,12 @@ re-target with upstream changelog summary).
 | CLI 0.8.5 (getopt_long surface, -u/-j/-t/-y, argv[0], stdin/sequential, exit swap, texts) | main.cpp | 20 |
 | Debug 0.8.5 (`-d <name>`, site census, dead flags, invariant asserts, Hash Dist) | all `#if debug` sites | 21 |
 | Goldens/cross-version/CI/README/release notes | Makefile, tst/*.sh | 22 |
+| `--compat-081` 0.8.1-format patch output (port-only extension, no upstream source — writer policy per spec §21.16) | 0.8.1 JOutBin.cpp:118-123,162,214-216 (reference/jojodiff-cpp) | 23 |
 
 No C++ file, CLI option, output byte, exit code, or documented behavior is left unassigned;
-the only behavioral deltas are the seven spec-§15 deviations (0.8.1) and the fifteen
-spec-§21 rulings (0.8.5), each deliberate and documented.
+the only behavioral deltas are the seven spec-§15 deviations (0.8.1) and the sixteen
+spec-§21 rulings (0.8.5, of which §21.16 is a port-only extension), each deliberate and
+documented.
 
 ## Context7 documentation audit (2026-10-01)
 
@@ -1107,7 +1157,7 @@ exempt (their exact sources are vendored/read).
 **Plan complete and saved to `docs/superpowers/plans/2026-10-01-jojodiff-rs-port.md` (spec: `docs/superpowers/specs/2026-10-01-jojodiff-1to1-port-spec.md`).**
 
 - **Tasks 1–12 (0.8.1): COMPLETE** — executed 2026-10-01 via subagent-driven development, merged to main, CI green; shipped as package version 0.8.1.
-- **Tasks 13–22 (0.8.5 re-target): PENDING** — execute with the same process; the same two options apply:
+- **Tasks 13–22 (0.8.5 re-target) and Task 23 (`--compat-081` port-only extension): PENDING** — execute with the same process; the same two options apply:
 
 **1. Subagent-Driven (recommended)** — fresh subagent per task, review between tasks, fast iteration.
 

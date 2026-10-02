@@ -827,6 +827,9 @@ liFun=Diff. Buffer normalization (`main.cpp:617-620`): `bufOrg = bufOrg>0 ? bufO
 | `-x <cnt>` | `mchMax = atoi`, floored 1024 (`main.cpp:440-444`) — **was `-max`**; `-x <13` quirk §21.15 |
 | `-d <flag>` | debug flag by **name**: `hsh ahd cmp prg buf hsk ahh bkt red mch dst`; unknown names silently ignored (`main.cpp:446-472`) |
 
+Port-only addition (ruling §21.16): the long-only option `--compat-081` requests 0.8.1-format
+patch output. It is not an upstream option; every option above is upstream 0.8.5.
+
 Removed 0.8.1 tokens: `-do -bs -min -max -lr -s <size> -m 0`-mode, and the 0.8.1
 "options must precede filenames" rule.
 
@@ -984,7 +987,7 @@ upstream option matrix informs §22's test matrix. The de-facto changelog is the
 | §12 Cross-platform | CHANGED mildly: `-` for any file incl. piped patch; MinGW → JDIFF_STDIO_ONLY auto; Rust collapses stdio/istream adapters (§21.11) | §18.D, §21.11 |
 | §13 Test corpus | CHANGED: 0.8.1 fixtures still used; matrix extended (presets, -p/-q/-s, pipes, -i/-k/-n/-x edges, cross-version) | §22 |
 | §14 Debug | CHANGED: `-d <name>` syntax; site list rewritten; dead flags; debug asserts | §18.G |
-| §15 Deviations | 5 FIXED / 4 CHANGED / 2 OBSOLETE / 1 UNCHANGED + 15 new rulings | §20/§21 |
+| §15 Deviations | 5 FIXED / 4 CHANGED / 2 OBSOLETE / 1 UNCHANGED + 16 new rulings (incl. the port-only `--compat-081` flag, §21.16) | §20/§21 |
 | §16 Gates | CHANGED: 0.8.5 oracle; byte-gate vs 0.8.5; cross-version 0.8.1→0.8.5; pipe/`-u` round-trips; swapped exits | §22 |
 
 ## 20. Quirk fate map (Part I §15.1–§15.12 at 0.8.5)
@@ -1068,6 +1071,19 @@ upstream option matrix informs §22's test matrix. The de-facto changelog is the
 15. **`miMchFre` initialized from the unclamped `-x` value** (`JMatchTable.cpp:85`):
     with `-x < 13` the free count is smaller than the table size — deterministic,
     ported exactly (0.8.1's §15-style quirk preservation).
+16. **`--compat-081` flag (port-only extension).** Not an upstream option. Long-only
+    (upstream's single-letter option space is fully allocated), meaningful on the diff
+    side; accepted and ignored when patching. Effect: `JOutBin` reverts to the exact
+    0.8.1 writer — `opr_cur` seeds `ESC`, every non-ESC operator emits `ESC <opr>`
+    unconditionally (0.8.1 `JOutBin.cpp:118-123`), EQL flush threshold `> 4` with a
+    4-byte buffer (`:162,214-216`) — so the emitted patch contains zero implicit-MOD
+    segments and any 0.8.1-era patcher can apply it. Scope: **format-level
+    compatibility only** — engine match decisions stay 0.8.5, so patch content still
+    differs from what the 0.8.1 engine would emit; byte-identity with the 0.8.1 engine
+    is not this flag's goal (that is what the shipped 0.8.1 package version is for).
+    Caveats documented in README: >4GiB EQL/DEL/BKT lengths use the 9-byte tier, which
+    only LARGEFILE-built 0.8.1 patchers accept (§21.7); listings (`-l`/`-r`) are
+    diagnostic formats, not applied by patchers, and are unaffected by the flag.
 
 ## 22. Acceptance gates (0.8.5 — supersede Part I §16)
 
@@ -1079,6 +1095,11 @@ upstream option matrix informs §22's test matrix. The de-facto changelog is the
    `-k 65565`, `-n 1 -x 2`, `-x 5` (miMchFre quirk), `-m 0`, `-m 7`, `-m 2048`, `-a 0`,
    `-a 1`, `-l`, `-r`, and pipe variants (`cat new | jdiff org -`, `cat org | jdiff -p -
    new`, `cat p | jptch org -`, `cat p | jdiff -u org -`, argv[0]=`jpatch` symlink).
+   Plus `--compat-081` (§21.16): its patches must contain zero implicit-MOD segments
+   (structural property, verified by a decoder walk in tests), must round-trip through
+   `jptch`/`jdiff -u`, and — where a 0.8.1 oracle is present (`JOJODIFF_ORACLE_081`,
+   optional skip-if-absent gate) — must apply and restore exactly under the 0.8.1
+   oracle's `jptch`.
 2. **Oracle byte-equality:** Rust output == 0.8.5-oracle output (patch bytes, `-l`/`-r`
    text, verbose/stats/greeting/usage streams) across the matrix; the oracle is built by
    `scripts/build-oracle.sh` per §21.7. Regenerate all goldens from the 0.8.5 oracle
