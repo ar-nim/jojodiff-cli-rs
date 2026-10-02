@@ -68,6 +68,17 @@ fn golden_dir() -> PathBuf {
     fixtures_dir().join("golden")
 }
 
+/// Copies the test binary into `dir` under the given argv[0] base name and
+/// returns the copy's path. The `.exe` suffix is appended on Windows
+/// (`std::env::consts::EXE_SUFFIX`): `CreateProcessW` would not find an
+/// extensionless image, while the dispatch only inspects the basename
+/// prefix (`jptch.exe` still starts with `jptch`, spec §21.2).
+fn copy_binary_as(dir: &Path, name: &str) -> PathBuf {
+    let exe = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    fs::copy(env!("CARGO_BIN_EXE_jdiff"), &exe).expect("copy binary");
+    exe
+}
+
 /// Runs a binary with `args`, retrying on `ETXTBSY`: a concurrently-running
 /// test's child may inherit the copy's still-open write handle at clone time
 /// (fd tables are copied at fork and `fs::copy` opens without `O_CLOEXEC`)
@@ -121,8 +132,7 @@ fn golden_081_patches_restore_exactly() {
 
     // The argv[0]=jptch copy of the single binary (spec §21.2).
     let (argv0_dir, _argv0_guard) = temp_dir("argv0");
-    let jptch = argv0_dir.join("jptch");
-    fs::copy(env!("CARGO_BIN_EXE_jdiff"), &jptch).expect("copy binary as jptch");
+    let jptch = copy_binary_as(&argv0_dir, "jptch");
 
     for (pair, patch) in &patches {
         let (_, org, new, _) = PAIRS.iter().find(|(p, ..)| p == pair).unwrap();
@@ -179,5 +189,20 @@ fn golden_081_patches_restore_exactly() {
                 new
             );
         }
+    }
+}
+
+/// The argv[0] copies carry a `.exe` suffix on Windows (CreateProcessW only
+/// finds `name.exe`, and the dispatch matches the basename prefix —
+/// [`copy_binary_as`]) and the plain name elsewhere.
+#[test]
+fn argv0_copy_name_matches_platform() {
+    let (dir, _guard) = temp_dir("suffix");
+    let exe = copy_binary_as(&dir, "jptch");
+    let name = exe.file_name().expect("copied file name").to_string_lossy();
+    if cfg!(windows) {
+        assert_eq!(name, "jptch.exe");
+    } else {
+        assert_eq!(name, "jptch");
     }
 }

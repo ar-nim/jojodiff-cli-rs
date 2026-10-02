@@ -221,7 +221,18 @@ fn stderr_str(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
-/// Spawns a copy of the binary made with [`fs::copy`], retrying on
+/// Copies the test binary into `dir` under the given argv[0] base name and
+/// returns the copy's path. The `.exe` suffix is appended on Windows
+/// (`std::env::consts::EXE_SUFFIX`): `CreateProcessW` would not find an
+/// extensionless image, while the dispatch only inspects the basename
+/// prefix (`jpatch.exe` still starts with `jpatch`, spec §21.2).
+fn copy_binary_as(dir: &Path, name: &str) -> PathBuf {
+    let exe = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    fs::copy(env!("CARGO_BIN_EXE_jdiff"), &exe).expect("copy binary");
+    exe
+}
+
+/// Spawns a copy of the binary made with [`copy_binary_as`], retrying on
 /// `ETXTBSY`: a concurrently-running test's child may inherit the copy's
 /// still-open write handle at clone time (fd tables are copied at fork and
 /// `fs::copy` opens without `O_CLOEXEC`) and keep it open through exec,
@@ -1306,32 +1317,41 @@ fn argv0_dispatch_jpatch_jptch_jdedup() {
     let b = write_file(&dir.join("b.bin"), NEW_B);
     let p = write_file(&dir.join("p.bin"), PATCH_AB);
 
-    let copy = |name: &str| {
-        let exe = dir.join(name);
-        fs::copy(env!("CARGO_BIN_EXE_jdiff"), &exe).expect("copy binary");
-        exe
-    };
-
-    for name in ["jpatch", "jptch"] {
-        let exe = copy(name);
+    for name in ["jpatch", "jptch", "jdedup", "jtst"] {
+        let exe = copy_binary_as(&dir, name);
         let outp = dir.join(format!("out-{name}.bin"));
-        let out = run_copied(&exe, &[a.as_os_str(), p.as_os_str(), outp.as_os_str()]);
-        assert_eq!(out.status.code(), Some(0), "{name}: {}", stderr_str(&out));
-        assert_eq!(
-            fs::read(&outp).unwrap(),
-            NEW_B,
-            "{name} must patch (argv[0] dispatch)"
-        );
-        assert!(out.stderr.is_empty(), "{name}: {:?}", stderr_str(&out));
+        if name.starts_with("jpatch") || name.starts_with("jptch") {
+            let out = run_copied(&exe, &[a.as_os_str(), p.as_os_str(), outp.as_os_str()]);
+            assert_eq!(out.status.code(), Some(0), "{name}: {}", stderr_str(&out));
+            assert_eq!(
+                fs::read(&outp).unwrap(),
+                NEW_B,
+                "{name} must patch (argv[0] dispatch)"
+            );
+            assert!(out.stderr.is_empty(), "{name}: {:?}", stderr_str(&out));
+        } else {
+            // jdedup/jtst routes are not ported: fall through to Diff
+            // (no crash).
+            let out = run_copied(&exe, &[a.as_os_str(), b.as_os_str(), outp.as_os_str()]);
+            assert_eq!(out.status.code(), Some(1), "{name} must diff");
+            assert_eq!(fs::read(&outp).unwrap(), PATCH_AB, "{name} diff output");
+        }
     }
+    fs::remove_dir_all(&dir).unwrap();
+}
 
-    // jdedup/jtst routes are not ported: fall through to Diff (no crash).
-    for name in ["jdedup", "jtst"] {
-        let exe = copy(name);
-        let outp = dir.join(format!("out-{name}.bin"));
-        let out = run_copied(&exe, &[a.as_os_str(), b.as_os_str(), outp.as_os_str()]);
-        assert_eq!(out.status.code(), Some(1), "{name} must diff");
-        assert_eq!(fs::read(&outp).unwrap(), PATCH_AB, "{name} diff output");
+/// The argv[0] copies carry a `.exe` suffix on Windows (CreateProcessW only
+/// finds `name.exe`, and the dispatch matches the basename prefix —
+/// [`copy_binary_as`]) and the plain name elsewhere.
+#[test]
+fn argv0_copy_name_matches_platform() {
+    let dir = temp_dir("argv0-suffix");
+    let exe = copy_binary_as(&dir, "jptch");
+    let name = exe.file_name().expect("copied file name").to_string_lossy();
+    if cfg!(windows) {
+        assert_eq!(name, "jptch.exe");
+    } else {
+        assert_eq!(name, "jptch");
     }
     fs::remove_dir_all(&dir).unwrap();
 }
@@ -1343,8 +1363,7 @@ fn argv0_jpatch_with_jflag_diffs() {
     let dir = temp_dir("argv0j");
     let a = write_file(&dir.join("a.bin"), ORG_A);
     let b = write_file(&dir.join("b.bin"), NEW_B);
-    let exe = dir.join("jpatch");
-    fs::copy(env!("CARGO_BIN_EXE_jdiff"), &exe).expect("copy binary");
+    let exe = copy_binary_as(&dir, "jpatch");
 
     let outp = dir.join("p.bin");
     let out = run_copied(
@@ -1850,8 +1869,7 @@ fn compat_081_diff_produces_explicit_patch() {
     assert_eq!(fs::read(&o1).unwrap(), NEW_B);
 
     // An argv[0]=`jptch` copy restores too (spec §21.2 dispatch).
-    let jptch = dir.join("jptch");
-    fs::copy(env!("CARGO_BIN_EXE_jdiff"), &jptch).expect("copy binary");
+    let jptch = copy_binary_as(&dir, "jptch");
     let o2 = dir.join("out2.bin");
     let prun = run_copied(&jptch, &[a.as_os_str(), patch.as_os_str(), o2.as_os_str()]);
     assert_eq!(prun.status.code(), Some(0), "{}", stderr_str(&prun));
@@ -1895,8 +1913,7 @@ fn compat_081_permutation_and_patch_side_ignored() {
     assert_eq!(fs::read(&o1).unwrap(), NEW_B);
 
     // … and under an argv[0]=`jpatch` copy.
-    let jpatch = dir.join("jpatch");
-    fs::copy(env!("CARGO_BIN_EXE_jdiff"), &jpatch).expect("copy binary");
+    let jpatch = copy_binary_as(&dir, "jpatch");
     let o2 = dir.join("out2.bin");
     let prun = run_copied(
         &jpatch,
