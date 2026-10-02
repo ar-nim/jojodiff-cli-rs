@@ -507,8 +507,8 @@ mod tests {
         // At col_max 8 the high-quality cadence is every other add: the
         // store reset refills col_cnt to 8, the next add decrements to
         // 4 (> 0, lost), the one after to 0 (stored). Keys 90000/90001
-        // land on buckets the loop above stored under other keys (1264/
-        // 1265) — the exact-key lookup still answers per the last store.
+        // land on buckets the loop above stored under other keys (2641/
+        // 2642) — the exact-key lookup still answers per the last store.
         let mut pos = 0i64;
         tbl.add(90000, 1, 0); // 8 - 4 = 4 > 0: lost
         assert!(!tbl.get(90000, &mut pos));

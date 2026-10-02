@@ -863,7 +863,8 @@ flows: `cat new | jdiff org - > p`; `cat org | jdiff -p - new`; `cat p | jdiff -
   amended from `/16` during the final review — see §21.18] →
   `getLowerPrime` (`JDefs.cpp:53-67`: switch returns 1021/33554393/16777213/8388593/
   134217689/536870909 for exact 1024/32M/16M/8M/128M/512M, else downward `isPrime`
-  search — default 32 MB → 2097152 elements → prime **2097143**). Collision counter
+  search — default 32 MB → 2796202 elements → prime **2796181** at the port's §21.18
+  divisor; stock LP64 C++ divides by 16 → 2097152 → 2097143). Collision counter
   counts **down** from `miHshColMax` (start 4), stores at `<=0`, resets to colMax; load
   counter counts down from prime, rollover does `colMax+=4; rlb+=4` (`:99-138`).
   Reliability seed `SMPSZE + SMPSZE/2` (= **48** at the port's SMPSZE=32; `:50`).
