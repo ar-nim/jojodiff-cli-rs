@@ -1173,9 +1173,14 @@ fn both_inputs_dash_exit_2() {
     assert!(out.stdout.is_empty());
 }
 
-/// `- a b` with a file-redirected stdin (seekable, like the C++ `cin` on a
-/// redirected file): normal random-access diff, patch identical to the file
-/// variant, exit 1, silent.
+/// `- a b` with a file-redirected stdin: normal random-access diff on Unix
+/// (`/dev/stdin` re-open is seekable, like the C++ `cin` on a redirected
+/// file) — patch identical to the file variant, exit 1, silent. On Windows
+/// there is no `/dev/stdin`, so the input falls back to the un-seekable
+/// stdin handle, chkSeq auto-assumes `-p` and the documented warning prints
+/// (README platform note); the patch then equals the explicit `-p` run —
+/// the same adjudication as [`pipe_source_auto_p_warning_and_roundtrip`]
+/// (bytes verified identical to the explicit `-p` output on the oracle).
 #[test]
 fn dash_reads_stdin_org() {
     let dir = temp_dir("dashorg");
@@ -1185,8 +1190,29 @@ fn dash_reads_stdin_org() {
 
     let out = run_stdin_file(&[OsStr::new("-"), b.as_os_str(), outp.as_os_str()], &a);
     assert_eq!(out.status.code(), Some(1), "{}", stderr_str(&out));
-    assert_eq!(fs::read(&outp).unwrap(), PATCH_AB);
-    assert!(stderr_str(&out).is_empty());
+    if cfg!(windows) {
+        assert_eq!(
+            stderr_str(&out),
+            "\nWarning: Source file is a sequential file, assuming -p.\n"
+        );
+        // Sequential (-p) semantics: bytes equal the explicit `-p` run.
+        let reff = dir.join("pref.bin");
+        let refo = run(&[
+            OsStr::new("-p"),
+            a.as_os_str(),
+            b.as_os_str(),
+            reff.as_os_str(),
+        ]);
+        assert_eq!(refo.status.code(), Some(1), "{}", stderr_str(&refo));
+        assert_eq!(
+            fs::read(&outp).unwrap(),
+            fs::read(&reff).unwrap(),
+            "stdin-org patch must equal the explicit -p patch"
+        );
+    } else {
+        assert!(stderr_str(&out).is_empty());
+        assert_eq!(fs::read(&outp).unwrap(), PATCH_AB);
+    }
     fs::remove_dir_all(&dir).unwrap();
 }
 
