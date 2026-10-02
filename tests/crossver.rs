@@ -30,8 +30,9 @@ const PAIRS: &[(&str, &str, &str, usize)] = &[
     ("test2", "test2.001.txt", "test2.002.txt", 12),
 ];
 
-/// Unique temp directory per test (parallel-safe), cleaned up by the caller.
-fn temp_dir(tag: &str) -> PathBuf {
+/// Unique temp directory per test (parallel-safe). The returned guard
+/// deletes the directory on drop, so a failed assertion cannot leak it.
+fn temp_dir(tag: &str) -> (PathBuf, DirGuard) {
     static N: AtomicU32 = AtomicU32::new(0);
     let dir = std::env::temp_dir().join(format!(
         "jdiff-t22-{}-{}-{}",
@@ -40,7 +41,21 @@ fn temp_dir(tag: &str) -> PathBuf {
         N.fetch_add(1, Ordering::Relaxed)
     ));
     fs::create_dir_all(&dir).expect("create temp dir");
-    dir
+    // Leak the path into a 'static allocation for the guard: every temp dir
+    // here is process-lifetime scratch anyway.
+    let leaked: &'static Path = Box::leak(Box::new(dir.clone()));
+    (dir, DirGuard(leaked))
+}
+
+/// Drops-in a `remove_dir_all` — assertion-failure cleanup for temp dirs
+/// (the explicit end-of-test cleanups elsewhere in the suite skip them when
+/// an assert fires first).
+struct DirGuard(&'static Path);
+
+impl Drop for DirGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(self.0);
+    }
 }
 
 fn fixtures_dir() -> PathBuf {
@@ -105,7 +120,7 @@ fn golden_081_patches_restore_exactly() {
     }
 
     // The argv[0]=jptch copy of the single binary (spec §21.2).
-    let argv0_dir = temp_dir("argv0");
+    let (argv0_dir, _argv0_guard) = temp_dir("argv0");
     let jptch = argv0_dir.join("jptch");
     fs::copy(env!("CARGO_BIN_EXE_jdiff"), &jptch).expect("copy binary as jptch");
 
@@ -124,7 +139,7 @@ fn golden_081_patches_restore_exactly() {
             ("-u", Path::new(env!("CARGO_BIN_EXE_jdiff")), false),
             ("argv0", jptch.as_path(), true),
         ] {
-            let dir = temp_dir(&format!("apply-{pair}-{mode}"));
+            let (dir, _guard) = temp_dir(&format!("apply-{pair}-{mode}"));
             let restored = dir.join("restored.bin");
             let out = if via_argv0 {
                 run_copied(exe, &[org.as_path(), patch.as_path(), restored.as_path()])
@@ -146,6 +161,11 @@ fn golden_081_patches_restore_exactly() {
                 String::from_utf8_lossy(&out.stderr)
             );
             assert!(
+                out.stdout.is_empty(),
+                "{mode}: applying {} must not write to stdout (the restore lands in the file)",
+                patch.display()
+            );
+            assert!(
                 out.stderr.is_empty(),
                 "{mode}: applying {} must be silent: {:?}",
                 patch.display(),
@@ -158,8 +178,6 @@ fn golden_081_patches_restore_exactly() {
                 patch.display(),
                 new
             );
-            fs::remove_dir_all(&dir).expect("clean temp dir");
         }
     }
-    fs::remove_dir_all(&argv0_dir).expect("clean temp dir");
 }
