@@ -221,11 +221,13 @@ fn real_main() -> i32 {
         print_greeting();
     }
 
-    /* Usage / exit on missing args or help (`main.cpp:346-387`) */
+    /* Usage / exit on missing args or help (`main.cpp:346-387`). The 0.8.5
+     * `EXI_*` codes are negative; `exit(-EXI_*)` yields the positive process
+     * exit code (here 2), like the C++. */
     if nargs < 3 || o.help || o.verbose > 2 {
         print_usage(o.mch_min, o.mch_max);
         if nargs < 3 || o.help {
-            exit(EXI_ARG);
+            exit(-EXI_ARG);
         }
     }
 
@@ -247,7 +249,7 @@ fn real_main() -> i32 {
                 "Could not open first file {} for reading.\n",
                 nam_org.to_string_lossy()
             ));
-            exit(EXI_FRT);
+            exit(-EXI_FRT);
         }
     };
 
@@ -259,7 +261,7 @@ fn real_main() -> i32 {
                 "Could not open second file {} for reading.\n",
                 nam_new.to_string_lossy()
             ));
-            exit(EXI_SCD);
+            exit(-EXI_SCD);
         }
     };
 
@@ -275,7 +277,7 @@ fn real_main() -> i32 {
                     "Could not open output file {} for writing.\n",
                     nam_out.to_string_lossy()
                 ));
-                exit(EXI_OUT);
+                exit(-EXI_OUT);
             }
         }
     };
@@ -403,33 +405,35 @@ fn real_main() -> i32 {
 
     /* Exit (`main.cpp:588-613`): engine error codes print their message
      * (WITHOUT trailing newline, like the C++ fprintf) and exit; otherwise
-     * 1 = no differences found, 0 = differences found. (Guards instead of
-     * negated const patterns: a bare `-EXI_SEK` pattern would parse the
-     * constant as a binding.) */
+     * 1 = no differences found, 0 = differences found. The 0.8.5 engine
+     * returns the raw negative `EXI_*` codes (`JFileAhead.h:115`), matched
+     * here by guard (a negated-const pattern would parse as a binding); the
+     * arms produce `-EXI_*`, the positive process exit code, exactly the
+     * C++ `case EXI_SEK: exit(-EXI_SEK)` mapping (main.cpp:894-928). */
     let code = match ret {
-        r if r == -EXI_SEK => {
+        r if r == EXI_SEK => {
             dbg_print(format_args!("Seek error !"));
-            EXI_SEK
+            -EXI_SEK
         }
-        r if r == -EXI_LRG => {
+        r if r == EXI_LRG => {
             dbg_print(format_args!("64-bit offsets not supported !"));
-            EXI_LRG
+            -EXI_LRG
         }
-        r if r == -EXI_RED => {
+        r if r == EXI_RED => {
             dbg_print(format_args!("Error reading file !"));
-            EXI_RED
+            -EXI_RED
         }
-        r if r == -EXI_WRI => {
+        r if r == EXI_WRI => {
             dbg_print(format_args!("Error writing file !"));
-            EXI_WRI
+            -EXI_WRI
         }
-        r if r == -EXI_MEM => {
+        r if r == EXI_MEM => {
             dbg_print(format_args!("Error allocating memory !"));
-            EXI_MEM
+            -EXI_MEM
         }
-        r if r == -EXI_ERR => {
+        r if r == EXI_ERR => {
             dbg_print(format_args!("Spurious error occured !"));
-            EXI_ERR
+            -EXI_ERR
         }
         _ if stats.dta == 0 && stats.del == 0 => 1, /* no differences found */
         _ => 0,                                     /* differences found */
@@ -496,7 +500,7 @@ fn read_whole(mut file: File) -> Vec<u8> {
     let mut data = Vec::new();
     if file.read_to_end(&mut data).is_err() {
         dbg_print(format_args!("Error reading file !"));
-        exit(EXI_RED);
+        exit(-EXI_RED);
     }
     data
 }

@@ -126,10 +126,11 @@ fn real_main() -> i32 {
         print_greeting();
     }
 
-    /* Usage / exit on missing args or help (`jpatch.cpp:359-376`) */
+    /* Usage / exit on missing args or help (`jpatch.cpp:359-376`); the 0.8.5
+     * `EXI_ARG` is negative, `exit(-EXI_ARG)` keeps the process code at 2. */
     if nargs < 3 || help {
         print_usage();
-        exit(EXI_ARG);
+        exit(-EXI_ARG);
     }
 
     /* Read filenames (`jpatch.cpp:379-384`); the indexes are in range because
@@ -154,7 +155,7 @@ fn real_main() -> i32 {
                     "Could not open data file {} for reading.\n",
                     nam_org.to_string_lossy()
                 ));
-                exit(EXI_FRT);
+                exit(-EXI_FRT);
             }
         }
     };
@@ -171,7 +172,7 @@ fn real_main() -> i32 {
                     "Could not open patch file {} for reading.\n",
                     nam_pch.to_string_lossy()
                 ));
-                exit(EXI_SCD);
+                exit(-EXI_SCD);
             }
         }
     };
@@ -186,7 +187,7 @@ fn real_main() -> i32 {
             Ok(file) => Sink::File(file),
             Err(_) => {
                 dbg_print(format_args!("Could not open output file for writing.\n"));
-                exit(EXI_OUT);
+                exit(-EXI_OUT);
             }
         }
     };
@@ -379,7 +380,8 @@ fn uf_get_int(stream: &mut dyn Read) -> i64 {
 }
 
 /// Checked-output failure (`jpatch.cpp:162-163` et al): flush the output like
-/// the C runtime's flush-on-exit, print to real stderr, exit with `code`.
+/// the C runtime's flush-on-exit, print to real stderr, exit with the
+/// positive process code `code` (the `-EXI_*` of a 0.8.5 constant).
 fn fail(out: &mut dyn Write, code: i32, message: &str) -> ! {
     let _ = out.flush();
     eprint!("{message}");
@@ -424,7 +426,7 @@ fn org_read(org: &mut dyn ReadSeek, buf: &mut [u8], org_pos: &mut i64) -> bool {
 /// advances by the full count (the C `ftello` includes buffered bytes).
 fn out_write(out: &mut dyn Write, buf: &[u8], out_pos: &mut i64) {
     if out.write_all(buf).is_err() {
-        fail(out, EXI_WRI, "Error writing output file.\n");
+        fail(out, -EXI_WRI, "Error writing output file.\n");
     }
     *out_pos += buf.len() as i64;
 }
@@ -520,7 +522,7 @@ fn jpatch(out: &mut dyn Write, mut org: Box<dyn ReadSeek>, pch: &mut dyn Read, v
                     if !org_seek(&mut org, lz_off.wrapping_add(lz_mod), &mut org_pos) {
                         fail(
                             out,
-                            EXI_SEK,
+                            -EXI_SEK,
                             &format!(
                                 "Could not position on original file (seek {} + {}).\n",
                                 lz_off, lz_mod
@@ -547,7 +549,7 @@ fn jpatch(out: &mut dyn Write, mut org: Box<dyn ReadSeek>, pch: &mut dyn Read, v
                         if !org_seek(&mut org, lz_mod, &mut org_pos) {
                             fail(
                                 out,
-                                EXI_SEK,
+                                -EXI_SEK,
                                 &format!(
                                     "Could not position on original file (skip {}).\n",
                                     lz_mod
@@ -559,14 +561,14 @@ fn jpatch(out: &mut dyn Write, mut org: Box<dyn ReadSeek>, pch: &mut dyn Read, v
                     let mut lz_cnt = lz_off;
                     while lz_cnt > BLKSZE as i64 {
                         if !org_read(&mut org, &mut lc_dta, &mut org_pos) {
-                            fail(out, EXI_RED, "Error reading original file.\n");
+                            fail(out, -EXI_RED, "Error reading original file.\n");
                         }
                         out_write(out, &lc_dta, &mut out_pos);
                         lz_cnt -= BLKSZE as i64;
                     }
                     if lz_cnt > 0 {
                         if !org_read(&mut org, &mut lc_dta[..lz_cnt as usize], &mut org_pos) {
-                            fail(out, EXI_RED, "Error reading original file.\n");
+                            fail(out, -EXI_RED, "Error reading original file.\n");
                         }
                         out_write(out, &lc_dta[..lz_cnt as usize], &mut out_pos);
                     }
@@ -588,7 +590,7 @@ fn jpatch(out: &mut dyn Write, mut org: Box<dyn ReadSeek>, pch: &mut dyn Read, v
                     if !org_seek(&mut org, lz_mod.wrapping_sub(lz_off), &mut org_pos) {
                         fail(
                             out,
-                            EXI_SEK,
+                            -EXI_SEK,
                             &format!(
                                 "Could not position on original file (seek back {} - {}).\n",
                                 lz_mod, lz_off

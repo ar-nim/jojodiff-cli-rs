@@ -126,11 +126,12 @@ impl<R: Read + Seek> JFileAhead<R> {
     }
 
     /// C `jfseek` + `fread` (JFileAhead.cpp:276-282): a failed seek yields the
-    /// `-EXI_SEK` sentinel, a failed read a short read.
+    /// `EXI_SEK` sentinel (a negative exit code at 0.8.5, `JFileAhead.h:115`
+    /// `SeekError = EXI_SEK`), a failed read a short read.
     fn read_chunk(&mut self, file_pos: i64, idx: usize, want: i64) -> Result<i64, i32> {
         // C `fseek` fails on negative offsets; `Cursor` would accept them.
         if file_pos < 0 || self.file.seek(SeekFrom::Start(file_pos as u64)).is_err() {
-            return Err(-EXI_SEK);
+            return Err(EXI_SEK);
         }
         self.read_cur(idx, want)
     }
@@ -356,7 +357,7 @@ impl<R: Read + Seek> JFileAhead<R> {
         };
         let done = match read {
             Ok(done) => done,
-            Err(sentinel) => return sentinel, // -EXI_SEK
+            Err(sentinel) => return sentinel, // EXI_SEK
         };
         if done < li_tdo {
             // End of file reached (JFileAhead.cpp:283-293). The C++ prints
@@ -414,7 +415,7 @@ impl<R: Read + Seek> JFileAhead<R> {
                         .seek(SeekFrom::Start(self.pos_inp as u64))
                         .is_err()
                     {
-                        return -EXI_SEK;
+                        return EXI_SEK;
                     }
                 }
             }
@@ -660,15 +661,15 @@ mod tests {
         assert_eq!(f.seekcount(), 2);
     }
 
-    /// Brief step-1 test: a failing `Seek` makes `get` return `-EXI_SEK`:
-    /// both for the very first repositioning read and for any later
+    /// Brief step-1 test: a failing `Seek` makes `get` return the `EXI_SEK`
+    /// sentinel: both for the very first repositioning read and for any later
     /// out-of-window read (each mode-1 reset performs exactly one seek).
     #[test]
-    fn seek_error_returns_neg_exi_sek() {
+    fn seek_error_returns_exi_sek() {
         // Every seek fails: append reads still work (no seek), resets fail.
         let mut f = JFileAhead::new(FlakySeek::failing(0), "Tst", 1024, 16);
         assert_eq!(f.get(0, ReadType::Read), pat(0));
-        assert_eq!(f.get(5000, ReadType::HardAhead), -EXI_SEK);
+        assert_eq!(f.get(5000, ReadType::HardAhead), EXI_SEK);
         // The first seek succeeds, further seeks fail: the near-before-window
         // read spends its single seek-&-reset seek (§15.8 bool collapse), the
         // next out-of-window read then fails on its own seek.
@@ -677,7 +678,7 @@ mod tests {
             assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
         }
         assert_eq!(f.get(70, ReadType::Read), pat(70));
-        assert_eq!(f.get(0, ReadType::Read), -EXI_SEK);
+        assert_eq!(f.get(0, ReadType::Read), EXI_SEK);
     }
 
     /// Cursor whose `seek` fails after `ok` successful seeks, like a `FILE*`

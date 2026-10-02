@@ -3,8 +3,10 @@
 # Generate the committed golden fixtures for tests/oracle.rs by running the
 # C++ reference oracle (spec §13 test corpus + option matrix, §16.2).
 #
-# Requires the oracle built by scripts/build-oracle.sh (either point
-# JOJODIFF_ORACLE at its directory or leave target/oracle in place).
+# Requires the LEGACY 0.8.1 oracle built by scripts/build-oracle-081.sh
+# (either point JOJODIFF_ORACLE at its directory or leave target/oracle in
+# place); since the 0.8.5 re-target (plan Task 13) the active oracle built by
+# scripts/build-oracle.sh has no jptch binary and produces 0.8.5 bytes.
 #
 # Goldens are written to tests/fixtures/golden/<pair>/<optset>.<ext>:
 #   <optset>.jdf         binary patch          (default,f,ff,b,s1,s32,bs512,
@@ -31,11 +33,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GOLDEN="$ROOT/tests/fixtures/golden"
 
-# Locate the oracle (env override, else the build-oracle.sh output location).
+# Locate the oracle (env override, else the build-oracle-081.sh output location).
 ORACLE_DIR="${JOJODIFF_ORACLE:-$ROOT/target/oracle}"
 JDIFF="$ORACLE_DIR/jdiff"
 if [ ! -x "$JDIFF" ] || [ ! -x "$ORACLE_DIR/jptch" ]; then
-    echo "gen-golden: oracle not found at $ORACLE_DIR - run scripts/build-oracle.sh first" >&2
+    echo "gen-golden: 0.8.1 oracle (jdiff + jptch) not found at $ORACLE_DIR - run scripts/build-oracle-081.sh first" >&2
     exit 1
 fi
 

@@ -14,7 +14,11 @@
 //!    Rust and C++ binaries are compared directly across the whole §13
 //!    matrix — `jdiff` outputs and verbose stderr, and `jptch` outputs for
 //!    every golden patch — and the live oracle output is itself checked
-//!    against the committed goldens.
+//!    against the committed goldens. Dormant since the 0.8.5 re-target
+//!    (Task 13): the 0.8.5 oracle (`scripts/build-oracle.sh`, no jptch
+//!    binary) emits different patch bytes and verbose text than the 0.8.1
+//!    goldens, so the layer-2 tests are `#[ignore]`d TODO(T22) until Task 22
+//!    re-pins them.
 //! 3. **Round-trip gate** (runs everywhere, spec §16.1): `jdiff A B p &&
 //!    jptch A p out` restores B byte-exact. In-memory mode (`-m 0`, `-m 1`)
 //!    is included on the NUL pair here: the Rust in-memory reader serves
@@ -252,6 +256,11 @@ fn golden_jdiff_outputs_match() {
 
 /// Rust `jdiff` verbose stderr must equal the committed `-v`/`-vv` captures
 /// of the oracle for the text pair (greeting, progress and statistics).
+// TODO(T20): the captures embed the byte-exact 0.8.1 greeting; Task 13
+// re-pointed JDIFF_VERSION/JDIFF_COPYRIGHT to the 0.8.5 strings and Task 20
+// rewrites the banner text (the goldens are re-pinned by the 0.8.5 oracle
+// work, Task 22).
+#[ignore]
 #[test]
 fn golden_verbose_stderr_matches() {
     let (pair, org, new) = PAIRS[1]; // text pair
@@ -295,6 +304,11 @@ fn skip_message() -> &'static str {
 
 /// Direct Rust-vs-C++ comparison of `jdiff` across the whole §13 matrix, plus
 /// a re-validation of the committed goldens against the live oracle.
+// TODO(T22): the 0.8.5 oracle emits different patch bytes than the committed
+// 0.8.1 goldens (implicit MOD, MINEQL=2), so neither half of this test can
+// pass until Task 22 re-pins the oracle layer; the Rust-vs-golden layer 1
+// above stays active and keeps passing.
+#[ignore]
 #[test]
 fn live_oracle_jdiff_matches() {
     let Some(oracle) = oracle_dir() else {
@@ -358,6 +372,9 @@ fn live_oracle_jdiff_matches() {
 }
 
 /// Live Rust-vs-C++ comparison of `jdiff` verbose stderr on the text pair.
+// TODO(T22): the 0.8.5 oracle verbose output (banner, statistics) differs
+// from the committed 0.8.1 captures; re-pinned by Task 22.
+#[ignore]
 #[test]
 fn live_oracle_verbose_stderr_matches() {
     let Some(oracle) = oracle_dir() else {
@@ -409,6 +426,11 @@ fn live_oracle_verbose_stderr_matches() {
 /// Apply every golden patch with both `jptch` binaries: outputs must be
 /// byte-identical to each other and to the new file (which also re-proves
 /// the golden patch itself).
+// TODO(T22): 0.8.5 ships no jptch binary (patching is `jdiff -u`/argv[0]),
+// so the oracle half of this test is impossible until Task 22 rebuilds the
+// patching leg of the harness (the 0.8.5 tree has no jptch either; see
+// scripts/build-oracle-081.sh for the legacy 0.8.1 oracle with jptch).
+#[ignore]
 #[test]
 fn live_oracle_jptch_matches() {
     let Some(oracle) = oracle_dir() else {

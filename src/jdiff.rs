@@ -852,14 +852,14 @@ mod tests {
         }
     }
 
-    /// Always-failing original file: every `get` returns `-EXI_RED`, like a
-    /// hard read error (`JFile` implementations may return negative EXI codes;
-    /// spec §6.2 step 8).
+    /// Always-failing original file: every `get` returns `EXI_RED` (a
+    /// negative exit code at 0.8.5), like a hard read error (`JFile`
+    /// implementations may return negative EXI codes; spec §6.2 step 8).
     struct FailingJFile;
 
     impl JFile for FailingJFile {
         fn get(&mut self, _pos: i64, _typ: ReadType) -> i32 {
-            -EXI_RED
+            EXI_RED
         }
 
         fn seekcount(&self) -> i64 {
@@ -1098,7 +1098,7 @@ mod tests {
     }
 
     /// Brief step-1 test: a read error on the original file propagates as
-    /// -EXI_RED. As in the C++ (where `bool lbFnd` swallows the negative
+    /// `EXI_RED`. As in the C++ (where `bool lbFnd` swallows the negative
     /// ufFndAhd return, see the module docs), the engine keeps running and
     /// drains the whole new file as INS operands carrying the failing org
     /// value (-8) before returning min(EOF, -8) = -8 (pinned against the C++
@@ -1112,12 +1112,12 @@ mod tests {
             Box::new(JFileMem::new(b"hello world\n".to_vec())),
             Box::new(rec),
         );
-        assert_eq!(jd.jdiff(), -EXI_RED);
+        assert_eq!(jd.jdiff(), EXI_RED);
         let new = b"hello world\n";
         let expected: Vec<(i32, i64, i32, i32)> = new
             .iter()
             .copied()
-            .map(|b| op(I, 1, -EXI_RED, i32::from(b)))
+            .map(|b| op(I, 1, EXI_RED, i32::from(b)))
             .chain([op(X, 0, 0, 0)])
             .collect();
         assert_eq!(ops.0.borrow().clone(), expected);
