@@ -754,14 +754,14 @@ Headline verdicts (all verified against the C++ source and live builds; details 
   in shipped builds — see §21.7), no pthread/OpenMP. Dead targets `jpatch`/`jpatcd`
   reference the deleted `jpatch.cpp`. Changing `DBG` without `make clean` silently mixes
   objects (§21.8).
-* **Port ruling (R2):** keep both Rust binaries. `jdiff` implements the full 0.8.5 CLI
-  including `-u`/`--undiff` and the argv[0]=`jpatch` alias. `jptch` remains as a packaging
-  extra: it behaves exactly like `jdiff` invoked with argv[0]=`jpatch` (same option
-  parser, function pre-forced to Patch, same exits). **The argv[0] match is extended
-  beyond upstream:** a basename starting `jptch` also routes to Patch (§21.2) — upstream
-  matches `jpatch` only (`strncasecmp(lcCmd, "jpatch", 6)`, `main.cpp:303-315`), under
-  which a `jptch`-named copy of the binary would silently run in Diff mode. `jdedup`/
-  `jtst` argv[0] routes are NOT ported (§21.3/§21.4).
+* **Port ruling (R2, amended 2026-10-02): ONE binary — upstream shape.** `jdiff`
+  implements the full 0.8.5 CLI including `-u`/`--undiff` and argv[0] dispatch: a
+  basename starting `jpatch` routes to Patch (upstream, `strncasecmp(lcCmd, "jpatch",
+  6)`, `main.cpp:303-315`), and — as a port extension — so does a basename starting
+  `jptch` (§21.2), so a symlink/hardlink/copy named `jptch` behaves exactly like
+  `jdiff -u`. There is **no separate `jptch` binary target** (supersedes the earlier
+  keep-both-binaries ruling; migration note in §21.2). `jdedup`/`jtst` argv[0] routes
+  are NOT ported (§21.3/§21.4).
 
 ### 18.C Wire format (supersedes Part I §3)
 
@@ -1016,14 +1016,19 @@ upstream option matrix informs §22's test matrix. The de-facto changelog is the
    (§18.C). The decoder accepts both 0.8.1-style explicit and 0.8.5 implicit patches
    (one-way compatibility, verified). Release notes must flag: patches produced by this
    port ≥0.8.5 are NOT applicable by 0.8.1-era patchers.
-2. **`jptch` binary retained; `jdiff -u` + argv[0]=`jpatch`/`jptch` added (R2).** Upstream
-   ships one binary; keeping `jptch` is this project's packaging choice (Part I §5's `jptch`
-   CLI is superseded: `jptch` now parses the full 0.8.5 option grammar with the function
-   pre-forced to Patch). The argv[0] dispatch additionally accepts a basename starting
-   `jptch` as Patch — upstream matches `jpatch` only (`main.cpp:303-315`), so without this
-   extension a `jptch`-named copy of `jdiff` would default to Diff; it exists so existing
-   0.8.1-era scripts keep working against any copy of the binary (user ruling, 2026-10-02).
-   The `jdedup` and `jtst` argv[0] routes are not ported.
+2. **One binary; `jptch`/`jpatch` are argv[0] aliases, not separate binaries (R2,
+   amended 2026-10-02).** Upstream ships one binary and so does the port — the earlier
+   keep-both-binaries ruling is superseded (user ruling: a second bin target for one
+   3-line entry is needless structure; argv[0] already does the job). Dispatch: basename
+   starting `jpatch` → Patch (upstream, `main.cpp:303-315`), plus basename starting
+   `jptch` → Patch (**port extension**: upstream matches `jpatch` only, so without it a
+   `jptch`-named copy would default to Diff). Consequence, documented in README: after
+   `cargo install` only `jdiff` exists — existing `jptch` scripts migrate with a one-time
+   `ln -s jdiff jptch` (or a shell alias, or calling `jdiff -u`), and any stale `jptch`
+   binary left in `~/.cargo/bin` by the 0.8.1 package install should be removed or
+   replaced by that link (a leftover 0.8.1 `jptch` would silently keep 0.8.1 semantics,
+   including dropping implicit-MOD bytes). The `jdedup` and `jtst` argv[0] routes are
+   not ported.
 3. **`-t`/`--test` ported faithfully although broken upstream.** Release semantics:
    after diffing, JPatcht is fed the **destination** file as the patch, appending
    misparsed data to the already-written patch output (observed: 283-byte corrupt output,
@@ -1095,25 +1100,26 @@ upstream option matrix informs §22's test matrix. The de-facto changelog is the
 ## 22. Acceptance gates (0.8.5 — supersede Part I §16)
 
 1. **Round-trip:** for every fixture pair × every option set in the matrix below:
-   `jdiff OPTS A B p && jptch A p out && cmp B out` (and the `-u`/argv[0] equivalents).
+   `jdiff OPTS A B p && jdiff -u A p out && cmp B out` (plus copies of the binary named
+   `jpatch`/`jptch` — the argv[0] equivalents).
    Exit codes per §18.D (identical→0 with 3-byte `ESC EQL len` patch; empty/empty→0
    byte-empty patch; trailing-org-data→0; differences→1). Matrix: default, `-b`, `-bb`,
    `-f`, `-ff`, `-p`, `-q`, `-p -q`, `-s`, `-i 1`, `-i 8`, `-i 512`, `-k 0`, `-k 1`,
    `-k 65565`, `-n 1 -x 2`, `-x 5` (miMchFre quirk), `-m 0`, `-m 7`, `-m 2048`, `-a 0`,
    `-a 1`, `-l`, `-r`, and pipe variants (`cat new | jdiff org -`, `cat org | jdiff -p -
-   new`, `cat p | jptch org -`, `cat p | jdiff -u org -`, argv[0]=`jpatch` and
-   argv[0]=`jptch` symlinks).
+   new`, `cat p | jdiff -u org -`, copies of the binary named `jpatch` and `jptch`).
    Plus `--compat-081` (§21.16): its patches must contain zero implicit-MOD segments
    (structural property, verified by a decoder walk in tests), must round-trip through
-   `jptch`/`jdiff -u`, and — where a 0.8.1 oracle is present (`JOJODIFF_ORACLE_081`,
+   `jdiff -u`, and — where a 0.8.1 oracle is present (`JOJODIFF_ORACLE_081`,
    optional skip-if-absent gate) — must apply and restore exactly under the 0.8.1
-   oracle's `jptch`.
+   oracle's `jptch` (the C++ 0.8.1 oracle binary).
 2. **Oracle byte-equality:** Rust output == 0.8.5-oracle output (patch bytes, `-l`/`-r`
    text, verbose/stats/greeting/usage streams) across the matrix; the oracle is built by
    `scripts/build-oracle.sh` per §21.7. Regenerate all goldens from the 0.8.5 oracle
    (superseding the 0.8.1 goldens; regenerate, don't mix).
 3. **Cross-version compatibility:** every 0.8.1 golden patch applies with the new
-   `jptch`/`jdiff -u` and restores exactly (one-way gate, §18.C). The reverse is
+   `jdiff -u` (and argv[0]=`jptch` copies of the binary) and restores exactly (one-way
+   gate, §18.C). The reverse is
    expected to fail and is asserted **not** to corrupt silently in the Rust 0.8.1
    jptch (historical binary) — no gate on C++ 0.8.1 patchers.
 4. **Exit codes & messages:** every EXI path per §18.D incl. both-inputs-`-` (exit 2),

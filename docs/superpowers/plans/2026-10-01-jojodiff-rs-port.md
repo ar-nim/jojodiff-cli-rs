@@ -4,8 +4,10 @@
 > version 0.8.1 (merged to main, CI green). The port is RE-TARGETED to JojoDiff 0.8.5
 > (upstream commit 66a2806, vendored at `reference/jojodiff-0.8.5/`): spec PART II
 > (`docs/superpowers/specs/2026-10-01-jojodiff-1to1-port-spec.md` §17–§22) is normative.
-> Tasks 13–22 upgrade the existing implementation to 0.8.5 parity; Task 23 adds a
-> port-only `--compat-081` flag so newly generated patches can also be produced in the
+> Tasks 13–22 upgrade the existing implementation to 0.8.5 parity (single `jdiff`
+> binary from Task 20 on — `jpatch`/`jptch` become argv[0] aliases, spec §21.2); Task 23
+> adds a port-only `--compat-081`
+> flag so newly generated patches can also be produced in the
 > 0.8.1 format when compatibility with old 0.8.1-only patchers is needed (the patch
 > reader is 0.8.1-compatible either way). Tasks 1–12 are retained unchanged as the
 > historical record of the 0.8.1 port.**
@@ -25,7 +27,7 @@
 - License: **GPL-3.0** (the C++ original is GPLv3; the port is a derivative).
 - Runtime dependencies: **none** (std only, no `unsafe`).
 - Toolchain: edition **2024**, `rust-version = "1.85"`. The planned code uses no edition-2024-affected features (no `unsafe`, no `static mut`, no FFI, no RPITs), so the edition is a defaults/future-proofing choice only; dropping to 2021 later would be a one-line change with zero code impact. Edition 2024 defaults Cargo to `resolver = "3"` (MSRV-aware dependency resolution, needs Rust 1.84+) — with a std-only runtime this only affects dev-dependency selection, which is desirable. [Cargo Book, verified via Context7]
-- Package/repo name: **`jojodiff-cli-rs`** (verified free on crates.io 2026-10-01; the bare `jojodiff` is taken by the francisdb library and `jojodiff-rs` collides with that project's GitHub repo — both rejected deliberately). Library target name: `jojodiff_cli_rs` (avoids lib-name collision with the `jojodiff` cross-validation dev-dependency). Binary names: `jdiff`, `jptch`. **Non-affiliation must be stated explicitly** in the crates.io description, the repo About box, and a README "Relationship to other projects" section (see Task 12 Step 5): independent port of Joris Heirbaut's original JojoDiff; not affiliated with or derived from the `jojodiff` crate / `francisdb/jojodiff-rs` (used only as an optional cross-validation consumer in tests). Version string in help output is fixed: `0.8.1 (beta) December 2011` (**0.8.5 re-target:** `0.8.5 (beta) 2020`, copyright `Copyright (C) 2002-2020 Joris Heirbaut`, package version 0.8.5 — spec §18.A).
+- Package/repo name: **`jojodiff-cli-rs`** (verified free on crates.io 2026-10-01; the bare `jojodiff` is taken by the francisdb library and `jojodiff-rs` collides with that project's GitHub repo — both rejected deliberately). Library target name: `jojodiff_cli_rs` (avoids lib-name collision with the `jojodiff` cross-validation dev-dependency). Binary names: `jdiff`, `jptch` (**0.8.5 re-target:** single `jdiff` from Task 20 on — the `jptch` bin target is removed; the `jpatch`/`jptch` names dispatch to Patch via argv[0] when the binary is linked/copied under them, spec §21.2). **Non-affiliation must be stated explicitly** in the crates.io description, the repo About box, and a README "Relationship to other projects" section (see Task 12 Step 5): independent port of Joris Heirbaut's original JojoDiff; not affiliated with or derived from the `jojodiff` crate / `francisdb/jojodiff-rs` (used only as an optional cross-validation consumer in tests). Version string in help output is fixed: `0.8.1 (beta) December 2011` (**0.8.5 re-target:** `0.8.5 (beta) 2020`, copyright `Copyright (C) 2002-2020 Joris Heirbaut`, package version 0.8.5 — spec §18.A).
 - Byte-exact compatibility targets: patch files, `-l`/`-lr` listings, greeting/help/verbose/error text, exit codes 0/1/2/3/4/5/6/7/8/9/10/20 (spec §2–§5). **0.8.5 re-target (Tasks 13–22):** patch files per spec §18.C (implicit MOD, MINEQL=2 — breaking vs 0.8.1), `-l` hex + `-r` listings (§18.F), all new greeting/help/stats text (§18.A/D/F), exit codes with **0/1 swapped** (identical→0, differences→1; §18.D).
 - Formatting convention: `P8zd` = `format!("{:>12}", v)` in release (default) builds; `{:>10}` when the `debug` feature is on (spec §14). (Unchanged at 0.8.5, now on `%zd`-style values — spec §18.A.)
 - Integer quirks are part of the contract: `-m`/`-a` compute `atoi(v)/2*1024` (integer division first); `-s` divides by 1024 while `> 1024`; `-min`/`-max` clamp to 256; hash ops wrap on `u32` (spec §2, §4.1). **0.8.5 re-target:** the option set changes wholesale (spec §18.D table is normative — `-a`×1024, `-i` MB floor 1, `-k` floor 4096, `-m` MB-total split, `-n` floor 0, `-x` floor 1024, multiplicative presets, `c_atoi` still C-semantics).
@@ -35,7 +37,7 @@
 
 ```
 jojodiff-cli-rs/
-├── Cargo.toml                  # lib + [[bin]] jdiff + [[bin]] jptch; feature "debug"
+├── Cargo.toml                  # lib + [[bin]] jdiff (jptch bin removed in T20); feature "debug"
 ├── LICENSE                     # GPL-3.0
 ├── README.md
 ├── .gitignore                  # /target
@@ -66,8 +68,8 @@ jojodiff-cli-rs/
 │   ├── jpatcht.rs              # JPatcht patch applier (T19, 0.8.5)
 │   ├── jfileout.rs             # JFileOut patch-phase writer (T19, 0.8.5)
 │   └── bin/
-│       ├── jdiff.rs            # jdiff CLI (T9, rewritten T20: getopt_long, -u, argv[0])
-│       └── jptch.rs            # jptch CLI ≡ jdiff forced-Patch (T10, re-pointed T20)
+│       └── jdiff.rs            # THE single CLI binary (T9; rewritten T20: getopt_long,
+│                                # -u, argv[0]; jptch.rs REMOVED in T20 — upstream shape)
 └── tests/
     ├── fixtures/
     │   ├── bkocomu.0000.fil / bkocomu.0009.fil / test2.001.txt / test2.002.txt
@@ -960,14 +962,14 @@ patches (compatibility — spec §22.3 vectors from `tests/fixtures/golden/`).
   Task 18's writer); applies a 0.8.1 golden patch and restores exactly; `ESC ESC` /
   `ESC <unknown>` at sequence start → MOD data; truncated-length EOF semantics; warning
   line on trailing byte; verbose traces byte-exact.
-- [ ] **Step 2: Implement.** `jptch`/`jdiff -u` wiring is Task 20 — this task is the
+- [ ] **Step 2: Implement.** `-u`/argv[0] wiring is Task 20 — this task is the
   library.
 - [ ] **Step 3: Green. Commit** `feat: JPatcht patch applier and JFileOut (port of JPatcht.cpp/JFileOut.cpp)`
 
 ### Task 20: CLI rewrite — getopt_long surface, `-u`, argv[0], sequential/stdin, exits
 
 **Files:**
-- Rewrite: `src/bin/jdiff.rs`; re-point: `src/bin/jptch.rs`; Create: `src/cli/opts.rs` (std-only getopt_long-equivalent: short string `a:bcd:fhi:jk:lm:n:pqrst::uvx:y`, long table from `main.cpp:238-261`, GNU permutation, `--`, `?`→help-and-continue, missing-arg `-d`→exit 2)
+- Rewrite: `src/bin/jdiff.rs`; **Remove: `src/bin/jptch.rs` and its `[[bin]]` entry** (single-binary upstream shape — spec §21.2); Create: `src/cli/opts.rs` (std-only getopt_long-equivalent: short string `a:bcd:fhi:jk:lm:n:pqrst::uvx:y`, long table from `main.cpp:238-261`, GNU permutation, `--`, `?`→help-and-continue, missing-arg `-d`→exit 2)
 - Modify: `Cargo.toml` if adding the module path
 - Test: `tests/roundtrip.rs` (major update)
 
@@ -982,14 +984,17 @@ pre-run echo + post-run stats blocks per §18.F; **exit swap** (identical→0,
 differences→1 via `out.dta > 0`) and `exit(-EXI_*)` error paths with exact messages;
 `-t` faithful (release: JPatcht fed the destination after diff — corrupt mixed output,
 exit per stats; debug feature: getbuf assert → exit 6 — spec §21.3); `-y` → exit 20
-(spec §21.4). `jptch` = same parser, function pre-forced to Patch (packaging extra).
+(spec §21.4). **No second binary** (spec §21.2): `jpatch`/`jptch` are argv[0] aliases of
+the one `jdiff` binary — tests exercise them by copying `$CARGO_BIN_EXE_jdiff` to those
+names in a temp dir.
 
 - [ ] **Step 1: Failing tests (rewrite roundtrip CLI tests to spec §22.1 matrix):** exit
   swap both ways; `-Z a b c` prints help then diffs (exit 1); `-h a b c` help + diff;
   `- a b` (stdin org) and both-`-` (exit 2); pipe flows (source pipe → `-p` warning +
-  round-trip; dest pipe → `-q` warning; `cat p | jdiff -u org -`); argv[0] `jpatch`
-  symlink applies patches, and a `jptch` symlink does too (port extension, spec §21.2 —
-  upstream's `jpatch`-only match would leave it in Diff mode); `-m 0`/`-m 7`/`-m 2048` echo lines; `-i 1`, `-k 0` clamp;
+  round-trip; dest pipe → `-q` warning; `cat p | jdiff -u org -`); copies of the binary
+  named `jpatch` and `jptch` (temp-dir `cp $CARGO_BIN_EXE_jdiff`, argv[0]) both apply
+  patches (`jptch` match is the port extension, spec §21.2 — upstream's `jpatch`-only
+  rule would leave it in Diff mode); `-m 0`/`-m 7`/`-m 2048` echo lines; `-i 1`, `-k 0` clamp;
   `-x 5` runs; `-vv` stats block byte-exact vs the 0.8.5 oracle capture; `-t` release
   output shape; `-y` exit 20; usage text contains `disbale` and `(in KB)` verbatim.
 - [ ] **Step 2: Implement.** Copy all literal strings from the vendored `main.cpp` —
@@ -1026,11 +1031,15 @@ it; this task is the print sites + flag plumbing).
 **Interfaces (spec §22):** `gen-golden.sh` regenerates from the 0.8.5 oracle into
 `golden85/` (never overwrites `golden/`); `oracle.rs` byte-compares against `golden85`
 across the full §22.1 matrix (live-oracle path identical); `crossver.rs` applies every
-`golden/` (0.8.1) patch with the new `jptch` and `jdiff -u` and asserts exact restore;
+`golden/` (0.8.1) patch with `jdiff -u` and with an argv[0]=`jptch` copy of the binary,
+asserting exact restore;
 CI oracle job builds the 0.8.5 oracle (Task 13 script); README: 0.8.5 usage/option
 table, **breaking wire-format note** (patches from ≥0.8.5 unreadable by 0.8.1-era
 patchers; 0.8.1 patches still apply), `-u`/argv[0] patch modes (`jpatch` upstream,
-`jptch` port extension), `-t` upstream-broken
+`jptch` port extension), **migration note: the `jptch` binary is gone — one-time
+`ln -s jdiff jptch` (or shell alias / `jdiff -u`); remove the stale `jptch` left in
+`~/.cargo/bin` by the 0.8.1 install, which would otherwise silently keep 0.8.1
+patch-drop semantics**, `-t` upstream-broken
 note, updated deviations (spec §20/§21), version-history section (0.8.1 → 0.8.5
 re-target with upstream changelog summary).
 
@@ -1057,7 +1066,8 @@ re-target with upstream changelog summary).
   stats counters) identical to 0.8.5 mode.
 - CLI: long-only option `--compat-081` added to `src/cli/opts.rs`'s option table (no short
   letter — upstream's single-letter space is fully allocated). Diff-side: selects the
-  compat writer. Patch side (`jdiff -u`/`jptch`): accepted and ignored.
+  compat writer. Patch side (`jdiff -u`, incl. argv[0]=`jptch`/`jpatch` copies): accepted
+  and ignored.
 - **Scope (binding):** format-level compatibility only. Engine match decisions stay 0.8.5 —
   patch content still differs from what the 0.8.1 engine emits; byte-identity with the
   0.8.1 engine is NOT a goal (the shipped 0.8.1 package covers that). Listings (`-l`/`-r`)
@@ -1074,11 +1084,12 @@ re-target with upstream changelog summary).
   (all fixtures × a few option sets), assert compat output has **zero** data runs outside
   an explicit MOD/INS operator, and every corpus patch round-trips through JPatcht.
 - [ ] **Step 3: Failing CLI tests (RED):** `jdiff --compat-081 A B p` produces an
-  explicit-only patch that `jptch A p out` and `jdiff -u A p` both restore; option works
-  after filenames (GNU permutation); `jptch --compat-081 …` accepts-and-ignores (patch
-  still applies); optional oracle gate: if `$JOJODIFF_ORACLE_081` (0.8.1 oracle build)
-  is set, its `jptch` applies every `--compat-081` patch and restores exactly
-  (skip-if-absent, like the other oracle gates).
+  explicit-only patch that `jdiff -u A p` (and an argv[0]=`jptch` copy of the binary)
+  restores; option works
+  after filenames (GNU permutation); `--compat-081` on the patch side accepts-and-ignores
+  (patch still applies); optional oracle gate: if `$JOJODIFF_ORACLE_081` (0.8.1 oracle build)
+  is set, its `jptch` (C++ 0.8.1 oracle binary) applies every `--compat-081` patch and
+  restores exactly (skip-if-absent, like the other oracle gates).
 - [ ] **Step 4: Implement** the writer switch + option; README: add `--compat-081` to the
   option table and a "Patch format compatibility" paragraph (default output = 0.8.5
   format, unreadable by 0.8.1-era patchers; reading side accepts both styles regardless;
