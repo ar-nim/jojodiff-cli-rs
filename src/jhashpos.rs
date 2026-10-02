@@ -7,15 +7,16 @@
 //! when the down-counting collision counter reaches 0, and `get` is an
 //! exact-key match at `key % prime` — there is no probing.
 //!
-//! # Constructor sizing (0.8.5)
+//! # Constructor sizing (0.8.5, spec §21.18)
 //!
 //! The 0.8.5 constructor takes the size in **MB** (`JHashPos.cpp:48-61`,
 //! `main.cpp:283` default 32) and converts it to an element count with the
-//! stock LP64 element size `sizeof(hkey) + sizeof(off_t) = 16` (spec §18.E:
-//! default 32 MB → `32*1024*1024/16 = 2097152` elements → prime 2097143 via
-//! [`crate::defs::get_lower_prime`]). The size in bytes (`miHshSze`) stays
-//! the port's actual element footprint `prime * 12` (hkey u32 + off_t i64;
-//! the 32-bit-hkey oracle build's accounting, Part I §4.4).
+//! port variant's element size `sizeof(hkey) + sizeof(off_t) = 4 + 8 = 12`
+//! (u32 hkey, §2/§15.12; spec §21.18 amended the earlier stock-LP64 `/16`
+//! ruling during the final review): default 32 MB → `32*1024*1024/12 =
+//! 2796202` elements → prime 2796181 via [`crate::defs::get_lower_prime`] —
+//! the same table the 32-bit-hkey oracle build and the acceptance tests use.
+//! The size in bytes (`miHshSze`) is that same footprint `prime * 12`.
 //!
 //! # Zero-init deviation (spec §21.5)
 //!
@@ -51,7 +52,7 @@
 //! ```
 //! use jojodiff_cli_rs::jhashpos::JHashPos;
 //!
-//! let mut tbl = JHashPos::new(1); // 1 MB: 65536 elements -> prime 65521
+//! let mut tbl = JHashPos::new(1); // 1 MB: 87381 elements -> prime 87359
 //! let mut key = 0u32;
 //! let mut old = -1i32;
 //! let mut eql = 0i32;
@@ -114,12 +115,12 @@ impl JHashPos {
     /// Create a new hash-table with a size (in **MB**) not larger than the
     /// given size (`JHashPos.cpp:48-82`).
     ///
-    /// The MB count converts to an element count with the stock LP64 element
-    /// size 16 — `mb * 1024 * 1024 / 16` (`JHashPos.cpp:58-59` divides by
-    /// `sizeof(hkey) + sizeof(off_t)`; spec §18.E: default 32 MB → 2097152
-    /// elements) — and the actual prime is the nearest lower prime
-    /// ([`get_lower_prime`], `JDefs.cpp:53-67`). `aiSze < 1` behaves like 1
-    /// (`JHashPos.cpp:54-57`).
+    /// The MB count converts to an element count with the port variant's
+    /// element size 12 — `mb * 1024 * 1024 / 12` (`JHashPos.cpp:58-59`
+    /// divides by `sizeof(hkey) + sizeof(off_t)`; u32 hkey + i64 off_t, spec
+    /// §21.18: default 32 MB → 2796202 elements) — and the actual prime is
+    /// the nearest lower prime ([`get_lower_prime`], `JDefs.cpp:53-67`).
+    /// `aiSze < 1` behaves like 1 (`JHashPos.cpp:54-57`).
     ///
     /// Initial state (`JHashPos.cpp:49-50,68`): `col_max = col_cnt =
     /// COLLISION_THRESHOLD` (4), reliability seed `SMPSZE + SMPSZE/2` (48 at
@@ -131,7 +132,7 @@ impl JHashPos {
     pub fn new(mb: i32) -> Self {
         /* get largest prime < elements (JHashPos.cpp:53-61) */
         let sze: i64 = if mb < 1 { 1 } else { i64::from(mb) };
-        let elements = (sze * 1024 * 1024 / 16).min(i64::from(i32::MAX)) as i32;
+        let elements = (sze * 1024 * 1024 / 12).min(i64::from(i32::MAX)) as i32;
         let prime = get_lower_prime(elements);
 
         // miHshSze = prime * (sizeof(off_t) + sizeof(hkey)) on the port's
@@ -402,25 +403,27 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    /// MB ctor → elements `mb*1024*1024/16` → [`get_lower_prime`] (spec
-    /// §18.E, `JHashPos.cpp:53-61` with the stock LP64 element size
-    /// `sizeof(hkey)+sizeof(off_t) = 16`); `aiSze < 1` behaves like 1
+    /// MB ctor → elements `mb*1024*1024/12` → [`get_lower_prime`] (spec
+    /// §21.18: `JHashPos.cpp:53-61` with the port variant's element size
+    /// `sizeof(hkey)+sizeof(off_t) = 4+8 = 12`); `aiSze < 1` behaves like 1
     /// (`JHashPos.cpp:54-57`).
     #[test]
     fn prime_selection_mb_ctor() {
-        assert_eq!(JHashPos::new(32).hash_prime(), 2097143); // 0.8.5 default MB
-        assert_eq!(JHashPos::new(8).hash_prime(), 524287); // current CLI default
-        assert_eq!(JHashPos::new(2).hash_prime(), 131071);
-        assert_eq!(JHashPos::new(1).hash_prime(), 65521); // floor at mb >= 1
-        assert_eq!(JHashPos::new(0).hash_prime(), 65521); // aiSze < 1 -> 1 MB
-        assert_eq!(JHashPos::new(-3).hash_prime(), 65521);
-        // Element counts landing on get_lower_prime's switch cases
-        // (`JDefs.cpp:55-60`): 128 MB -> 8M elements, 256 MB -> 16M.
-        assert_eq!(JHashPos::new(128).hash_prime(), 8388593);
-        assert_eq!(JHashPos::new(256).hash_prime(), 16777213);
+        assert_eq!(JHashPos::new(32).hash_prime(), 2796181); // 0.8.5 default MB
+        assert_eq!(JHashPos::new(8).hash_prime(), 699037);
+        assert_eq!(JHashPos::new(2).hash_prime(), 174761);
+        assert_eq!(JHashPos::new(1).hash_prime(), 87359); // floor at mb >= 1
+        assert_eq!(JHashPos::new(0).hash_prime(), 87359); // aiSze < 1 -> 1 MB
+        assert_eq!(JHashPos::new(-3).hash_prime(), 87359);
+        // Element counts on get_lower_prime's default branch (downward
+        // search): 128 MB -> 11184810 elements, 256 MB -> 22369621. (The
+        // exact switch cases need MB multiples of 12 — 384 MB → 32M elements
+        // etc. — too large to allocate here.)
+        assert_eq!(JHashPos::new(128).hash_prime(), 11184799);
+        assert_eq!(JHashPos::new(256).hash_prime(), 22369601);
         // Size in bytes stays prime * 12 (port hkey u32 + off_t i64).
-        assert_eq!(JHashPos::new(32).hash_size_bytes(), 25165716);
-        assert_eq!(JHashPos::new(8).hash_size_bytes(), 6291444);
+        assert_eq!(JHashPos::new(32).hash_size_bytes(), 33554172);
+        assert_eq!(JHashPos::new(8).hash_size_bytes(), 8388444);
     }
 
     /// The table is zero-initialized (spec §21.5 deviation: 0.8.5 `malloc`s
@@ -448,10 +451,10 @@ mod tests {
         assert!(tbl.get(10, &mut pos));
         assert_eq!(pos, 100);
 
-        // Overwrite semantics on the same bucket (65531 % 65521 == 10): the
+        // Overwrite semantics on the same bucket (87369 % 87359 == 10): the
         // exact-key lookup answers the new key only.
-        tbl.add(65531, 200, 0);
-        assert!(tbl.get(65531, &mut pos));
+        tbl.add(87369, 200, 0);
+        assert!(tbl.get(87369, &mut pos));
         assert_eq!(pos, 200);
         assert!(!tbl.get(10, &mut pos)); // key 10 was overwritten
 
@@ -487,28 +490,30 @@ mod tests {
         assert_eq!(tbl.reliability(), SMPSZE + SMPSZE / 2); // seed 48
         assert_eq!(tbl.hash_colmax(), 4);
 
-        // The first 65521 adds (prime 65521) take load_cnt down to 0 without
+        // The first 87359 adds (prime 87359) take load_cnt down to 0 without
         // rolling over.
-        for i in 0..65521u32 {
+        for i in 0..87359u32 {
             tbl.add(i, i64::from(i), 0);
         }
         assert_eq!(tbl.hash_colmax(), 4);
         assert_eq!(tbl.reliability(), 48);
 
-        // The 65522nd add finds load_cnt 0: resets it to the prime and does
+        // The 87360th add finds load_cnt 0: resets it to the prime and does
         // col_max += 4, rlb += 4.
-        tbl.add(65521, 65521, 0);
+        tbl.add(87359, 87359, 0);
         assert_eq!(tbl.hash_colmax(), 8);
         assert_eq!(tbl.reliability(), 52);
 
         // At col_max 8 the high-quality cadence is every other add: the
         // store reset refills col_cnt to 8, the next add decrements to
-        // 4 (> 0, lost), the one after to 0 (stored).
+        // 4 (> 0, lost), the one after to 0 (stored). Keys 90000/90001
+        // land on buckets the loop above stored under other keys (1264/
+        // 1265) — the exact-key lookup still answers per the last store.
         let mut pos = 0i64;
-        tbl.add(70000, 1, 0); // 8 - 4 = 4 > 0: lost
-        assert!(!tbl.get(70000, &mut pos));
-        tbl.add(70001, 2, 0); // 4 - 4 = 0: stored
-        assert!(tbl.get(70001, &mut pos));
+        tbl.add(90000, 1, 0); // 8 - 4 = 4 > 0: lost
+        assert!(!tbl.get(90000, &mut pos));
+        tbl.add(90001, 2, 0); // 4 - 4 = 0: stored
+        assert!(tbl.get(90001, &mut pos));
         assert_eq!(pos, 2);
     }
 
@@ -517,7 +522,7 @@ mod tests {
     /// overwritten and absent keys.
     #[test]
     fn add_then_get_roundtrip_and_hits() {
-        const PRIME: u32 = 65521;
+        const PRIME: u32 = 87359;
         let mut tbl = JHashPos::new(1);
         let mut pos = -1i64;
 
@@ -559,7 +564,7 @@ mod tests {
         // 0.8.5 oracle (`JHashPos.cpp:99-138`): col_cnt starts at col_max 4,
         // every high-quality add decrements to 0 and stores, resetting
         // col_cnt to col_max; with 1000 adds there is no load rollover
-        // (prime 65521), so every add stores into bucket key % prime.
+        // (prime 87359), so every add stores into bucket key % prime.
         let mut oracle_key = [0u32; PRIME as usize];
         let mut oracle_pos = [0i64; PRIME as usize];
         for &(k, wp) in &keys {

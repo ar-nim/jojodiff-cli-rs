@@ -18,32 +18,12 @@
 #   <optset>.rgn         -r region listing
 #   <optset>.vv.stderr   jdiff -vv stderr    (patch sets)
 #
-# Index-table mapping (spec §18.E/§21.7; Task 17 verification): the port's
-# fixed 16-byte element divisor vs the 32-bit-hkey oracle's 12 means the SAME
-# table needs 3/4 the MB on the oracle (`-i 6` oracle ≡ `-i 8` port ≡ prime
-# 524287). Every matrix set is therefore captured with an appended `-i`
-# override that makes the oracle's table element-equal to the port's table
-# for that set, so the committed golden is exactly what the port must print
-# for the set's own option values:
-#     default/-p/-q/-p -q/-s/-k*/-n 1 -x 2/-x 5/-m*/-a*   -> oracle -i 24
-#                                                            (port default 32)
-#     -b -> -i 96    -bb -> -i 384    -f -> -i 12    -ff -> -i 6
-#     -i 8 -> -i 6   -i 512 -> -i 384
-# At element-equal tables the engines agree byte-for-byte on both corpus
-# pairs (patches, listings and the whole -vv stream except one line, see
-# below) — verified per set when this script runs (it diffs nothing; the
-# byte-gate lives in tests/oracle.rs).
-#
-# The one exception is `-i 1`: the port's 1 MB table is 65536 elements
-# (prime 65521), which no oracle `-i` can reproduce (0.75 MB is below the
-# 1 MB floor). test2/-i 1 is captured at identical option values — test2 is
-# index-insensitive in this range, so the patch bytes still match the port
-# (pinned by the committed golden); its -vv stream can NOT match (the echo
-# and stats lines print each side's own table: 65521 vs 87359 samples), so
-# no verbose capture is committed for -i 1. bkocomu/-i 1 is not committed at
-# all: port and oracle legitimately diverge there (different tables);
-# byte-equality for that cell is covered live on the tiny pair and by
-# round-trip/exit-parity on the corpus (tests/oracle.rs layer 2).
+# Index tables (spec §21.18): port and oracle build IDENTICAL tables at the
+# same `-i` (12 bytes/element on both sides — the u32-hkey variant), so every
+# matrix set is captured at un-overridden option values and the committed
+# golden is exactly what the port must print for that set. (An earlier
+# revision carried a port-/16-vs-oracle-/12 mismatch and an element-equal
+# `-i` remap here; retired with §21.18.)
 #
 # Deliberate restrictions:
 #   * bkocomu/l.asc (the ASCII listing of the binary pair, ~80 MB) is NOT
@@ -74,21 +54,33 @@ if [ ! -x "$JDIFF" ]; then
     exit 1
 fi
 
+# Sanity: the binary must be the 0.8.5 oracle (mirrors build-oracle.sh's
+# check — gen-golden must never capture from the wrong binary).
+SANITY_DIR="$(mktemp -d)"
+trap 'rm -rf "$SANITY_DIR"' EXIT
+printf 'hello world hello' > "$SANITY_DIR/a.bin"
+printf 'hello world byebye' > "$SANITY_DIR/b.bin"
+"$JDIFF" -v "$SANITY_DIR/a.bin" "$SANITY_DIR/b.bin" "$SANITY_DIR/s.jdf" \
+    > "$SANITY_DIR/sanity.out" 2>&1 || true
+for want in "0.8.5 (beta) 2020" "samples are 32 bytes"; do
+    if ! grep -Fq "$want" "$SANITY_DIR/sanity.out"; then
+        echo "gen-golden: sanity check failed - '$want' missing from $JDIFF -v output:" >&2
+        cat "$SANITY_DIR/sanity.out" >&2
+        exit 1
+    fi
+done
+rm -rf "$SANITY_DIR"
+trap - EXIT
+
 # The §22.1 matrix minus the pipe-only variants (name | jdiff options |
-# output extension | element-equal oracle -i override). -l/-r produce
-# listings; the rest produce binary patches. --compat-081 (§21.16) is a
-# Task 23 addition and not part of this matrix.
+# output extension). -l/-r produce listings; the rest produce binary patches.
+# --compat-081 (§21.16) is a Task 23 addition and not part of this matrix.
 OPTSET_NAMES=(default b bb f ff p q pq s i1 i8 i512 k0 k1 k65565 n1x2 x5 m0 m7 m2048 a0 a1 l r)
 OPTSET_ARGS=("" "-b" "-bb" "-f" "-ff" "-p" "-q" "-p -q" "-s" \
              "-i 1" "-i 8" "-i 512" "-k 0" "-k 1" "-k 65565" \
              "-n 1 -x 2" "-x 5" "-m 0" "-m 7" "-m 2048" "-a 0" "-a 1" \
              "-l" "-r")
 OPTSET_EXTS=(jdf jdf jdf jdf jdf jdf jdf jdf jdf jdf jdf jdf jdf jdf jdf jdf jdf jdf jdf jdf jdf jdf asc rgn)
-# Element-equal table sizes: port MB * 3/4 (spec §18.E divisor 16 vs
-# oracle divisor 12). Empty = capture at identical values (-i 1 case).
-OPTSET_MAP=("-i 24" "-i 96" "-i 384" "-i 12" "-i 6" "-i 24" "-i 24" "-i 24" "-i 24" \
-            "" "-i 6" "-i 384" "-i 24" "-i 24" "-i 24" "-i 24" "-i 24" "-i 24" "-i 24" "-i 24" "-i 24" "-i 24" \
-            "-i 24" "-i 24")
 
 # Corpus pairs: name | original | new.
 PAIR_NAMES=(bkocomu test2)
@@ -101,13 +93,13 @@ mask_inaccurate() { # <infile> <outfile>
     sed 's/^Inaccurate  solutions   = .*/Inaccurate  solutions   = (masked)/' "$1" > "$2"
 }
 
-gen_one() { # <org> <new> <outdir> <optset-name> <opts> <ext> <map>
-    local org="$1" new="$2" outdir="$3" name="$4" opts="$5" ext="$6" map="$7"
+gen_one() { # <org> <new> <outdir> <optset-name> <opts> <ext>
+    local org="$1" new="$2" outdir="$3" name="$4" opts="$5" ext="$6"
     mkdir -p "$outdir"
     # jdiff exits 1 on differing pairs (0.8.5 exit swap) — tolerated; an
     # empty output is not.
     # shellcheck disable=SC2086  # word splitting of the option list is intended
-    "$JDIFF" $opts $map "$ROOT/tests/fixtures/$org" "$ROOT/tests/fixtures/$new" \
+    "$JDIFF" $opts "$ROOT/tests/fixtures/$org" "$ROOT/tests/fixtures/$new" \
         "$outdir/$name.$ext" || [ $? -eq 1 ]
     if [ ! -s "$outdir/$name.$ext" ]; then
         echo "gen-golden: empty output for $outdir/$name (differing pairs must produce output)" >&2
@@ -122,12 +114,6 @@ for i in "${!PAIR_NAMES[@]}"; do
     pair="${PAIR_NAMES[$i]}"
     for j in "${!OPTSET_NAMES[@]}"; do
         name="${OPTSET_NAMES[$j]}"
-        # -i 1 has no element-equal oracle table (see header): capture the
-        # text pair at identical values, skip the binary pair entirely.
-        if [ "$name" = "i1" ] && [ "$pair" = "bkocomu" ]; then
-            echo "  bkocomu/i1.jdf skipped (no oracle table equivalent; live coverage)"
-            continue
-        fi
         # Skip the ~80 MB ASCII listing of the binary pair (live-oracle
         # coverage only, see header comment).
         if [ "$pair" = "bkocomu" ] && [ "${OPTSET_EXTS[$j]}" = "asc" ]; then
@@ -135,26 +121,20 @@ for i in "${!PAIR_NAMES[@]}"; do
             continue
         fi
         gen_one "${PAIR_ORGS[$i]}" "${PAIR_NEW[$i]}" "$GOLDEN/$pair" \
-            "$name" "${OPTSET_ARGS[$j]}" "${OPTSET_EXTS[$j]}" "${OPTSET_MAP[$j]}"
+            "$name" "${OPTSET_ARGS[$j]}" "${OPTSET_EXTS[$j]}"
     done
 done
 
 # Verbose stderr captures: both pairs, every patch-producing option set.
 # Only stderr is captured (the byte counts in the statistics do not depend
 # on the output stream); the "Inaccurate  solutions" line is masked (header).
-# -i 1 has no verbose capture for either pair (header: each side's echo and
-# stats lines print its own index table).
 for i in "${!PAIR_NAMES[@]}"; do
     pair="${PAIR_NAMES[$i]}"
     for j in "${!OPTSET_NAMES[@]}"; do
         [ "${OPTSET_EXTS[$j]}" = "jdf" ] || continue # skip listings (-l/-r)
         name="${OPTSET_NAMES[$j]}"
-        if [ "$name" = "i1" ]; then
-            echo "  $pair/i1.vv.stderr skipped (echo/stats print each side's own table; header)"
-            continue
-        fi
         # shellcheck disable=SC2086
-        "$JDIFF" -vv ${OPTSET_ARGS[$j]} ${OPTSET_MAP[$j]} \
+        "$JDIFF" -vv ${OPTSET_ARGS[$j]} \
             "$ROOT/tests/fixtures/${PAIR_ORGS[$i]}" \
             "$ROOT/tests/fixtures/${PAIR_NEW[$i]}" /dev/null \
             2> "$GOLDEN/$pair/$name.vv.raw" || [ $? -eq 1 ]

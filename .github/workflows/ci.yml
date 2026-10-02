@@ -27,8 +27,8 @@ jobs:
     # build-oracle.sh applies the spec §21.7 hkey patch and makes
     # JDIFF_LARGEFILE live) and byte-compares the Rust tools against it
     # across the spec §22.1 matrix (tests/oracle.rs layer 2: patches,
-    # verbose stderr, cross-applies, -i equivalence and the corpus-pair
-    # listings). The committed golden85 layer (tests/oracle.rs layer 1) and
+    # verbose stderr, cross-applies and the corpus-pair listings). The
+    # committed golden85 layer (tests/oracle.rs layer 1) and
     # the cross-version 0.8.1 gate (tests/crossver.rs, §22.3) run everywhere
     # in the matrix job above without the oracle.
     runs-on: ubuntu-latest

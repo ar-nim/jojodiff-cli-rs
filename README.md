@@ -230,9 +230,10 @@ user-visible ones:
 - **Deterministic counters (§21.5/§21.6):** the C++ leaves the index-hit/repair and
   inaccurate-solution counters uninitialized (its verbose output prints garbage that
   changes between runs); the port zero-initializes them and prints the real counts.
-- **Index-table divisor (§18.E/§21.7):** the port keeps the stock-LP64 16-byte element
-  size, so the same `-i <MB>` builds a smaller table than the 32-bit-`hkey` oracle
-  build; the gates compare at element-equal sizes (`-i 8` port ≡ `-i 6` oracle).
+- **Index-table divisor (§21.18):** the index table is sized at 12 bytes per element
+  (`sizeof(u32 hkey) + sizeof(i64 off_t)`), the same divisor as the 32-bit-`hkey`
+  oracle build — the port is a coherent port of that variant, so the same `-i <MB>`
+  selects the identical table on both sides.
 - **Single binary (§21.2):** `jpatch`/`jptch` argv[0] routes replace the removed
   `jpatch.cpp`/`jptch` binaries; `jptch` matching is the port extension.
 - **Not ported (compiled out upstream):** dedup (`-y`/`--dedup` exits 20 instead of

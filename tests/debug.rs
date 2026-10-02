@@ -326,12 +326,12 @@ fn unknown_name_is_silently_ignored() {
 /// and the per-store "Hash Add" lines (`JHashPos.cpp:127-132`), where the
 /// final `%c` is `.` for an empty bucket and `!` for an override.
 ///
-/// 0.8.5 MB sizing (spec §18.E): the run pins the CLI default-equivalent
-/// element count via `-i 8` (8*1024*1024/16 = 524288 elements → prime
-/// 524287, size in bytes prime*12 = 6291444) — element-count-equivalent to
-/// the 32-bit-hkey debug oracle's `-i 6` (6*1024*1024/12), re-verified
-/// byte-for-byte today ("Hash Ini sizeof= 4+ 8=12, 524287 samples,
-/// 6291444 bytes" and first store "Hash Add   117956         31 c8d9b3a9 .").
+/// 0.8.5 MB sizing (spec §21.18): the run pins the `-i 8` table
+/// (8*1024*1024/12 = 699050 elements → prime 699037, size in bytes
+/// prime*12 = 8388444) — the same table the 32-bit-hkey debug oracle
+/// builds at `-i 8` since the divisor ruling, re-verified byte-for-byte
+/// today ("Hash Ini sizeof= 4+ 8=12, 699037 samples, 8388444 bytes" and
+/// first store "Hash Add   352165         31 c8d9b3a9 .").
 #[test]
 fn hsh_ini_and_add_lines_big() {
     let dir = temp_dir("hsh-big");
@@ -341,12 +341,12 @@ fn hsh_ini_and_add_lines_big() {
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 970, "Ini + 969 stores: {stdout:?}");
     assert!(
-        lines[0].starts_with("Hash Ini sizeof= 4+ 8=12, 524287 samples, 6291444 bytes, address=0x")
+        lines[0].starts_with("Hash Ini sizeof= 4+ 8=12, 699037 samples, 8388444 bytes, address=0x")
             && lines[0].ends_with("."),
         "Ini line: {stdout:?}"
     );
     assert_eq!(
-        lines[1], "Hash Add   117956         31 c8d9b3a9 .",
+        lines[1], "Hash Add   352165         31 c8d9b3a9 .",
         "first store line"
     );
     fs::remove_dir_all(&dir).unwrap();

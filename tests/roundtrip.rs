@@ -7,11 +7,11 @@
 //! C++ oracle built by `scripts/build-oracle.sh` (`target/oracle/jdiff`):
 //! greetings, usage (including the stale "-i 64"/"-k 8192"/"(in KB)"/
 //! "0=no buffering"/"disbale" texts, spec §21.10), the getopt error lines
-//! (glibc format), progress/statistics blocks and patch bytes. Two values are
-//! port-vs-oracle deviations with spec-pinned port values (see the -vv test):
-//! the hash-table divisor (§18.E: port /16 vs the 32-bit-hkey oracle /12) and
+//! (glibc format), progress/statistics blocks and patch bytes. One value is a
+//! port-vs-oracle deviation with a spec-pinned port value (see the -vv test):
 //! the 0-initialized `Inaccurate solutions` baseline (§21.6: C++ stack
-//! garbage).
+//! garbage). The index tables are element-identical on both sides (§21.18:
+//! 12 bytes/element everywhere).
 //!
 //! The tests spawn the real binary (`env!("CARGO_BIN_EXE_jdiff")`) and capture
 //! stdout/stderr via `Command::output()`. argv[0] dispatch is exercised by
@@ -509,14 +509,14 @@ fn greeting_matches_reference() {
 
 /// `jdiff -vv` on the tiny pair: additionally the pre-run echo and the
 /// verbose>1 statistics blocks, ending with the "Not all data …" verdict
-/// (`main.cpp:823-869`; oracle capture with the two documented port
-/// deviations applied):
+/// (`main.cpp:823-869`; oracle capture with the one documented port
+/// deviation applied):
 ///
-/// 1. "Index table size" prints the PORT's table (spec §18.E: the port's
-///    fixed element size 16 yields 2097152 elements → prime 2097143 →
-///    24Mb; the 32-bit-hkey oracle prints 32Mb/2796181 from its /12
-///    divisor). The 1:1 main.cpp formula prints whatever table the port
-///    built — port value pinned.
+/// 1. "Index table size" prints the port's table — the same prime the
+///    32-bit-hkey oracle prints since the §21.18 divisor ruling (default
+///    32 MB → 2796181 samples; before it, the port's /16 table printed
+///    24Mb/2097143). The 1:1 main.cpp formula prints whatever table the
+///    port built — port value pinned, oracle-identical.
 /// 2. "Inaccurate  solutions" prints 0: the C++ never initializes the
 ///    counter (stack garbage, oracle printed 908602116 here) and the port
 ///    deterministically 0-initializes it (spec §21.6).
@@ -543,7 +543,7 @@ fn stats_lines_match_reference() {
         "File adressing is 64 bit for files up to 8388607TB, samples are 32 bytes.\n",
         "\nUse -h for additional help and usage description.\n",
         "\n",
-        "Index table size (default: 64Mb) (-s): 24Mb (2097143 samples)\n",
+        "Index table size (default: 64Mb) (-s): 32Mb (2796181 samples)\n",
         "Search size     (0 = buffersize) (-a): 992kb\n",
         "Buffer size       (default  2Mb) (-m): 2Mb\n",
         "Block  size       (default 32kb) (-b): 32kb\n",
@@ -850,7 +850,7 @@ fn long_option_abbreviation_and_equals() {
     ]);
     assert_eq!(out.status.code(), Some(1));
     assert!(
-        stderr_str(&out).contains("Index table size (default: 64Mb) (-s): 1Mb (65521 samples)"),
+        stderr_str(&out).contains("Index table size (default: 64Mb) (-s): 1Mb (87359 samples)"),
         "port 1MB table: {:?}",
         stderr_str(&out)
     );
@@ -1007,10 +1007,10 @@ fn m_option_echo_lines() {
 }
 
 /// `-i`/`-k` clamping (main.cpp:408-421, 617-621): `-i 1` → 1Mb table
-/// (65521 samples in the port), `-i 0` warns and pins 1; `-k 0` warns and
-/// floors to 4096 ("4kb", search 1020kb); `-k 65565` misaligns both buffers
-/// (warnings, "set to 983475", search 896kb, "64kb" block line). All
-/// oracle-verified values.
+/// (87359 samples in the port, §21.18), `-i 0` warns and pins 1; `-k 0`
+/// warns and floors to 4096 ("4kb", search 1020kb); `-k 65565` misaligns
+/// both buffers (warnings, "set to 983475", search 896kb, "64kb" block
+/// line). All oracle-verified values.
 #[test]
 fn i_and_k_clamps_and_misalign_warnings() {
     let dir = temp_dir("ikclamp");
@@ -1032,7 +1032,7 @@ fn i_and_k_clamps_and_misalign_warnings() {
     let out = run_vv(&["-i", "1"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(
-        stderr_str(&out).contains("Index table size (default: 64Mb) (-s): 1Mb (65521 samples)"),
+        stderr_str(&out).contains("Index table size (default: 64Mb) (-s): 1Mb (87359 samples)"),
         "-i 1: {:?}",
         stderr_str(&out)
     );
@@ -2412,11 +2412,12 @@ fn write_error_dev_full_matches_oracle() {
 
 /// Engine verbose pin carried from Task 17, re-pinned to the 0.8.5 oracle
 /// (byte-identical `-vvv` stderr on this pair, one miss): the 0.8.5 engine
-/// finds exactly one inaccurate solution at 1350178/1332736 with the 8 MB
-/// port table (`-i 8`, element-count-equivalent to the oracle's `-i 6`,
-/// spec §18.E / §21.7). The stats counter itself stays 1 in the port (the
-/// oracle prints uninitialized heap garbage there — C++ never zeroes
-/// `miHshErr`; port deviation per §21.5/§21.6 determinism stance).
+/// finds exactly one inaccurate solution at 1922269/1854717 with the 8 MB
+/// table (`-i 8` — port and oracle build the same table since the §21.18
+/// divisor ruling; re-verified byte-identical against `target/oracle/jdiff
+/// -vvv -i 8`). The stats counter itself stays 1 in the port (the oracle
+/// prints uninitialized heap garbage there — C++ never zeroes `miHshErr`;
+/// port deviation per §21.5/§21.6 determinism stance).
 #[test]
 fn inaccurate_solution_lines_at_verbose_3() {
     let dir = temp_dir("t17-inacc");
@@ -2438,7 +2439,7 @@ fn inaccurate_solution_lines_at_verbose_3() {
     assert_eq!(out.status.code(), Some(1), "{}", stderr_str(&out));
     let stderr = stderr_str(&out);
     assert!(
-        stderr.contains("\nInaccurate solution at positions 1350178/1332736!\n"),
+        stderr.contains("\nInaccurate solution at positions 1922269/1854717!\n"),
         "the single miss line: {stderr:?}"
     );
     assert_eq!(
@@ -2454,14 +2455,13 @@ fn inaccurate_solution_lines_at_verbose_3() {
         "restart marker after the miss"
     );
     // The verbose>2 buildFullIndex distribution (JDiff.cpp:784-787,
-    // `dist(pos, 10)`), byte-identical to the oracle at the element-count
-    // equivalent size (first/last bucket, the summary and load lines). The
-    // positions print in the P8zd width (`pw`), so the bucket lines are
-    // built per feature set.
-    assert!(stderr.contains("Hash Dist Overload    = 3\n"), "{stderr:?}");
+    // `dist(pos, 10)`), byte-identical to the oracle (first/last bucket, the
+    // summary and load lines). The positions print in the P8zd width
+    // (`pw`), so the bucket lines are built per feature set.
+    assert!(stderr.contains("Hash Dist Overload    = 2\n"), "{stderr:?}");
     assert!(
         stderr.contains(&format!(
-            "Hash Dist        0 Pos={}:{} Cnt=   37299 Rlb=5\n",
+            "Hash Dist        0 Pos={}:{} Cnt=   43642 Rlb=4\n",
             pw(0),
             pw(192358)
         )),
@@ -2469,18 +2469,18 @@ fn inaccurate_solution_lines_at_verbose_3() {
     );
     assert!(
         stderr.contains(&format!(
-            "Hash Dist        9 Pos={}:{} Cnt=   36685 Rlb=5\n",
+            "Hash Dist        9 Pos={}:{} Cnt=   47964 Rlb=4\n",
             pw(1731222),
             pw(1923580)
         )),
         "{stderr:?}"
     );
     assert!(
-        stderr.contains("Hash Dist Avg/Min/Max/% = 40062/31278/63314/51%\n"),
+        stderr.contains("Hash Dist Avg/Min/Max/% = 49830/39955/75432/48%\n"),
         "{stderr:?}"
     );
     assert!(
-        stderr.contains("Hash Dist Load          = 400628/524287=76%\n"),
+        stderr.contains("Hash Dist Load          = 498306/699037=71%\n"),
         "{stderr:?}"
     );
     fs::remove_dir_all(&dir).unwrap();

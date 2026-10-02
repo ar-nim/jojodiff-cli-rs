@@ -1234,10 +1234,10 @@ mod tests {
     }
 
     /// Engine with the CLI default settings (spec §4), hashtable 1 MB —
-    /// 65536 elements → prime 65521, the smallest table the 0.8.5 MB ctor
-    /// can build. For the fixture sizes used here every sample is stored
-    /// regardless of the table prime (all-high-quality adds store while
-    /// col_max is 4), so behavior is identical to the larger defaults
+    /// 87381 elements → prime 87359 (spec §21.18), the smallest table the
+    /// 0.8.5 MB ctor can build. For the fixture sizes used here every sample
+    /// is stored regardless of the table prime (all-high-quality adds store
+    /// while col_max is 4), so behavior is identical to the larger defaults
     /// (verified against the C++ 0.8.5 oracle with sizes 1/2/8/32 MB).
     fn engine<'a>(
         org: Box<dyn JFile + 'a>,
@@ -1491,8 +1491,8 @@ mod tests {
     /// pinned against the 0.8.5 C++ engine (oracle harness, fixture scn,
     /// srcScn=0 — identical output with srcScn=1); `hash_hits()` proves the
     /// incrementally built index actually served the lookups (table size
-    /// 1 MB: prime 65521 on the port, 87359 on the C++ 32-bit-hkey build —
-    /// ops verified identical, see the hits note below).
+    /// 1 MB: 87381 elements → prime 87359 on both the port and the C++
+    /// 32-bit-hkey build, spec §21.18 — ops verified identical).
     #[test]
     fn src_scn_0_incremental_indexing_shifted_block() {
         let org = lcg_bytes(1, 3000);
@@ -1529,19 +1529,18 @@ mod tests {
                 op(X, 0, 0, 0),
             ]
         );
-        // 127 on the C++ (1 MB -> 87359 samples there: the 32-bit-hkey
-        // oracle build divides by sizeof(hkey)+sizeof(off_t) = 12, a prime
-        // the port's fixed divisor-16 1 MB table cannot produce), 124 here —
-        // three collided keys overwrite differently at prime 65521. The op
-        // decisions above are identical.
-        assert_eq!(jd.hash().hash_hits(), 124);
+        // The C++ 32-bit-hkey build's value (spec §21.18: both sides now
+        // build the same 1 MB table, 87381 elements → prime 87359) — before
+        // the divisor amendment the port's /16 table answered 124.
+        assert_eq!(jd.hash().hash_hits(), 127);
     }
 
     /// Brief step-1 test: the constructor clamps per `JDiff.cpp:119-120` —
     /// `mch_min = mch_min > mch_max ? mch_max - 1 : mch_min` (note: `mch_min
     /// == mch_max` is kept, only `>` clamps) and `ahd_max` is raised to at
     /// least 1024. Also pins the MB hash wiring: `hsh_sze = 32` builds the
-    /// 0.8.5 default table (32 MB -> 2097152 elements -> prime 2097143).
+    /// 0.8.5 default table (32 MB -> 2796202 elements -> prime 2796181,
+    /// spec §21.18).
     #[test]
     fn ctor_clamps_and_mb_hash_wiring() {
         let ops = Ops::default();
@@ -1561,7 +1560,7 @@ mod tests {
         );
         assert_eq!(jd.mch_min, 31, "mch_min clamps to mch_max - 1");
         assert_eq!(jd.ahd_max, 1024, "ahd_max is raised to 1024");
-        assert_eq!(jd.hash().hash_prime(), 2_097_143, "hsh_sze=32 MB wiring");
+        assert_eq!(jd.hash().hash_prime(), 2_796_181, "hsh_sze=32 MB wiring");
         assert_eq!(jd.jdiff(), 0);
     }
 
