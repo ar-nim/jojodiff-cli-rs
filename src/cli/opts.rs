@@ -509,10 +509,8 @@ mod tests {
                 .collect(),
         );
         while g.next_opt() != Opt::End {}
-        // Options + detached arguments hold slots 1..3; operands a, b →
-        // optind 3 (= argc 6 minus operands 2? no: 6 - 2 = 4? — argc is 6,
-        // operands are a and b, so optind = 6 - 2 = 4? glibc's permuted argv
-        // is [jdiff, -i, 8, -v, a, b] → first operand at index 4.)
+        // Options + detached arguments hold slots 1..3; glibc permutes argv
+        // to [jdiff, -i, 8, -v, a, b], so the first operand sits at index 4.
         assert_eq!(g.optind(), 4);
         assert_eq!(g.operands().len(), 2);
 

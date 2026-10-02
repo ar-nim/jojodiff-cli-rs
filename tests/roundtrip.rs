@@ -1186,6 +1186,45 @@ fn pipe_source_explicit_p_roundtrip() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Piped source without `-p` (`cat a | jdiff - b`): the sequential source is
+/// auto-detected, the -p warning prints, exit 1, and the patch is
+/// byte-identical to the explicit `-p` one (oracle-verified: the branch's
+/// `cmp_all`/`src_bkt`/`src_scn` mutations change no patch bytes on this
+/// fixture) and round-trips through -u (`main.cpp:781-788`).
+#[test]
+fn pipe_source_auto_p_warning_and_roundtrip() {
+    let dir = temp_dir("pipeautop");
+    let b = write_file(&dir.join("b.bin"), NEW_B);
+    let outp = dir.join("p.bin");
+
+    let out = run_stdin_pipe(
+        &[OsStr::new("-"), b.as_os_str(), outp.as_os_str()],
+        ORG_A,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        stderr_str(&out),
+        "\nWarning: Source file is a sequential file, assuming -p.\n"
+    );
+    assert_eq!(
+        fs::read(&outp).unwrap(),
+        PATCH_AB,
+        "auto-detect patch must equal the explicit -p patch (oracle-verified)"
+    );
+
+    // Restore from the piped-source patch with the original from a file.
+    let a = write_file(&dir.join("a.bin"), ORG_A);
+    let out2 = run(&[
+        OsStr::new("-u"),
+        a.as_os_str(),
+        outp.as_os_str(),
+        dir.join("restored.bin").as_os_str(),
+    ]);
+    assert_eq!(out2.status.code(), Some(0), "{}", stderr_str(&out2));
+    assert_eq!(fs::read(dir.join("restored.bin")).unwrap(), NEW_B);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 /// Piped patch: `cat p | jdiff -u a -` applies to stdout, exit 0
 /// (spec §18.D verified pipe flow).
 #[test]
@@ -1312,7 +1351,7 @@ fn t_option_release_corrupt_mixed_output() {
 /// release shape kept; the debug-specific upstream exit 6 is not).
 #[cfg(feature = "debug")]
 #[test]
-fn t_option_debug_assert_exit_6() {
+fn t_option_debug_matches_release() {
     let dir = temp_dir("tdebug");
     let a = write_file(&dir.join("a.bin"), ORG_A);
     let b = write_file(&dir.join("b.bin"), NEW_B);
