@@ -22,7 +22,7 @@
 use std::io::Write;
 
 use super::{JOut, OutStats};
-use crate::defs::{BKT, DEL, EQL, ESC, INS, MOD, MINEQL};
+use crate::defs::{BKT, DEL, EQL, ESC, INS, MINEQL, MOD};
 
 /// Binary patch writer (`JOutBin`, `JOutBin.cpp:27-232`), generic over any
 /// `std::io::Write` sink (the C++ writes to a `FILE *`).
@@ -378,10 +378,7 @@ mod tests {
             (EQL, 1, 0x33, 0x33),
             (INS, 1, 0x00, 0x44),
         ]);
-        assert_eq!(
-            out,
-            [0xA7, 0xA5, 0x11, 0xA7, 0xA3, 0x01, 0xA7, 0xA5, 0x44]
-        );
+        assert_eq!(out, [0xA7, 0xA5, 0x11, 0xA7, 0xA3, 0x01, 0xA7, 0xA5, 0x44]);
         assert_eq!((st.dta, st.ctl, st.eql), (2, 7, 2));
 
         // Equals at patch start: opr_cur still holds the constructor's MOD
@@ -402,11 +399,7 @@ mod tests {
         // `eql_cnt >= MINEQL`, JOutBin.cpp:223), the remaining 8 accumulate in
         // lzEql and are flushed as a single put(EQL, 8, 0, 0, …) by flushEql
         // (JDiff.cpp:507-516); the final put(ESC) emits ESC EQL <put_len(10)>.
-        let (out, st) = run_stats(&[
-            (EQL, 1, 0xF0, 0xF0),
-            (EQL, 1, 0xF1, 0xF1),
-            (EQL, 8, 0, 0),
-        ]);
+        let (out, st) = run_stats(&[(EQL, 1, 0xF0, 0xF0), (EQL, 1, 0xF1, 0xF1), (EQL, 8, 0, 0)]);
         assert_eq!(out, [0xA7, 0xA3, 0x09]);
         assert_eq!(st.eql, 10);
         assert_eq!((st.ctl, st.dta), (3, 0));
@@ -497,7 +490,7 @@ mod tests {
                 0xA7, 0xA2, 0x04, // ESC BKT 5
                 0xA7, 0xA5, 0x46, // ESC INS 46
                 0xA7, 0xA3, 0x03, // ESC EQL 4
-                0x4B,             // implicit MOD data (no ESC MOD)
+                0x4B, // implicit MOD data (no ESC MOD)
             ]
         );
         assert_eq!(

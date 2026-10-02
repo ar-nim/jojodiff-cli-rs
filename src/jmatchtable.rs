@@ -55,12 +55,12 @@
 //! assert_eq!(tbl.getbest(0, 600), Some((1100, 600)));
 //! ```
 
-use crate::defs::{get_lower_prime, EOB, ReadType, SMPSZE};
 #[cfg(feature = "debug")]
 use crate::defs::p8;
-use crate::jfile::JFile;
+use crate::defs::{EOB, ReadType, SMPSZE, get_lower_prime};
 #[cfg(feature = "debug")]
-use crate::jdebug::{c_chr, dbg, dbg_print, DBGCMP, DBGMCH};
+use crate::jdebug::{DBGCMP, DBGMCH, c_chr, dbg, dbg_print};
+use crate::jfile::JFile;
 #[cfg(feature = "debug")]
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -239,7 +239,10 @@ impl JMatchTable {
         // calloc(miMchPme, sizeof(tMch*)) for negative/zero primes fails in
         // the C++ (null, then UB on first use — no throw in the oracle
         // build); the port panics instead of dereferencing null.
-        assert!(mch_pme > 0, "JMatchTable: getLowerPrime({mch_sze} * 2) = {mch_pme} is not positive (C++ calloc failure / UB)");
+        assert!(
+            mch_pme > 0,
+            "JMatchTable: getLowerPrime({mch_sze} * 2) = {mch_pme} is not positive (C++ calloc failure / UB)"
+        );
 
         JMatchTable {
             nodes: vec![
@@ -743,7 +746,10 @@ impl JMatchTable {
         // lzDst: distance: number of bytes to compare before failing; -1
         // marks the reuse branches for the debug doublecheck. Only the
         // #if debug block reads it, like the C++.
-        #[cfg_attr(not(feature = "debug"), allow(unused_mut, unused_variables, unused_assignments))]
+        #[cfg_attr(
+            not(feature = "debug"),
+            allow(unused_mut, unused_variables, unused_assignments)
+        )]
         let mut dst: i64 = -1;
         let mut cur_cmp: i32; // liCurCmp: current match compare state
 
@@ -793,7 +799,15 @@ impl JMatchTable {
                 };
                 let gld_arg = if gliding { n.gldcnt } else { 0 };
                 // C++ passes the off_t lzDst to check's int aiLen (truncating).
-                cur_cmp = check(org, newf, &mut tst_org, &mut tst_new, d as i32, gld_arg, sft);
+                cur_cmp = check(
+                    org,
+                    newf,
+                    &mut tst_org,
+                    &mut tst_new,
+                    d as i32,
+                    gld_arg,
+                    sft,
+                );
 
                 // store result (:493-497)
                 let n = &mut self.nodes[cur];
@@ -927,8 +941,7 @@ impl JMatchTable {
                 // maybe better (nearer): check in more detail
                 if tst_new - i64::from(cur_cmp) < self.z_bst_new - i64::from(self.i_bst_cmp) {
                     self.mp_bst = Some(cur); // new one is longer
-                } else if tst_new - i64::from(cur_cmp)
-                    == self.z_bst_new - i64::from(self.i_bst_cmp)
+                } else if tst_new - i64::from(cur_cmp) == self.z_bst_new - i64::from(self.i_bst_cmp)
                 {
                     // If all else is equal, then rely on the hash counter
                     if cur_cnt < 0 {
@@ -1429,7 +1442,10 @@ mod tests {
         // A fresh gliding pair within beg + SMPSZE records the small offset.
         assert_eq!(m.add(2000, 3000, 3100, &mut org, &mut new), MchRet::Best);
         let n1 = m.gld_tbl[2000 % 127].unwrap();
-        assert_eq!(m.add(2000, 3020, 3100, &mut org, &mut new), MchRet::Enlarged);
+        assert_eq!(
+            m.add(2000, 3020, 3100, &mut org, &mut new),
+            MchRet::Enlarged
+        );
         assert_eq!(m.nodes[n1].gldcnt, 20); // 3020 - 3000
     }
 
@@ -1533,7 +1549,10 @@ mod tests {
         let mut m = JMatchTable::new(64, true, 1024);
         assert_eq!(m.add(2000, 2000, 2500, &mut org, &mut new), MchRet::Best); // A
         assert_eq!(m.add(3500, 1500, 2500, &mut org, &mut new), MchRet::Best); // B
-        assert_eq!(m.add(3500, 1500, 2500, &mut org, &mut new), MchRet::Enlarged);
+        assert_eq!(
+            m.add(3500, 1500, 2500, &mut org, &mut new),
+            MchRet::Enlarged
+        );
         assert_eq!(m.cleanup(0, 2500, 48, &mut org, &mut new), MchRet::Best);
         assert_eq!(m.getbest(0, 2500), Some((4500, 2500)));
 
@@ -1659,7 +1678,15 @@ mod tests {
         // to the very end, the compare answers 0.
         let (mut po, mut pn) = (0i64, 1i64);
         assert_eq!(
-            check(&mut org, &mut new, &mut po, &mut pn, 64, 1, ReadType::HardAhead),
+            check(
+                &mut org,
+                &mut new,
+                &mut po,
+                &mut pn,
+                64,
+                1,
+                ReadType::HardAhead
+            ),
             0
         );
         assert_eq!((po, pn), (0, 12));
@@ -1668,7 +1695,15 @@ mod tests {
         // resyncs onto the 4-run and walks to org's EOF with eql 1 (< EQLMIN).
         let (mut po, mut pn) = (0i64, 1i64);
         assert_eq!(
-            check(&mut org, &mut new, &mut po, &mut pn, 64, 0, ReadType::HardAhead),
+            check(
+                &mut org,
+                &mut new,
+                &mut po,
+                &mut pn,
+                64,
+                0,
+                ReadType::HardAhead
+            ),
             0
         );
         assert_eq!((po, pn), (10, 11));
@@ -1684,7 +1719,15 @@ mod tests {
 
         let (mut po, mut pn) = (0i64, 0i64);
         assert_eq!(
-            check(&mut org, &mut new, &mut po, &mut pn, 4096, 0, ReadType::HardAhead),
+            check(
+                &mut org,
+                &mut new,
+                &mut po,
+                &mut pn,
+                4096,
+                0,
+                ReadType::HardAhead
+            ),
             256
         );
         assert_eq!((po, pn), (0, 0)); // advanced 256, rewound 256
@@ -1694,13 +1737,35 @@ mod tests {
         let mut org = JFileMem::new(vec![7u8; 5]);
         let mut new = JFileMem::new(vec![7u8; 5]);
         let (mut po, mut pn) = (0i64, 0i64);
-        assert_eq!(check(&mut org, &mut new, &mut po, &mut pn, 64, 0, ReadType::HardAhead), 5);
+        assert_eq!(
+            check(
+                &mut org,
+                &mut new,
+                &mut po,
+                &mut pn,
+                64,
+                0,
+                ReadType::HardAhead
+            ),
+            5
+        );
         assert_eq!((po, pn), (0, 0));
 
         let mut org = JFileMem::new(vec![7u8; 4]);
         let mut new = JFileMem::new(vec![7u8; 4]);
         let (mut po, mut pn) = (0i64, 0i64);
-        assert_eq!(check(&mut org, &mut new, &mut po, &mut pn, 64, 0, ReadType::HardAhead), 0);
+        assert_eq!(
+            check(
+                &mut org,
+                &mut new,
+                &mut po,
+                &mut pn,
+                64,
+                0,
+                ReadType::HardAhead
+            ),
+            0
+        );
         assert_eq!((po, pn), (4, 4)); // no rewind: not a solution
     }
 
@@ -1714,7 +1779,15 @@ mod tests {
         let mut new = JFileAhead::new(Cursor::new(vec![0u8; 8192]), "Tst", 1024, 16);
         let (mut po, mut pn) = (2000i64, 2000i64);
         assert_eq!(
-            check(&mut org, &mut new, &mut po, &mut pn, 64, 0, ReadType::SoftAhead),
+            check(
+                &mut org,
+                &mut new,
+                &mut po,
+                &mut pn,
+                64,
+                0,
+                ReadType::SoftAhead
+            ),
             CMPEOB
         );
         assert_eq!((po, pn), (2000, 2000));
@@ -1722,7 +1795,18 @@ mod tests {
         let mut org = zeros(10);
         let mut new = zeros(10);
         let (mut po, mut pn) = (10i64, 10i64);
-        assert_eq!(check(&mut org, &mut new, &mut po, &mut pn, 64, 0, ReadType::HardAhead), 0);
+        assert_eq!(
+            check(
+                &mut org,
+                &mut new,
+                &mut po,
+                &mut pn,
+                64,
+                0,
+                ReadType::HardAhead
+            ),
+            0
+        );
         assert_eq!((po, pn), (10, 10));
     }
 }

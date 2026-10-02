@@ -41,10 +41,16 @@ fn dhsh_token_is_an_option_without_the_feature() {
         .output()
         .expect("spawn jdiff");
     assert_eq!(out.status.code(), Some(1));
-    assert!(out.stderr.is_empty(), "{:?}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.stderr.is_empty(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(fs::read(dir.join("p.bin")).unwrap(), {
         // ESC EQL 11 "byeby" ESC INS "e" (0.8.5 implicit MOD).
-        [0xA7u8, 0xA3, 0x0B, b'b', b'y', b'e', b'b', b'y', 0xA7, 0xA5, b'e']
+        [
+            0xA7u8, 0xA3, 0x0B, b'b', b'y', b'e', b'b', b'y', 0xA7, 0xA5, b'e',
+        ]
     });
     fs::remove_dir_all(&dir).unwrap();
 }

@@ -25,7 +25,7 @@
 use std::io::Write;
 
 use super::{JOut, OutStats};
-use crate::defs::{BKT, DEL, EQL, ESC, INS, MOD, MINEQL};
+use crate::defs::{BKT, DEL, EQL, ESC, INS, MINEQL, MOD};
 
 /// Region listing writer (`JOutRgn`, `JOutRgn.cpp:30-141`), generic over any
 /// `std::io::Write` sink (the C++ writes to a `FILE *`).
@@ -302,15 +302,15 @@ mod tests {
         // is inconsistent with the real 5/9 encoded bytes and is ported as
         // written (spec §21.14).
         let (out, st) = run(&[
-            (EQL, 2, 0, 0, 2, 2),       // pending (first put: nothing to flush)
-            (MOD, 1, 0x41, 0x41, 2, 2), // flush EQL 2: cnt <= MINEQL → dta += 2
-            (EQL, 3, 0, 0, 3, 3),       // flush MOD 1: dead-if → no ctl; dta += 1
-            (INS, 1, -1, 0x61, 6, 6),   // flush EQL 3: ctl += 2+1, eql += 3
-            (DEL, 509, 0, 0, 6, 7),     // flush INS 1: ctl += 2, dta += 1
-            (BKT, 65_536, 0, 0, 515, 7),    // flush DEL 509: ctl += 2+3
-            (INS, 1, -1, 0x62, 65_545, 8),  // flush BKT 65536: ctl += 2+4 (quirk)
+            (EQL, 2, 0, 0, 2, 2),                  // pending (first put: nothing to flush)
+            (MOD, 1, 0x41, 0x41, 2, 2),            // flush EQL 2: cnt <= MINEQL → dta += 2
+            (EQL, 3, 0, 0, 3, 3),                  // flush MOD 1: dead-if → no ctl; dta += 1
+            (INS, 1, -1, 0x61, 6, 6),              // flush EQL 3: ctl += 2+1, eql += 3
+            (DEL, 509, 0, 0, 6, 7),                // flush INS 1: ctl += 2, dta += 1
+            (BKT, 65_536, 0, 0, 515, 7),           // flush DEL 509: ctl += 2+3
+            (INS, 1, -1, 0x62, 65_545, 8),         // flush BKT 65536: ctl += 2+4 (quirk)
             (BKT, 4_294_967_296, 0, 0, 65_545, 8), // flush INS 1: ctl += 2, dta += 1
-            (ESC, 0, 0, 0, 65_545, 8),  // flush BKT 2^32: ctl += 2+8 (quirk)
+            (ESC, 0, 0, 0, 65_545, 8),             // flush BKT 2^32: ctl += 2+8 (quirk)
         ]);
         assert_eq!(
             out,
@@ -328,7 +328,7 @@ mod tests {
         assert_eq!(
             st,
             OutStats {
-                dta: 5, // EQL 2 + MOD 1 + INS 1 + INS 1
+                dta: 5,  // EQL 2 + MOD 1 + INS 1 + INS 1
                 ctl: 28, // 3 + 2 + 5 + 6 + 2 + 10
                 del: 509,
                 bkt: 4_295_032_832, // 65536 + 2^32

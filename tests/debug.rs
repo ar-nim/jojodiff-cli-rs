@@ -313,7 +313,10 @@ fn unknown_name_is_silently_ignored() {
     let dir = temp_dir("d-bogus");
     let (stdout, out) = run_dbg(&dir, ORG_A, NEW_B, &["-d", "bogus"], "bog");
     assert_eq!(out.status.code(), Some(1));
-    assert!(stdout.is_empty(), "no output for an unknown name: {stdout:?}");
+    assert!(
+        stdout.is_empty(),
+        "no output for an unknown name: {stdout:?}"
+    );
     // The patch is the normal tiny-pair patch (the run is a plain diff).
     assert_eq!(fs::read(dir.join("bogp.bin")).unwrap(), PATCH_AB_TINY);
     fs::remove_dir_all(&dir).unwrap();
@@ -338,8 +341,7 @@ fn hsh_ini_and_add_lines_big() {
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 970, "Ini + 969 stores: {stdout:?}");
     assert!(
-        lines[0]
-            .starts_with("Hash Ini sizeof= 4+ 8=12, 524287 samples, 6291444 bytes, address=0x")
+        lines[0].starts_with("Hash Ini sizeof= 4+ 8=12, 524287 samples, 6291444 bytes, address=0x")
             && lines[0].ends_with("."),
         "Ini line: {stdout:?}"
     );
@@ -389,7 +391,10 @@ fn mch_match_failure_tiny() {
     let dir = temp_dir("mch-tiny");
     let (stdout, out) = run_dbg(&dir, ORG_A, NEW_B, &["-dmch"], "mchT");
     assert_eq!(out.status.code(), Some(1));
-    assert_eq!(stdout, "Match Failure at 12\n", "exact getbest failure line");
+    assert_eq!(
+        stdout, "Match Failure at 12\n",
+        "exact getbest failure line"
+    );
     fs::remove_dir_all(&dir).unwrap();
 }
 

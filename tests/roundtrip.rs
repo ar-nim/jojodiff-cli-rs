@@ -220,7 +220,7 @@ fn stderr_str(out: &Output) -> String {
 /// `ETXTBSY`: a concurrently-running test's child may inherit the copy's
 /// still-open write handle at clone time (fd tables are copied at fork and
 /// `fs::copy` opens without `O_CLOEXEC`) and keep it open through exec,
- /// failing `execve` with `Text file busy` until that child exits.
+/// failing `execve` with `Text file busy` until that child exits.
 fn run_copied(exe: &Path, args: &[&OsStr]) -> Output {
     for attempt in 0..100 {
         match Command::new(exe).args(args).output() {
@@ -304,7 +304,10 @@ fn usage_contains_stale_texts() {
     let out = run(&[OsStr::new("-h")]);
     let text = stderr_str(&out);
     assert!(text.contains("(default 64)"), "stale -i default: {text:?}");
-    assert!(text.contains("(default 8192)"), "stale -k default: {text:?}");
+    assert!(
+        text.contains("(default 8192)"),
+        "stale -k default: {text:?}"
+    );
     assert!(text.contains("(in KB)"), "stale -m unit: {text:?}");
     assert!(text.contains("0=no buffering"), "stale -m 0 mode: {text:?}");
     // The verbose echo's "disbale" typo (main.cpp:834) — assertable via -vv.
@@ -624,8 +627,10 @@ fn warnings_precede_greeting_and_console_switch() {
     ]);
     assert_eq!(out.status.code(), Some(1));
     assert!(out.stderr.is_empty(), "{:?}", stderr_str(&out));
-    assert!(String::from_utf8_lossy(&out.stdout)
-        .starts_with("Warning: invalid --index-size/-i specified, set to 1.\n"));
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .starts_with("Warning: invalid --index-size/-i specified, set to 1.\n")
+    );
     fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -686,7 +691,8 @@ fn gnu_permutation_options_after_files() {
     let out = run(&[a.as_os_str(), b.as_os_str(), OsStr::new("-l")]);
     assert_eq!(out.status.code(), Some(1));
     assert!(
-        out.stdout.starts_with(b"           0            0 EQL 68 68 h-h\n"),
+        out.stdout
+            .starts_with(b"           0            0 EQL 68 68 h-h\n"),
         "trailing -l must list: {:?}",
         String::from_utf8_lossy(&out.stdout)
     );
@@ -730,7 +736,10 @@ fn double_dash_ends_options() {
         PATCH_AB,
         "patch must land in the file named --"
     );
-    assert!(!dir.join("o.bin").exists(), "o.bin is a 5th operand, unused");
+    assert!(
+        !dir.join("o.bin").exists(),
+        "o.bin is a 5th operand, unused"
+    );
     assert!(stderr_str(&out).is_empty());
     fs::remove_dir_all(&dir).unwrap();
 }
@@ -776,8 +785,7 @@ fn long_option_errors() {
     let out = run(&[OsStr::new("--index-size")]);
     assert_eq!(out.status.code(), Some(2));
     assert!(
-        stderr_str(&out)
-            .starts_with(&getopt_err("option '--index-size' requires an argument")),
+        stderr_str(&out).starts_with(&getopt_err("option '--index-size' requires an argument")),
         "{:?}",
         stderr_str(&out)
     );
@@ -826,8 +834,7 @@ fn long_option_abbreviation_and_equals() {
     ]);
     assert_eq!(out.status.code(), Some(1));
     assert!(
-        stderr_str(&out)
-            .contains("Index table size (default: 64Mb) (-s): 1Mb (65521 samples)"),
+        stderr_str(&out).contains("Index table size (default: 64Mb) (-s): 1Mb (65521 samples)"),
         "port 1MB table: {:?}",
         stderr_str(&out)
     );
@@ -897,7 +904,12 @@ fn presets_leak_into_usage_defaults() {
     );
 
     // Presets then explicit values: -n/-x override multiplicatively.
-    let out = run(&[OsStr::new("-b"), OsStr::new("-n"), OsStr::new("1"), OsStr::new("-h")]);
+    let out = run(&[
+        OsStr::new("-b"),
+        OsStr::new("-n"),
+        OsStr::new("1"),
+        OsStr::new("-h"),
+    ]);
     assert_eq!(out.status.code(), Some(2));
     assert!(stderr_str(&out).contains("Minimum number of matches to search (default 1)."));
 }
@@ -929,9 +941,18 @@ fn m_option_echo_lines() {
     }
 
     for (args, want) in [
-        (vec!["-m", "0"], "Buffer size       (default  2Mb) (-m): 2Mb"),
-        (vec!["-m", "7"], "Buffer size       (default  2Mb) (-m): 6Mb"),
-        (vec!["-m", "2048"], "Buffer size       (default  2Mb) (-m): 2048Mb"),
+        (
+            vec!["-m", "0"],
+            "Buffer size       (default  2Mb) (-m): 2Mb",
+        ),
+        (
+            vec!["-m", "7"],
+            "Buffer size       (default  2Mb) (-m): 6Mb",
+        ),
+        (
+            vec!["-m", "2048"],
+            "Buffer size       (default  2Mb) (-m): 2048Mb",
+        ),
         (
             vec!["-m", "7", "-m", "5"],
             "Buffer size       (default  2Mb) (-m): 11Mb",
@@ -942,7 +963,12 @@ fn m_option_echo_lines() {
         ),
     ] {
         let mut full: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
-        full.extend([OsStr::new("-vv"), a.as_os_str(), b.as_os_str(), outp.as_os_str()]);
+        full.extend([
+            OsStr::new("-vv"),
+            a.as_os_str(),
+            b.as_os_str(),
+            outp.as_os_str(),
+        ]);
         let out = run(&full);
         assert_eq!(out.status.code(), Some(1), "{args:?}");
         assert_eq!(buffer_line(&out), want, "{args:?}");
@@ -957,7 +983,10 @@ fn m_option_echo_lines() {
         b.as_os_str(),
         outp.as_os_str(),
     ]);
-    assert_eq!(search_line(&out), "Search size     (0 = buffersize) (-a): 3040kb");
+    assert_eq!(
+        search_line(&out),
+        "Search size     (0 = buffersize) (-a): 3040kb"
+    );
     fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -975,7 +1004,12 @@ fn i_and_k_clamps_and_misalign_warnings() {
 
     let run_vv = |extra: &[&str]| -> Output {
         let mut full: Vec<&OsStr> = extra.iter().map(OsStr::new).collect();
-        full.extend([OsStr::new("-vv"), a.as_os_str(), b.as_os_str(), outp.as_os_str()]);
+        full.extend([
+            OsStr::new("-vv"),
+            a.as_os_str(),
+            b.as_os_str(),
+            outp.as_os_str(),
+        ]);
         run(&full)
     };
 
@@ -989,16 +1023,25 @@ fn i_and_k_clamps_and_misalign_warnings() {
 
     let out = run_vv(&["-i", "0"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(stderr_str(&out)
-        .starts_with("Warning: invalid --index-size/-i specified, set to 1.\n"));
+    assert!(
+        stderr_str(&out).starts_with("Warning: invalid --index-size/-i specified, set to 1.\n")
+    );
     assert!(stderr_str(&out).contains("Index table size (default: 64Mb) (-s): 1Mb"));
 
     let out = run_vv(&["-k", "0"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(stderr_str(&out).starts_with("Warning: invalid --block-size/-k specified, set to 1.\n"));
+    assert!(
+        stderr_str(&out).starts_with("Warning: invalid --block-size/-k specified, set to 1.\n")
+    );
     let text = stderr_str(&out);
-    assert!(text.contains("Block  size       (default 32kb) (-b): 4kb"), "{text:?}");
-    assert!(text.contains("Search size     (0 = buffersize) (-a): 1020kb"), "{text:?}");
+    assert!(
+        text.contains("Block  size       (default 32kb) (-b): 4kb"),
+        "{text:?}"
+    );
+    assert!(
+        text.contains("Search size     (0 = buffersize) (-a): 1020kb"),
+        "{text:?}"
+    );
 
     let out = run_vv(&["-k", "65565"]);
     assert_eq!(out.status.code(), Some(1));
@@ -1013,8 +1056,14 @@ fn i_and_k_clamps_and_misalign_warnings() {
         ),
         "{text:?}"
     );
-    assert!(text.contains("Search size     (0 = buffersize) (-a): 896kb"), "{text:?}");
-    assert!(text.contains("Block  size       (default 32kb) (-b): 64kb"), "{text:?}");
+    assert!(
+        text.contains("Search size     (0 = buffersize) (-a): 896kb"),
+        "{text:?}"
+    );
+    assert!(
+        text.contains("Block  size       (default 32kb) (-b): 64kb"),
+        "{text:?}"
+    );
     fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -1118,10 +1167,7 @@ fn dash_reads_stdin_org() {
     let b = write_file(&dir.join("b.bin"), NEW_B);
     let outp = dir.join("p.bin");
 
-    let out = run_stdin_file(
-        &[OsStr::new("-"), b.as_os_str(), outp.as_os_str()],
-        &a,
-    );
+    let out = run_stdin_file(&[OsStr::new("-"), b.as_os_str(), outp.as_os_str()], &a);
     assert_eq!(out.status.code(), Some(1), "{}", stderr_str(&out));
     assert_eq!(fs::read(&outp).unwrap(), PATCH_AB);
     assert!(stderr_str(&out).is_empty());
@@ -1137,10 +1183,7 @@ fn pipe_destination_auto_q_warning_and_roundtrip() {
     let a = write_file(&dir.join("a.bin"), ORG_A);
     let outp = dir.join("p.bin");
 
-    let out = run_stdin_pipe(
-        &[a.as_os_str(), OsStr::new("-"), outp.as_os_str()],
-        NEW_B,
-    );
+    let out = run_stdin_pipe(&[a.as_os_str(), OsStr::new("-"), outp.as_os_str()], NEW_B);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         stderr_str(&out),
@@ -1167,7 +1210,12 @@ fn pipe_source_explicit_p_roundtrip() {
     let outp = dir.join("p.bin");
 
     let out = run_stdin_pipe(
-        &[OsStr::new("-p"), OsStr::new("-"), b.as_os_str(), outp.as_os_str()],
+        &[
+            OsStr::new("-p"),
+            OsStr::new("-"),
+            b.as_os_str(),
+            outp.as_os_str(),
+        ],
         ORG_A,
     );
     assert_eq!(out.status.code(), Some(1), "{}", stderr_str(&out));
@@ -1197,10 +1245,7 @@ fn pipe_source_auto_p_warning_and_roundtrip() {
     let b = write_file(&dir.join("b.bin"), NEW_B);
     let outp = dir.join("p.bin");
 
-    let out = run_stdin_pipe(
-        &[OsStr::new("-"), b.as_os_str(), outp.as_os_str()],
-        ORG_A,
-    );
+    let out = run_stdin_pipe(&[OsStr::new("-"), b.as_os_str(), outp.as_os_str()], ORG_A);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         stderr_str(&out),
@@ -1232,7 +1277,10 @@ fn pipe_patch_through_u() {
     let dir = temp_dir("pipeu");
     let a = write_file(&dir.join("a.bin"), ORG_A);
 
-    let out = run_stdin_pipe(&[OsStr::new("-u"), a.as_os_str(), OsStr::new("-")], PATCH_AB);
+    let out = run_stdin_pipe(
+        &[OsStr::new("-u"), a.as_os_str(), OsStr::new("-")],
+        PATCH_AB,
+    );
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(out.stdout, NEW_B);
     assert!(out.stderr.is_empty());
@@ -1294,12 +1342,15 @@ fn argv0_jpatch_with_jflag_diffs() {
     fs::copy(env!("CARGO_BIN_EXE_jdiff"), &exe).expect("copy binary");
 
     let outp = dir.join("p.bin");
-    let out = run_copied(&exe, &[
-        OsStr::new("-j"),
-        a.as_os_str(),
-        b.as_os_str(),
-        outp.as_os_str(),
-    ]);
+    let out = run_copied(
+        &exe,
+        &[
+            OsStr::new("-j"),
+            a.as_os_str(),
+            b.as_os_str(),
+            outp.as_os_str(),
+        ],
+    );
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(fs::read(&outp).unwrap(), PATCH_AB);
     fs::remove_dir_all(&dir).unwrap();
@@ -1330,7 +1381,11 @@ fn t_option_release_corrupt_mixed_output() {
     assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
     let mut corrupt = PATCH_AB.to_vec();
     corrupt.extend_from_slice(NEW_B);
-    assert_eq!(fs::read(&outp).unwrap(), corrupt, "-t appends the misparsed destination");
+    assert_eq!(
+        fs::read(&outp).unwrap(),
+        corrupt,
+        "-t appends the misparsed destination"
+    );
 
     // Same without an output file: corrupt stream on stdout.
     let out = run(&[OsStr::new("-t"), a.as_os_str(), b.as_os_str()]);
@@ -1963,7 +2018,10 @@ fn u_open_error_exits_3_4_5() {
     assert_eq!(r.status.code(), Some(3));
     assert_eq!(
         stderr_str(&r),
-        format!("Could not open first file {} for reading.\n", missing.display())
+        format!(
+            "Could not open first file {} for reading.\n",
+            missing.display()
+        )
     );
     assert!(!out.exists(), "output must not be created");
 
@@ -1976,7 +2034,10 @@ fn u_open_error_exits_3_4_5() {
     assert_eq!(r.status.code(), Some(4));
     assert_eq!(
         stderr_str(&r),
-        format!("Could not open second file {} for reading.\n", missing.display())
+        format!(
+            "Could not open second file {} for reading.\n",
+            missing.display()
+        )
     );
 
     let bad_out = dir.join("no-such-dir").join("out.bin");
@@ -2057,7 +2118,9 @@ fn write_error_dev_full_matches_oracle() {
 #[test]
 fn inaccurate_solution_lines_at_verbose_3() {
     let dir = temp_dir("t17-inacc");
-    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures");
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures");
     let a = fixtures.join("bkocomu.0000.fil");
     let b = fixtures.join("bkocomu.0009.fil");
     let outp = dir.join("p.bin");
@@ -2084,9 +2147,7 @@ fn inaccurate_solution_lines_at_verbose_3() {
     // The miss prints the "Comparing : ...           " restart marker
     // directly after the line (miss line ends "!\n").
     assert_eq!(
-        stderr
-            .matches("!\nComparing : ...           ")
-            .count(),
+        stderr.matches("!\nComparing : ...           ").count(),
         1,
         "restart marker after the miss"
     );

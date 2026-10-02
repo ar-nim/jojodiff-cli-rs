@@ -59,7 +59,7 @@
 //! distribution is now verbose-driven (`:324-327,785-787`, release builds
 //! included) — `-d dst` has zero sites (spec §18.G).
 
-use crate::defs::{BKT, DEL, EOB, EOF, EQL, ESC, INS, MOD, ReadType, SMPSZE, MAX_OFF_T};
+use crate::defs::{BKT, DEL, EOB, EOF, EQL, ESC, INS, MAX_OFF_T, MOD, ReadType, SMPSZE};
 use crate::jdebug::dbg_print;
 #[cfg(feature = "debug")]
 use crate::jdebug::{DBGAHD, DBGAHH, DBGMCH, DBGPRG, dbg};
@@ -249,12 +249,7 @@ impl<'a> JDiff<'a> {
     /// original stream's rolling key and add the sample to the hashtable.
     /// Only reached while `miSrcScn == 0 && lzPosOrg == mzAhdOrg`.
     fn hash_add_org(&mut self, lc_org: i32) {
-        self.hsh_org = hash_key(
-            self.hsh_org,
-            &mut self.prv_org,
-            lc_org,
-            &mut self.eql_org,
-        );
+        self.hsh_org = hash_key(self.hsh_org, &mut self.prv_org, lc_org, &mut self.eql_org);
         self.hsh.add(self.hsh_org, self.az_org, self.eql_org);
         self.az_org += 1;
     }
@@ -319,9 +314,7 @@ impl<'a> JDiff<'a> {
                 if !lb_eql {
                     // the first bytes may be kept in reserve, then switch to
                     // counting asap
-                    lb_eql = self
-                        .out
-                        .put(EQL, 1, lc_org, lc_new, lz_pos_org, lz_pos_new);
+                    lb_eql = self.out.put(EQL, 1, lc_org, lc_new, lz_pos_org, lz_pos_new);
                     lz_ahd -= 1; // decrease ahead counter
 
                     lz_pos_org += 1;
@@ -467,10 +460,7 @@ impl<'a> JDiff<'a> {
 
             /* show progress (JDiff.cpp:308-312) */
             if self.verbose > 1 && lz_lap_sml <= lz_pos_new {
-                dbg_print(format_args!(
-                    "\rComparing : {:>12}Mb",
-                    lz_pos_new / PGSMRK
-                ));
+                dbg_print(format_args!("\rComparing : {:>12}Mb", lz_pos_new / PGSMRK));
                 lz_lap_sml = lz_pos_new + PGSMRK;
             }
         } /* while lcNew >= 0 */
@@ -790,8 +780,7 @@ impl<'a> JDiff<'a> {
                          * through into Full ("no break"), Good/Best reduce
                          * the lookahead and fall through into Valid, which
                          * counts the match. */
-                        match mch.add(lz_fnd_org, *mz_ahd_new, red_new, &mut **org, &mut **r#new)
-                        {
+                        match mch.add(lz_fnd_org, *mz_ahd_new, red_new, &mut **org, &mut **r#new) {
                             MchRet::Error => {
                                 // Table in an unexpectedly full state
                                 #[cfg(feature = "debug")]
@@ -959,10 +948,7 @@ impl<'a> JDiff<'a> {
     /// active in the never-used `make parallel` target and is gone at 0.8.5).
     fn build_full_index(&mut self) -> i32 {
         let Self {
-            org,
-            hsh,
-            verbose,
-            ..
+            org, hsh, verbose, ..
         } = self;
 
         let mut lk_hsh_org: u32 = 0; // Current hash value for original file
@@ -1049,11 +1035,7 @@ impl<'a> JDiff<'a> {
         }
 
         /* (JDiff.cpp:789-792) */
-        if lc_val_org < EOB {
-            lc_val_org
-        } else {
-            0
-        }
+        if lc_val_org < EOB { lc_val_org } else { 0 }
     } /* buildFullIndex */
 }
 
@@ -1262,19 +1244,7 @@ mod tests {
         r#new: Box<dyn JFile + 'a>,
         out: Box<dyn JOut + 'a>,
     ) -> JDiff<'a> {
-        JDiff::new(
-            org,
-            r#new,
-            out,
-            1,
-            0,
-            true,
-            true,
-            8,
-            4,
-            256 * 1024,
-            true,
-        )
+        JDiff::new(org, r#new, out, 1, 0, true, true, 8, 4, 256 * 1024, true)
     }
 
     /// Drives the engine over the given file pair and returns (ret, ops).
@@ -1536,12 +1506,12 @@ mod tests {
             Box::new(JFileMem::new(org)),
             Box::new(JFileMem::new(new)),
             Box::new(rec),
-            1,    // hsh_sze (MB)
-            0,    // verbose
-            true, // src_bkt
+            1,     // hsh_sze (MB)
+            0,     // verbose
+            true,  // src_bkt
             false, // src_scn = 0: incremental indexing, no full prescan
-            8,    // mch_max
-            4,    // mch_min
+            8,     // mch_max
+            4,     // mch_min
             256 * 1024,
             true, // cmp_all
         );
@@ -1580,13 +1550,13 @@ mod tests {
             Box::new(JFileMem::new(b"a".to_vec())),
             Box::new(JFileMem::new(b"b".to_vec())),
             Box::new(rec),
-            32,       // hsh_sze in MB: the 0.8.5 default
+            32, // hsh_sze in MB: the 0.8.5 default
             0,
             true,
             true,
-            32,       // mch_max
-            99,       // mch_min > mch_max: clamps to mch_max - 1
-            100,      // ahd_max < 1024: clamps up to 1024
+            32,  // mch_max
+            99,  // mch_min > mch_max: clamps to mch_max - 1
+            100, // ahd_max < 1024: clamps up to 1024
             true,
         );
         assert_eq!(jd.mch_min, 31, "mch_min clamps to mch_max - 1");

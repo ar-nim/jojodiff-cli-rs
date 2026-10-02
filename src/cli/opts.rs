@@ -59,27 +59,111 @@ pub struct LongOpt {
 /// The long-option table (`gsOptLng`, `main.cpp:238-261`), in the C++ order
 /// (order matters for the ambiguity message's possibility list).
 pub const OPT_LNG: &[LongOpt] = &[
-    LongOpt { name: "better", has_arg: HasArg::No, val: 'b' },
-    LongOpt { name: "lazy", has_arg: HasArg::No, val: 'f' },
-    LongOpt { name: "console", has_arg: HasArg::No, val: 'c' },
-    LongOpt { name: "debug", has_arg: HasArg::Required, val: 'd' },
-    LongOpt { name: "help", has_arg: HasArg::No, val: 'h' },
-    LongOpt { name: "listing", has_arg: HasArg::No, val: 'l' },
-    LongOpt { name: "regions", has_arg: HasArg::No, val: 'r' },
-    LongOpt { name: "sequential-source", has_arg: HasArg::No, val: 'p' },
-    LongOpt { name: "sequential-dest", has_arg: HasArg::No, val: 'q' },
-    LongOpt { name: "stdio", has_arg: HasArg::No, val: 's' },
-    LongOpt { name: "test", has_arg: HasArg::Optional, val: 't' },
-    LongOpt { name: "jdiff", has_arg: HasArg::No, val: 'j' },
-    LongOpt { name: "undiff", has_arg: HasArg::No, val: 'u' },
-    LongOpt { name: "index-size", has_arg: HasArg::Required, val: 'i' },
-    LongOpt { name: "block-size", has_arg: HasArg::Required, val: 'k' },
-    LongOpt { name: "buffer-size", has_arg: HasArg::Required, val: 'm' },
-    LongOpt { name: "search-size", has_arg: HasArg::Required, val: 'a' },
-    LongOpt { name: "search-min", has_arg: HasArg::Required, val: 'n' },
-    LongOpt { name: "search-max", has_arg: HasArg::Required, val: 'x' },
-    LongOpt { name: "reflink", has_arg: HasArg::No, val: 'y' },
-    LongOpt { name: "verbose", has_arg: HasArg::No, val: 'v' },
+    LongOpt {
+        name: "better",
+        has_arg: HasArg::No,
+        val: 'b',
+    },
+    LongOpt {
+        name: "lazy",
+        has_arg: HasArg::No,
+        val: 'f',
+    },
+    LongOpt {
+        name: "console",
+        has_arg: HasArg::No,
+        val: 'c',
+    },
+    LongOpt {
+        name: "debug",
+        has_arg: HasArg::Required,
+        val: 'd',
+    },
+    LongOpt {
+        name: "help",
+        has_arg: HasArg::No,
+        val: 'h',
+    },
+    LongOpt {
+        name: "listing",
+        has_arg: HasArg::No,
+        val: 'l',
+    },
+    LongOpt {
+        name: "regions",
+        has_arg: HasArg::No,
+        val: 'r',
+    },
+    LongOpt {
+        name: "sequential-source",
+        has_arg: HasArg::No,
+        val: 'p',
+    },
+    LongOpt {
+        name: "sequential-dest",
+        has_arg: HasArg::No,
+        val: 'q',
+    },
+    LongOpt {
+        name: "stdio",
+        has_arg: HasArg::No,
+        val: 's',
+    },
+    LongOpt {
+        name: "test",
+        has_arg: HasArg::Optional,
+        val: 't',
+    },
+    LongOpt {
+        name: "jdiff",
+        has_arg: HasArg::No,
+        val: 'j',
+    },
+    LongOpt {
+        name: "undiff",
+        has_arg: HasArg::No,
+        val: 'u',
+    },
+    LongOpt {
+        name: "index-size",
+        has_arg: HasArg::Required,
+        val: 'i',
+    },
+    LongOpt {
+        name: "block-size",
+        has_arg: HasArg::Required,
+        val: 'k',
+    },
+    LongOpt {
+        name: "buffer-size",
+        has_arg: HasArg::Required,
+        val: 'm',
+    },
+    LongOpt {
+        name: "search-size",
+        has_arg: HasArg::Required,
+        val: 'a',
+    },
+    LongOpt {
+        name: "search-min",
+        has_arg: HasArg::Required,
+        val: 'n',
+    },
+    LongOpt {
+        name: "search-max",
+        has_arg: HasArg::Required,
+        val: 'x',
+    },
+    LongOpt {
+        name: "reflink",
+        has_arg: HasArg::No,
+        val: 'y',
+    },
+    LongOpt {
+        name: "verbose",
+        has_arg: HasArg::No,
+        val: 'v',
+    },
 ];
 
 /// The getopt return: a short/long option's code (`val`), the `'?'` error
@@ -317,10 +401,7 @@ impl Getopt {
                     Some(a)
                 } else {
                     // glibc: `%s: option '--%s' requires an argument`.
-                    self.error(&format!(
-                        "option '--{}' requires an argument",
-                        opt.name
-                    ));
+                    self.error(&format!("option '--{}' requires an argument", opt.name));
                     return Opt::Unknown;
                 }
             }
@@ -381,21 +462,14 @@ mod tests {
             .iter()
             .map(|o| o.to_string_lossy().into_owned())
             .collect();
-        let optarg = g
-            .optarg
-            .as_ref()
-            .map(|o| o.to_string_lossy().into_owned());
+        let optarg = g.optarg.as_ref().map(|o| o.to_string_lossy().into_owned());
         (opts, operands, optarg)
     }
 
     #[test]
     fn short_options_and_clusters() {
         let (opts, operands, _) = scan(&["-vv", "a", "b"]);
-        assert_eq!(
-            opts,
-            vec![Opt::Code('v'), Opt::Code('v')],
-            "clustered -vv"
-        );
+        assert_eq!(opts, vec![Opt::Code('v'), Opt::Code('v')], "clustered -vv");
         assert_eq!(operands, ["a", "b"]);
 
         // Required argument: attached, detached and clustered.

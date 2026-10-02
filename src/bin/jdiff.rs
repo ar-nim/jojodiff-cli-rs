@@ -58,14 +58,13 @@ use std::process::exit;
 
 use jojodiff_cli_rs::cli::opts::{Getopt, Opt};
 use jojodiff_cli_rs::defs::{
-    c_atoi, EXI_ARG, EXI_DIF, EXI_EQL, EXI_ERR, EXI_FRT, EXI_LRG, EXI_MEM, EXI_OK, EXI_OUT,
-    EXI_RED, EXI_SCD, EXI_SEK, EXI_WRI, JDIFF_COPYRIGHT, JDIFF_VERSION, MAX_OFF_T, SMPSZE,
+    EXI_ARG, EXI_DIF, EXI_EQL, EXI_ERR, EXI_FRT, EXI_LRG, EXI_MEM, EXI_OK, EXI_OUT, EXI_RED,
+    EXI_SCD, EXI_SEK, EXI_WRI, JDIFF_COPYRIGHT, JDIFF_VERSION, MAX_OFF_T, SMPSZE, c_atoi,
 };
-use jojodiff_cli_rs::jdebug::{dbg_print, DBG_TO_STDOUT};
+use jojodiff_cli_rs::jdebug::{DBG_TO_STDOUT, dbg_print};
 #[cfg(feature = "debug")]
 use jojodiff_cli_rs::jdebug::{
-    dbg_set, DBGAHD, DBGAHH, DBGBKT, DBGBUF, DBGCMP, DBGDST, DBGHSH, DBGHSK, DBGMCH, DBGPRG,
-    DBGRED,
+    DBGAHD, DBGAHH, DBGBKT, DBGBUF, DBGCMP, DBGDST, DBGHSH, DBGHSK, DBGMCH, DBGPRG, DBGRED, dbg_set,
 };
 use jojodiff_cli_rs::jdiff::JDiff;
 use jojodiff_cli_rs::jfile::{JFile, JFileAhead};
@@ -101,11 +100,7 @@ fn real_main() -> i32 {
             .first()
             .map(|a| a.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let base = cmd
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or("")
-            .to_lowercase();
+        let base = cmd.rsplit(['/', '\\']).next().unwrap_or("").to_lowercase();
         if base.starts_with("jpatch") || base.starts_with("jptch") {
             li_fun = Function::Patch;
         }
@@ -342,12 +337,16 @@ fn real_main() -> i32 {
         }
         if nargs < 3 {
             if li_hlp == 0 {
-                dbg_print(format_args!("Error: Not enough arguments have been specified !\n"));
+                dbg_print(format_args!(
+                    "Error: Not enough arguments have been specified !\n"
+                ));
             }
             exit(-EXI_ARG);
         }
     } else if verbose > 0 {
-        dbg_print(format_args!("\nUse -h for additional help and usage description.\n"));
+        dbg_print(format_args!(
+            "\nUse -h for additional help and usage description.\n"
+        ));
     }
 
     /* Read filenames (`main.cpp:604-610`); the operand indexes are in range
@@ -487,13 +486,12 @@ fn real_main() -> i32 {
          * single `FILE*`; otherwise a `BufWriter` batches the per-byte
          * writes and flushes at scope end, like the C++ exit-time flush. */
         let out_sink = file_out.expect("output open above guarantees a sink");
-        let writer: Box<dyn Write> = if out_is_stdout
-            && DBG_TO_STDOUT.load(std::sync::atomic::Ordering::Relaxed)
-        {
-            Box::new(IgnoringWriter { inner: out_sink })
-        } else {
-            Box::new(BufWriter::new(IgnoringWriter { inner: out_sink }))
-        };
+        let writer: Box<dyn Write> =
+            if out_is_stdout && DBG_TO_STDOUT.load(std::sync::atomic::Ordering::Relaxed) {
+                Box::new(IgnoringWriter { inner: out_sink })
+            } else {
+                Box::new(BufWriter::new(IgnoringWriter { inner: out_sink }))
+            };
         let jout: Box<dyn JOut> = match out_typ {
             1 => Box::new(JOutAsc::new(writer)),
             0 => Box::new(JOutBin::new(writer)),
@@ -676,13 +674,12 @@ fn real_main() -> i32 {
          * exit 9. With `-c` and a stdout patch the raw lock is used so
          * patch bytes and verbose lines share one ordered buffer, like the
          * C++ single `FILE*`. */
-        let patch_writer: Box<dyn Write> = if out_is_stdout
-            && DBG_TO_STDOUT.load(std::sync::atomic::Ordering::Relaxed)
-        {
-            Box::new(patch_sink)
-        } else {
-            Box::new(BufWriter::new(patch_sink))
-        };
+        let patch_writer: Box<dyn Write> =
+            if out_is_stdout && DBG_TO_STDOUT.load(std::sync::atomic::Ordering::Relaxed) {
+                Box::new(patch_sink)
+            } else {
+                Box::new(BufWriter::new(patch_sink))
+            };
         let lo_fil_out = JFileOut::new(patch_writer);
         let mut lo_jpatcht = JPatcht::new(
             inputs.org.as_mut(),
@@ -744,7 +741,9 @@ fn exit_switch(li_ret: i32, verbose: i32) -> i32 {
         }
         EXI_DIF => {
             if verbose > 1 {
-                dbg_print(format_args!("\nNot all data has been found in source file.\n"));
+                dbg_print(format_args!(
+                    "\nNot all data has been found in source file.\n"
+                ));
             }
             exit(EXI_DIF);
         }
