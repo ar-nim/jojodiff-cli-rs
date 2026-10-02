@@ -1,21 +1,23 @@
 //! `JOutAsc`: ASCII byte-by-byte listing writer (`-l`), 1:1 port of C++
-//! `src/JOutAsc.cpp` (spec §11.2).
+//! `src/JOutAsc.cpp` (spec §18.F; 0.8.5 prints bytes as `%02x` hex, was
+//! octal).
 //!
 //! Every `put` prints the two file positions right-aligned to width 12
 //! (`P8zd` = `%12lld`, `JDefs.h:84`) followed by one operand line:
 //!
 //! ```text
-//! MOD {org:>3o} {new:>3o} {c(org)}-{c(new)}
-//! INS     {new:>3o}  -{c(new)}
+//! MOD {org:02x} {new:02x} {c(org)}-{c(new)}
+//! INS     {new:02x}  -{c(new)}
 //! DEL {len}
 //! BKT {len}
-//! EQL {org:>3o} {new:>3o} {c(org)}-{c(new)}
+//! EQL {org:02x} {new:02x} {c(org)}-{c(new)}
 //! ```
 //!
-//! where `{b:>3o}` is the octal value space-padded to width 3 (C `printf`
-//! `%3o`) and `c(b)` is the byte as a character when printable (`32..=127`),
-//! a space otherwise. `ESC` calls are ignored; the return value is always
-//! `false` so the engine keeps sending byte-wise details.
+//! where `{b:02x}` is the lowercase hex value zero-padded to width 2 (C
+//! `printf` `%02x`, `JOutAsc.cpp:51,64,92`) and `c(b)` is the byte as a
+//! character when printable (`32..=127`), a space otherwise. `ESC` calls are
+//! ignored; the return value is always `false` so the engine keeps sending
+//! byte-wise details.
 
 use std::io::Write;
 
@@ -101,9 +103,9 @@ impl<W: Write> JOut for JOutAsc<W> {
 
         match opr {
             MOD => {
-                /* "MOD %3o %3o %c-%c\n" */
+                /* "MOD %02x %02x %c-%c\n" (JOutAsc.cpp:51) */
                 self.out(format_args!(
-                    "MOD {org:>3o} {new:>3o} {}-{}\n",
+                    "MOD {org:02x} {new:02x} {}-{}\n",
                     Self::chr(org),
                     Self::chr(new)
                 ));
@@ -119,8 +121,8 @@ impl<W: Write> JOut for JOutAsc<W> {
             }
 
             INS => {
-                /* "INS     %3o  -%c\n" */
-                self.out(format_args!("INS     {new:>3o}  -{}\n", Self::chr(new)));
+                /* "INS     %02x  -%c\n" (JOutAsc.cpp:64) */
+                self.out(format_args!("INS     {new:02x}  -{}\n", Self::chr(new)));
 
                 if self.opr_cur != opr {
                     self.opr_cur = opr;
@@ -151,9 +153,9 @@ impl<W: Write> JOut for JOutAsc<W> {
             }
 
             EQL => {
-                /* "EQL %3o %3o %c-%c\n" */
+                /* "EQL %02x %02x %c-%c\n" (JOutAsc.cpp:92) */
                 self.out(format_args!(
-                    "EQL {org:>3o} {new:>3o} {}-{}\n",
+                    "EQL {org:02x} {new:02x} {}-{}\n",
                     Self::chr(org),
                     Self::chr(new)
                 ));
@@ -204,23 +206,27 @@ mod tests {
     fn asc_lines() {
         // Brief Step 1 script; literals verified byte-for-byte against a
         // compiled C++ oracle harness over the vendored JOutAsc.cpp
-        // (P8zd = "%12lld", JDefs.h:84). The brief's INS sketch
-        // "INS     250" is wrong: 0xA7 = 167 decimal = 0o247. Byte 0xA7 is
-        // ESC, hence esc=1; the ESC put itself is ignored entirely.
+        // (P8zd = "%12lld", JDefs.h:84). 0.8.5 prints the bytes as `%02x`
+        // hex (JOutAsc.cpp:51,64,92; 0.8.1 used %3o octal). The brief's INS
+        // sketch "INS     250" is wrong on two counts: 0xA7 prints as "a7"
+        // and byte 0xA7 is ESC, hence esc=1; the ESC put itself is ignored
+        // entirely.
         let (out, st) = run(&[
             (MOD, 1, 0x65, 0x41, 7, 9),
             (INS, 1, -1, 0xA7, 0, 1),
             (DEL, 57751, 0, 0, 0, 0),
             (EQL, 1, 0x20, 0x20, 3, 3),
+            (EQL, 1, 0x48, 0x48, 4, 4),
             (ESC, 0, 0, 0, 4, 4),
         ]);
         assert_eq!(
             out,
             concat!(
-                "           7            9 MOD 145 101 e-A\n",
-                "           0            1 INS     247  - \n",
+                "           7            9 MOD 65 41 e-A\n",
+                "           0            1 INS     a7  - \n",
                 "           0            0 DEL 57751\n",
-                "           3            3 EQL  40  40  - \n",
+                "           3            3 EQL 20 20  - \n",
+                "           4            4 EQL 48 48 H-H\n",
             )
         );
         assert_eq!(
@@ -231,16 +237,17 @@ mod tests {
                 del: 57751,
                 bkt: 0,
                 esc: 1,
-                eql: 1
+                eql: 2
             }
         );
     }
 
     #[test]
-    fn asc_octal_padding_and_char_boundaries() {
-        // Octal is space-padded (`printf` "%3o"), the printable range is
-        // 32..=127 inclusive (0x7F prints as itself), and MOD/INS bytes equal
-        // to ESC (0xA7) bump `esc`. Oracle-verified literals.
+    fn asc_hex_padding_and_char_boundaries() {
+        // Hex is zero-padded to width 2 (`printf` "%02x"), the printable
+        // range is 32..=127 inclusive (0x7F prints as itself), and MOD/INS
+        // bytes equal to ESC (0xA7) bump `esc`. Oracle-verified literals
+        // (0.8.5 JOutAsc.cpp:51,64,92).
         let (out, st) = run(&[
             (MOD, 1, 0x08, 0x1F, 1, 1),
             (MOD, 1, 0x20, 0x7F, 2, 2),
@@ -253,13 +260,13 @@ mod tests {
         assert_eq!(
             out,
             concat!(
-                "           1            1 MOD  10  37  - \n",
-                "           2            2 MOD  40 177  -\u{7f}\n",
-                "           3            3 MOD 200 377  - \n",
-                "           4            4 INS       0  - \n",
-                "           5            5 EQL 101 101 A-A\n",
-                "           6            6 MOD  60 247 0- \n",
-                "           7            7 INS     247  - \n",
+                "           1            1 MOD 08 1f  - \n",
+                "           2            2 MOD 20 7f  -\u{7f}\n",
+                "           3            3 MOD 80 ff  - \n",
+                "           4            4 INS     00  - \n",
+                "           5            5 EQL 41 41 A-A\n",
+                "           6            6 MOD 30 a7 0- \n",
+                "           7            7 INS     a7  - \n",
             )
         );
         assert_eq!(
@@ -280,7 +287,8 @@ mod tests {
         // DEL/BKT ctl = 2 + ufPutSze(len) with the §3 tiers 1/2/3/5/9
         // (JOutAsc.cpp:107-126; the 9-byte tier is compiled in because the
         // oracle build defines JDIFF_LARGEFILE); del/bkt accumulate len,
-        // EQL ctl = 2+4 on operand change with eql++ per byte.
+        // EQL ctl = 2+4 on operand change with eql++ per byte. The 0.8.5
+        // hex change is display-only: the accounting is unchanged.
         // Oracle: dta=6 ctl=64 del=131576 bkt=8589935610 esc=2 eql=1.
         let (out, st) = run(&[
             (MOD, 1, 0x08, 0x1F, 1, 1),
@@ -302,13 +310,13 @@ mod tests {
         assert_eq!(
             out,
             concat!(
-                "           1            1 MOD  10  37  - \n",
-                "           2            2 MOD  40 177  -\u{7f}\n",
-                "           3            3 MOD 200 377  - \n",
-                "           4            4 INS       0  - \n",
-                "           5            5 EQL 101 101 A-A\n",
-                "           6            6 MOD  60 247 0- \n",
-                "           7            7 INS     247  - \n",
+                "           1            1 MOD 08 1f  - \n",
+                "           2            2 MOD 20 7f  -\u{7f}\n",
+                "           3            3 MOD 80 ff  - \n",
+                "           4            4 INS     00  - \n",
+                "           5            5 EQL 41 41 A-A\n",
+                "           6            6 MOD 30 a7 0- \n",
+                "           7            7 INS     a7  - \n",
                 "           8            8 DEL 252\n",
                 "           8            8 DEL 253\n",
                 "           8            8 BKT 508\n",

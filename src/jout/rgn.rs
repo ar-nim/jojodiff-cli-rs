@@ -1,5 +1,5 @@
-//! `JOutRgn`: region listing writer (`-lr`), 1:1 port of C++
-//! `src/JOutRgn.cpp` (spec §11.3).
+//! `JOutRgn`: region listing writer (`-r`), 1:1 port of C++
+//! `src/JOutRgn.cpp` (spec §18.F; 0.8.1 output this under `-lr`).
 //!
 //! Consecutive puts of the same operand are accumulated into a count; when
 //! the operand changes — or the engine's final `put(ESC, …)` arrives — one
@@ -13,15 +13,21 @@
 //! EQL {pos_org-cnt:>12} {pos_new-cnt:>12} EQL {cnt}
 //! ```
 //!
+//! 0.8.5 statistics quirks, ported as written (spec §21.14): the MOD flush's
+//! `ctl += 2` sits behind a dead `if (siOprCur == INS)` (`JOutRgn.cpp:50-57`);
+//! an EQL region of `cnt <= MINEQL` counts as dta instead of ctl+eql
+//! (`:79-85`); and DEL/BKT add `2+ufPutLen` where ufPutLen returns
+//! 1/2/3/**4**/**8** (`:120-139`, inconsistent with the real 5/9 encoding).
+//!
 //! Always returns `true` (length mode: the engine sends lengths instead of
 //! byte-wise details).
 
 use std::io::Write;
 
 use super::{JOut, OutStats};
-use crate::defs::{BKT, DEL, EQL, ESC, INS, MOD};
+use crate::defs::{BKT, DEL, EQL, ESC, INS, MOD, MINEQL};
 
-/// Region listing writer (`JOutRgn`, `JOutRgn.cpp:26-95`), generic over any
+/// Region listing writer (`JOutRgn`, `JOutRgn.cpp:30-141`), generic over any
 /// `std::io::Write` sink (the C++ writes to a `FILE *`).
 pub struct JOutRgn<W: Write> {
     out: W,
@@ -61,6 +67,24 @@ impl<W: Write> JOutRgn<W> {
     fn out(&mut self, args: std::fmt::Arguments<'_>) {
         self.out.write_fmt(args).expect("JOutRgn: write error");
     }
+
+    /// `JOutRgn::ufPutLen` (`JOutRgn.cpp:120-139`): length-encoding size.
+    /// Unlike the real encoding tiers (1/2/3/5/9, cf. `JOutAsc::ufPutSze`)
+    /// the 32/64-bit tiers here return **4** and **8** — an upstream
+    /// inconsistency ported as written (spec §21.14).
+    fn put_len(len: i64) -> i64 {
+        if len <= 252 {
+            1
+        } else if len <= 508 {
+            2
+        } else if len <= 0xffff {
+            3
+        } else if len <= 0xffff_ffff {
+            4
+        } else {
+            8
+        }
+    }
 }
 
 impl<W: Write> JOut for JOutRgn<W> {
@@ -73,7 +97,12 @@ impl<W: Write> JOut for JOutRgn<W> {
             match self.opr_cur {
                 MOD => {
                     /* P8zd " " P8zd " MOD %"PRIzd"\n" */
-                    self.stats.ctl += 2;
+                    // a MOD sequence is only needed after an INS sequence —
+                    // dead here (siOprCur is MOD in this arm), ported as
+                    // written (JOutRgn.cpp:50-57; spec §21.14)
+                    if self.opr_cur == INS {
+                        self.stats.ctl += 2;
+                    }
                     self.stats.dta += cnt;
                     let (col_org, col_new) = (pos_org - cnt, pos_new - cnt);
                     self.out(format_args!("{col_org:>12} {col_new:>12} MOD {cnt}\n"));
@@ -89,7 +118,7 @@ impl<W: Write> JOut for JOutRgn<W> {
 
                 DEL => {
                     /* P8zd " " P8zd " DEL %"PRIzd"\n" */
-                    self.stats.ctl += 2;
+                    self.stats.ctl += 2 + Self::put_len(cnt);
                     self.stats.del += cnt;
                     let col_org = pos_org - cnt;
                     self.out(format_args!("{col_org:>12} {pos_new:>12} DEL {cnt}\n"));
@@ -97,7 +126,7 @@ impl<W: Write> JOut for JOutRgn<W> {
 
                 BKT => {
                     /* P8zd " " P8zd " BKT %"PRIzd"\n" */
-                    self.stats.ctl += 2;
+                    self.stats.ctl += 2 + Self::put_len(cnt);
                     self.stats.bkt += cnt;
                     let col_org = pos_org + cnt;
                     self.out(format_args!("{col_org:>12} {pos_new:>12} BKT {cnt}\n"));
@@ -105,8 +134,12 @@ impl<W: Write> JOut for JOutRgn<W> {
 
                 EQL => {
                     /* P8zd " " P8zd " EQL %"PRIzd"\n" */
-                    self.stats.ctl += 2;
-                    self.stats.eql += cnt;
+                    if cnt <= i64::from(MINEQL) {
+                        self.stats.dta += cnt;
+                    } else {
+                        self.stats.ctl += 2 + Self::put_len(cnt);
+                        self.stats.eql += cnt;
+                    }
                     let (col_org, col_new) = (pos_org - cnt, pos_new - cnt);
                     self.out(format_args!("{col_org:>12} {col_new:>12} EQL {cnt}\n"));
                 }
@@ -213,7 +246,7 @@ mod tests {
             st,
             OutStats {
                 dta: 12,
-                ctl: 16,
+                ctl: 17,
                 del: 100,
                 bkt: 7,
                 esc: 0,
@@ -227,7 +260,12 @@ mod tests {
         // The initial ESC state emits nothing on the first put; a MOD byte
         // equal to ESC (0xA7) bumps esc while accumulating; the final
         // put(ESC) flushes the pending region without accumulating.
-        // Oracle: dta=2 ctl=4 del=0 bkt=0 esc=1 eql=1.
+        //
+        // 0.8.5 accounting (JOutRgn.cpp:50-57,79-85): the MOD flush's ctl += 2
+        // sits behind a dead `if (siOprCur == INS)` (siOprCur is MOD in that
+        // arm — ported as written, so MOD flushes never add ctl), and an EQL
+        // region of cnt <= MINEQL counts as dta, not eql.
+        // Oracle: dta=3 ctl=0 del=0 bkt=0 esc=1 eql=0.
         let (out, st) = run(&[
             (EQL, 1, 0x41, 0x41, 0, 0),
             (MOD, 1, 0x30, 0xA7, 1, 1),
@@ -244,12 +282,58 @@ mod tests {
         assert_eq!(
             st,
             OutStats {
-                dta: 2,
-                ctl: 4,
+                dta: 3,
+                ctl: 0,
                 del: 0,
                 bkt: 0,
                 esc: 1,
-                eql: 1
+                eql: 0
+            }
+        );
+    }
+
+    #[test]
+    fn rgn_mineql_boundary_and_put_len_quirk() {
+        // EQL split on MINEQL (JOutRgn.cpp:79-85): cnt <= 2 → dta (no eql,
+        // no ctl), cnt > 2 → ctl += 2+put_len and eql += cnt. The MOD flush's
+        // ctl += 2 is dead (`siOprCur == INS` inside `case (MOD)`, :50-57 —
+        // ported as written). DEL/BKT add 2+ufPutLen with ufPutLen returning
+        // 1/2/3/4/8 (JOutRgn.cpp:120-139) — the 4/8 for the 32/64-bit tiers
+        // is inconsistent with the real 5/9 encoded bytes and is ported as
+        // written (spec §21.14).
+        let (out, st) = run(&[
+            (EQL, 2, 0, 0, 2, 2),       // pending (first put: nothing to flush)
+            (MOD, 1, 0x41, 0x41, 2, 2), // flush EQL 2: cnt <= MINEQL → dta += 2
+            (EQL, 3, 0, 0, 3, 3),       // flush MOD 1: dead-if → no ctl; dta += 1
+            (INS, 1, -1, 0x61, 6, 6),   // flush EQL 3: ctl += 2+1, eql += 3
+            (DEL, 509, 0, 0, 6, 7),     // flush INS 1: ctl += 2, dta += 1
+            (BKT, 65_536, 0, 0, 515, 7),    // flush DEL 509: ctl += 2+3
+            (INS, 1, -1, 0x62, 65_545, 8),  // flush BKT 65536: ctl += 2+4 (quirk)
+            (BKT, 4_294_967_296, 0, 0, 65_545, 8), // flush INS 1: ctl += 2, dta += 1
+            (ESC, 0, 0, 0, 65_545, 8),  // flush BKT 2^32: ctl += 2+8 (quirk)
+        ]);
+        assert_eq!(
+            out,
+            concat!(
+                "           0            0 EQL 2\n",
+                "           2            2 MOD 1\n",
+                "           3            3 EQL 3\n",
+                "           6            6 INS 1\n",
+                "           6            7 DEL 509\n",
+                "      131081            8 BKT 65536\n",
+                "       65545            7 INS 1\n",
+                "  4295032841            8 BKT 4294967296\n",
+            )
+        );
+        assert_eq!(
+            st,
+            OutStats {
+                dta: 5, // EQL 2 + MOD 1 + INS 1 + INS 1
+                ctl: 28, // 3 + 2 + 5 + 6 + 2 + 10
+                del: 509,
+                bkt: 4_295_032_832, // 65536 + 2^32
+                esc: 0,
+                eql: 3, // only the >MINEQL region
             }
         );
     }

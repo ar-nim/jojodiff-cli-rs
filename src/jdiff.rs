@@ -1094,7 +1094,7 @@ pub fn hash_key(cur: u32, old: &mut i32, r#new: i32, eql: &mut i32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::defs::{EXI_RED, EXI_SEK};
+    use crate::defs::{EXI_RED, EXI_SEK, MINEQL};
     use crate::jfile::JFileMem;
     use crate::jout::{JOutBin, OutStats};
     use std::cell::RefCell;
@@ -1182,10 +1182,10 @@ mod tests {
     struct Ops(Rc<RefCell<OpLog>>);
 
     /// Recording [`JOut`] that logs `(opr, len, org, new)` tuples and mimics
-    /// the `JOutBin` return contract exactly (`JOutBin.cpp:152-225`): EQL
-    /// buffers up to 4 bytes (returning true once 4 are pending, thereafter
-    /// always true); every non-EQL operand flushes (and thereby resets) the
-    /// pending EQL bytes and returns false.
+    /// the `JOutBin` return contract exactly (`JOutBin.cpp:165-227`): EQL
+    /// buffers up to `MINEQL` (2) bytes (returning true once 2 are pending,
+    /// thereafter always true); every non-EQL operand flushes (and thereby
+    /// resets) the pending EQL bytes and returns false.
     struct RecordingOut {
         ops: Ops,
         eql_cnt: i32,
@@ -1209,9 +1209,9 @@ mod tests {
         ) -> bool {
             self.ops.0.borrow_mut().push((opr, len, org, new));
             if opr == EQL {
-                if self.eql_cnt < 4 {
+                if self.eql_cnt < MINEQL {
                     self.eql_cnt += 1;
-                    self.eql_cnt >= 4
+                    self.eql_cnt >= MINEQL
                 } else {
                     true
                 }
@@ -1300,8 +1300,8 @@ mod tests {
     }
 
     /// Brief step-1 test: identical files emit no difference operands — only
-    /// the 4 byte-mode EQL calls, the accumulated EQL length flush and the
-    /// final ESC (pinned against the C++ oracle), ret 0.
+    /// the 2 byte-mode EQL calls (MINEQL=2), the accumulated EQL length flush
+    /// and the final ESC (pinned against the C++ oracle), ret 0.
     #[test]
     fn identical_files_emit_nothing() {
         let data = b"hello world\n".to_vec();
@@ -1310,11 +1310,9 @@ mod tests {
         assert_eq!(
             ops,
             vec![
-                op(E, 1, 104, 104), // 'h'
-                op(E, 1, 101, 101), // 'e'
-                op(E, 1, 108, 108), // 'l'
-                op(E, 1, 108, 108), // 'l' -> length mode granted
-                op(E, 8, 0, 0),     // flush_eql flush of the remaining 8
+                op(E, 1, 104, 104), // 'h' ×2 byte-mode EQL
+                op(E, 1, 101, 101), // 'e' -> length mode granted (MINEQL=2)
+                op(E, 10, 0, 0),    // flush_eql flush of the remaining 10
                 op(X, 0, 0, 0),     // final ESC
             ]
         );
@@ -1353,11 +1351,13 @@ mod tests {
     }
 
     /// Brief step-1 test: "hello world" ×3 vs the XYZ modification. The
-    /// engine ops must reproduce the reference patch bytes `a7 a3 11 a7 a6 58
-    /// 59 5a 6c 6f 20 77 6f 72 6c 64 20 68 65 6c 6c 6f 0a` produced by the
-    /// C++ `jdiff` + `JOutBin` oracle for this fixture (org = new = 36 bytes,
+    /// engine ops must reproduce the reference patch bytes `a7 a3 11 58 59
+    /// 5a 6c 6f 20 77 6f 72 6c 64 20 68 65 6c 6c 6f 0a` produced by the C++
+    /// `jdiff` + `JOutBin` oracle for this fixture (org = new = 36 bytes,
     /// `hello world ` ×3 with the final space turned into a newline and the
-    /// second word's `wor` replaced by `XYZ`).
+    /// second word's `wor` replaced by `XYZ`). 0.8.5 wire format (spec
+    /// §18.C): the MOD run rides the implicit MOD — the 0.8.1 bytes carried
+    /// an extra `a7 a6` after the EQL record.
     #[test]
     fn modify_run() {
         let org = b"hello world hello world hello world\n".to_vec();
@@ -1366,15 +1366,15 @@ mod tests {
         assert_eq!(ret, 0);
 
         // Exact C++-pinned operand sequence (oracle2, fixture 3, scn=1;
-        // re-verified against the 0.8.5 engine — identical op log).
+        // re-verified against the 0.8.5 engine — identical match decisions;
+        // with MINEQL=2 the recorder grants length mode after 2 byte-wise
+        // EQLs instead of 4).
         assert_eq!(
             ops,
             vec![
-                op(E, 1, 104, 104), // 'h' ×4 byte-mode EQL
-                op(E, 1, 101, 101), // 'e'
-                op(E, 1, 108, 108), // 'l'
-                op(E, 1, 108, 108), // 'l' -> length mode granted
-                op(E, 14, 0, 0),    // flush_eql flush (positions 4..18)
+                op(E, 1, 104, 104), // 'h' ×2 byte-mode EQL
+                op(E, 1, 101, 101), // 'e' -> length mode granted (MINEQL=2)
+                op(E, 16, 0, 0),    // flush_eql flush (positions 4..18)
                 op(M, 1, 119, 88),  // 'w' -> 'X'
                 op(M, 1, 111, 89),  // 'o' -> 'Y'
                 op(M, 1, 114, 90),  // 'r' -> 'Z'
@@ -1407,8 +1407,8 @@ mod tests {
         assert_eq!(
             bin.into_inner(),
             vec![
-                0xa7, 0xa3, 0x11, 0xa7, 0xa6, 0x58, 0x59, 0x5a, 0x6c, 0x6f, 0x20, 0x77, 0x6f, 0x72,
-                0x6c, 0x64, 0x20, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x0a,
+                0xa7, 0xa3, 0x11, 0x58, 0x59, 0x5a, 0x6c, 0x6f, 0x20, 0x77, 0x6f, 0x72, 0x6c, 0x64,
+                0x20, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x0a,
             ]
         );
     }
@@ -1432,16 +1432,12 @@ mod tests {
             ops,
             vec![
                 op(E, 1, 89, 89),
-                op(E, 1, 133, 133),
-                op(E, 1, 1, 1),
-                op(E, 1, 58, 58),
-                op(E, 796, 0, 0),
+                op(E, 1, 133, 133), // -> length mode granted (MINEQL=2)
+                op(E, 798, 0, 0),
                 op(BKT, 500, 0, 0), // backtrack 500 bytes on the original file
                 op(E, 1, 190, 190),
-                op(E, 1, 145, 145),
-                op(E, 1, 102, 102),
-                op(E, 1, 126, 126),
-                op(E, 696, 0, 0),
+                op(E, 1, 145, 145), // -> length mode granted (MINEQL=2)
+                op(E, 698, 0, 0),
                 op(X, 0, 0, 0),
             ]
         );
@@ -1464,16 +1460,12 @@ mod tests {
             ops,
             vec![
                 op(E, 1, 89, 89),
-                op(E, 1, 133, 133),
-                op(E, 1, 1, 1),
-                op(E, 1, 58, 58),
-                op(E, 496, 0, 0),   // 500 equal bytes total
+                op(E, 1, 133, 133), // -> length mode granted (MINEQL=2)
+                op(E, 498, 0, 0),   // 500 equal bytes total
                 op(DEL, 100, 0, 0), // delete the 100 shifted-out bytes
                 op(E, 1, 103, 103),
-                op(E, 1, 136, 136),
-                op(E, 1, 47, 47),
-                op(E, 1, 102, 102),
-                op(E, 396, 0, 0), // remaining 400 equal bytes
+                op(E, 1, 136, 136), // -> length mode granted (MINEQL=2)
+                op(E, 398, 0, 0),   // remaining 400 equal bytes
                 op(X, 0, 0, 0),
             ]
         );
@@ -1558,16 +1550,12 @@ mod tests {
             ops.0.borrow().clone(),
             vec![
                 op(E, 1, 89, 89),
-                op(E, 1, 133, 133),
-                op(E, 1, 1, 1),
-                op(E, 1, 58, 58),
-                op(E, 996, 0, 0),
+                op(E, 1, 133, 133), // -> length mode granted (MINEQL=2)
+                op(E, 998, 0, 0),
                 op(DEL, 200, 0, 0),
                 op(E, 1, 49, 49),
-                op(E, 1, 35, 35),
-                op(E, 1, 35, 35),
-                op(E, 1, 147, 147),
-                op(E, 1796, 0, 0),
+                op(E, 1, 35, 35), // -> length mode granted (MINEQL=2)
+                op(E, 1798, 0, 0),
                 op(X, 0, 0, 0),
             ]
         );
@@ -1625,22 +1613,16 @@ mod tests {
             ops,
             vec![
                 op(E, 1, 89, 89),
-                op(E, 1, 133, 133),
-                op(E, 1, 1, 1),
-                op(E, 1, 58, 58),
-                op(E, 246, 0, 0),
+                op(E, 1, 133, 133), // -> length mode granted (MINEQL=2)
+                op(E, 248, 0, 0),
                 op(M, 1, 60, 195), // edit 1: 60 ^ 0xff = 195
                 op(E, 1, 196, 196),
-                op(E, 1, 187, 187),
-                op(E, 1, 203, 203),
-                op(E, 1, 53, 53),
-                op(E, 495, 0, 0),
+                op(E, 1, 187, 187), // -> length mode granted (MINEQL=2)
+                op(E, 497, 0, 0),
                 op(M, 1, 124, 131), // edit 2: 124 ^ 0xff = 131
                 op(E, 1, 38, 38),
-                op(E, 1, 237, 237),
-                op(E, 1, 37, 37),
-                op(E, 1, 192, 192),
-                op(E, 245, 0, 0),
+                op(E, 1, 237, 237), // -> length mode granted (MINEQL=2)
+                op(E, 247, 0, 0),
                 op(X, 0, 0, 0),
             ]
         );

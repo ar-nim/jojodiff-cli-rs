@@ -102,11 +102,11 @@ fn run_dbg(dir: &Path, org: &[u8], new: &[u8], extra: &[&str], tag: &str) -> (St
 }
 
 /// The patch jdiff produces for (big pair), pinned byte-exact against the
-/// oracle (EQL 249, MOD 0xc3, EQL 750-ish run — 11 bytes total). Debug flags
-/// must not change it (the debug flush's `put(ESC, 0, …)` is a writer no-op).
-const PATCH_BIG: &[u8] = &[
-    0xA7, 0xA3, 0xF9, 0xA7, 0xA6, 0xC3, 0xA7, 0xA3, 0xFD, 0x02, 0xED,
-];
+/// oracle (EQL 250, implicit-MOD 0xc3, EQL 749-run — 10 bytes total). 0.8.5
+/// wire format (spec §18.C): the MOD byte follows the EQL record without the
+/// 0.8.1 `ESC MOD` pair. Debug flags must not change it (the debug flush's
+/// `put(ESC, 0, …)` is a writer no-op).
+const PATCH_BIG: &[u8] = &[0xA7, 0xA3, 0xF9, 0xC3, 0xA7, 0xA3, 0xFD, 0x02, 0xED];
 
 /// DBGPRG (`-dprg`, `JDiff.cpp:145-148`): "Input " lines with the debug-width
 /// `P8zd` (= 10) positions; the C++ prints `lzPosOrg - 1`, so the first line
