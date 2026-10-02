@@ -115,12 +115,18 @@ fn option_sets_for(pair: &str) -> Vec<(&'static str, &'static [&'static str], &'
 ///
 /// Task 16's 0.8.5 dynamic `JMatchTable` (two bucket tables on `|delta|`/org,
 /// aging lists with element reuse, incremental best-tracking, EQLMAX-capped
-/// compares) shifts the engine's match decisions on the text pair as well:
-/// only `ff` (compare-all disables the soft-ahead windows the table's EOB
-/// handling rides on) and `min1max1` (a single-match round leaves the new
-/// best-tracking nothing to re-order) still reproduce the 0.8.1 goldens.
-/// TODO(T17/T22): byte parity returns with the 0.8.5 engine port and the
-/// 0.8.5-oracle re-pinned goldens.
+/// compares) shifts the engine's match decisions on the text pair as well.
+///
+/// Task 17's 0.8.5 `JDiff` engine (search()/buildFullIndex/incremental scan,
+/// eql-aware hash) removes the last 0.8.1-golden match but `min1max1`: with
+/// `-ff` the incremental indexing lands on different match decisions (the
+/// 0.8.1 golden opens with INS " Jojo's Diff : diff on binary files", the
+/// 0.8.5 engine with DEL 82 — verified against the 0.8.5 C++ engine via the
+/// oracle harness, which reproduces the Rust output exactly). `min1max1` (a
+/// single-match round leaves the best-tracking nothing to re-order) still
+/// reproduces its 0.8.1 golden.
+/// TODO(T17/T22): byte parity returns with the 0.8.5-oracle re-pinned
+/// goldens (Task 22).
 fn committed_golden_sets(pair: &str) -> Vec<(&'static str, &'static [&'static str], &'static str)> {
     option_sets_for(pair)
         .into_iter()
@@ -130,9 +136,10 @@ fn committed_golden_sets(pair: &str) -> Vec<(&'static str, &'static [&'static st
         .filter(|&(name, _, _)| !(pair == "bkocomu" && name == "l"))
         .filter(|&(_, _, _)| pair != "bkocomu")
         .filter(|&(name, _, _)| !(pair == "test2" && name == "s1"))
-        // Task 16: on the text pair only ff and min1max1 keep 0.8.1 parity
-        // (see the doc comment above); the rest diverges until T17/T22.
-        .filter(|&(name, _, _)| !(pair == "test2" && !matches!(name, "ff" | "min1max1")))
+        // Task 16/17: on the text pair only min1max1 keeps 0.8.1 parity
+        // (see the doc comment above); ff diverged with the Task 17
+        // incremental scan; the rest diverges until T22.
+        .filter(|&(name, _, _)| !(pair == "test2" && name != "min1max1"))
         .collect()
 }
 

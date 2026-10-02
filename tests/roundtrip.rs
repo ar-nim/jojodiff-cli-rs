@@ -373,6 +373,68 @@ fn stats_lines_match_reference() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+/// At `-vvv` the engine reports solutions that did not point to an equal
+/// region: `"\nInaccurate solution at positions %zd/%zd!\n"` plus the
+/// `"Comparing : ...           "` restart marker (`JDiff.cpp:255-258`). The
+/// miss counter increments in **release** builds at 0.8.5 (spec §18.E/§21.6;
+/// 0.8.1 counted it in debug builds only). On the bundled bkocomu pair with
+/// the current CLI defaults the engine reports exactly three misses, pinned
+/// here with their positions.
+///
+/// The positions are oracle-verified against the 0.8.5 C++ engine (oracle
+/// harness, MemFile readers, `-i 6`): the C++ 32-bit-hkey build divides the
+/// MB count by sizeof(hkey)+sizeof(off_t) = 12, so its `-i 6` table is
+/// 524288 elements → prime 524287 — exactly the port's 8 MB table (fixed
+/// divisor 16, spec §18.E) — and reproduces these three lines verbatim.
+/// (With the CLI-shaped `-i 8` the C++ builds a different prime and lands
+/// on different, equally valid match decisions.)
+// TODO(T20): the surrounding verbose block is still 0.8.1-worded; the full
+// 0.8.5 verbose stream becomes assertable at Task 20.
+#[test]
+fn inaccurate_solution_lines_at_verbose_3() {
+    let dir = temp_dir("t17-inacc");
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures");
+    let a = fixtures.join("bkocomu.0000.fil");
+    let b = fixtures.join("bkocomu.0009.fil");
+    let outp = dir.join("p.bin");
+
+    let out = run(&[
+        OsStr::new("-vvv"),
+        a.as_os_str(),
+        b.as_os_str(),
+        outp.as_os_str(),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_str(&out));
+    let stderr = stderr_str(&out);
+    assert!(
+        stderr.contains("\nInaccurate solution at positions 1338481/1240064!\n"),
+        "first miss line: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("\nInaccurate solution at positions 1561636/1816576!\n"),
+        "second miss line: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("\nInaccurate solution at positions 1922267/1854717!\n"),
+        "third miss line: {stderr:?}"
+    );
+    assert_eq!(
+        stderr.matches("Inaccurate solution at positions").count(),
+        3,
+        "exactly three misses on this pair"
+    );
+    // Each miss prints the "Comparing : ...           " restart marker
+    // directly after the line (miss line ends "!\n").
+    assert_eq!(
+        stderr
+            .matches("!\nComparing : ...           ")
+            .count(),
+        3,
+        "restart marker after each miss"
+    );
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 /// Option-quirk contract (`main.cpp:205-315`): `-m 1` selects in-memory mode
 /// (integer division first), trailing options after the first filename are
 /// just filenames, `-s` divides by 1024 while above 1024, and preset values

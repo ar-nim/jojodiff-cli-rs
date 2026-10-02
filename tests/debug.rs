@@ -189,8 +189,9 @@ fn prg_big_mismatch_and_current_position() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
-/// DBGAHD (`-dahd`, `JDiff.cpp:216-218`): the find-ahead summary. On this
-/// fixture exactly one line is produced.
+/// DBGAHD (`-dahd`, `JDiff.cpp:281-283`): the find-ahead summary. On this
+/// single-edit fixture exactly one line is produced, with the same values as
+/// the 0.8.1 pin (pinned against the 0.8.5 C++ engine's debug build).
 #[test]
 fn ahd_findahead_line_big() {
     let dir = temp_dir("ahd-big");
@@ -204,56 +205,70 @@ fn ahd_findahead_line_big() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
-/// DBGAHH (`-dahh`) in the prescan loop (`JDiff.cpp:546-550`): the final
-/// field is `%8d` of the literal 0. First and last line oracle-pinned.
+/// DBGAHH (`-dahh`) in the 0.8.5 `buildFullIndex` (`JDiff.cpp:758-762`): the
+/// site lives in the **verbose>1** slow loop only (0.8.1 printed it at any
+/// verbosity), so the run needs `-vv`; both trailing fields are `%8d` /
+/// `P8zd` as before. First and last line pinned against the 0.8.5 C++
+/// engine's debug build (oracle harness, `-D_DEBUG` + 32-bit `hkey`): the
+/// eql-aware hash leaves the first window's key unchanged (no equal-adjacent
+/// bytes → eql stays 0) but shifts the last one (`956ca3a4` → `957ca3a4`,
+/// the 0.8.1 pin).
 #[test]
 fn ahh_prescan_lines_big() {
     let dir = temp_dir("ahh-big");
     let (org, new) = big_pair();
-    let (stdout, out) = run_dbg(&dir, &org, &new, &["-dahh"], "ahhB");
+    let (stdout, out) = run_dbg(&dir, &org, &new, &["-vv", "-dahh"], "ahhB");
     assert_eq!(out.status.code(), Some(0));
-    let lines: Vec<&str> = stdout.lines().collect();
-    // The prescan init loop consumes the first SMPSZE-1 = 31 bytes, so the
-    // add loop stores samples at positions 31..=999: 969 lines.
-    assert_eq!(lines.len(), 969, "one line per stored sample: {stdout:?}");
+    // Filter out the verbose>1 engine/CLI text mixed into the stream; the
+    // "Indexing  : ...           " marker shares the first line with the
+    // first trace (no newline in between, 1:1 with the C++), so each line
+    // is trimmed to its ufHshAdd trace.
+    let lines: Vec<&str> = stdout
+        .lines()
+        .filter_map(|l| {
+            let i = l.find("ufHshAdd")?;
+            Some(&l[i..])
+        })
+        .collect();
+    // The buildFullIndex init loop consumes the first SMPSZE-1 = 31 bytes,
+    // so the add loop stores samples at positions 31..=999: 969 lines.
+    assert_eq!(lines.len(), 969, "one line per stored sample");
     assert_eq!(lines[0], "ufHshAdd(d5 -> c8d9b3a9,         31,        0)");
     assert_eq!(
         lines[lines.len() - 1],
-        "ufHshAdd(9a -> 956ca3a4,        999,        0)"
+        "ufHshAdd(9a -> 957ca3a4,        999,        0)"
     );
     fs::remove_dir_all(&dir).unwrap();
 }
 
-/// DBGAHH in the find-ahead loop (`JDiff.cpp:388-392`, needs `-ff`): both
-/// trailing fields are `P8zd` (width 10), unlike the prescan's `%8d` tail.
+/// DBGAHH in the search loop: 0.8.5 has **no DBGAHH site left there** (the
+/// 0.8.1 find-ahead trace `JDiff.cpp:388-392` is gone with the search()
+/// rewrite; spec §18.G lists only `JDiff.cpp:759`). `-ff -dahh` therefore
+/// stays silent.
 #[test]
 fn ahh_findahead_lines_ff() {
     let dir = temp_dir("ahh-ff");
     let (org, new) = big_pair();
     let (stdout, out) = run_dbg(&dir, &org, &new, &["-ff", "-dahh"], "ahhFF");
     assert_eq!(out.status.code(), Some(0));
-    let first = stdout.lines().next().unwrap();
-    assert_eq!(
-        first, "ufHshAdd(d6 -> d0d7708e,        257,          0)",
-        "10-wide final field: {stdout:?}"
+    assert!(
+        stdout.is_empty(),
+        "no DBGAHH site in the 0.8.5 search loop: {stdout:?}"
     );
     fs::remove_dir_all(&dir).unwrap();
 }
 
-/// DBGHSK (`-dhsk`, `JHashPos.h:111-116`): "Hash Key" lines per hashed byte,
-/// with the printable-ASCII `%c` filter (space otherwise).
+/// DBGHSK (`-dhsk`) at 0.8.5: the hash moved from `JHashPos` into `JDiff`
+/// (`JDiff.cpp:361-371`) and the "Hash Key" trace site was dropped — the
+/// flag is accepted with **zero print sites** (spec §18.G/§21.13).
 #[test]
-fn hsk_hash_key_lines_tiny() {
+fn hsk_flag_is_silent() {
     let dir = temp_dir("hsk-tiny");
     let (stdout, out) = run_dbg(&dir, ORG_A, NEW_B, &["-dhsk"], "hsk");
     assert_eq!(out.status.code(), Some(0));
     assert!(
-        stdout.starts_with("Hash Key 68 68 h\n"),
-        "first line: {stdout:?}"
-    );
-    assert!(
-        stdout.contains("Hash Key 195e 20  \n"),
-        "space byte prints two trailing spaces: {stdout:?}"
+        stdout.is_empty(),
+        "-dhsk has zero print sites at 0.8.5: {stdout:?}"
     );
     fs::remove_dir_all(&dir).unwrap();
 }
@@ -291,10 +306,13 @@ fn hsh_ini_and_add_lines_big() {
 /// DBGMCH (`-dmch`), 0.8.5 formats (Task 16 port): the isBest election line
 /// (`JMatchTable.cpp:633-642`: "Val/Old/Inv", compare, '*' when elected, the
 /// node dump), the "Add" line (`:349-354`, `ret=` is the eMatchReturn
-/// discriminant — 6 = Valid) and the getbest verdict (`:153-168`). On this
-/// fixture exactly three lines are produced; all fields are deterministic.
-/// (The 0.8.1 pins "Mch Add (...) New (...) Bse (...)" and the per-candidate
-/// "Mch 0*[C ...]" dump are gone at 0.8.5.)
+/// discriminant — 6 = Valid), the "Mch Old Max Distance" aging line and the
+/// getbest verdict (`:153-168`). Pinned against the 0.8.5 C++ engine's
+/// debug build: the 0.8.5 search's look-back re-init also adds the match at
+/// 171 (found during the backward scan), which the table elects first; the
+/// getbest verdict still selects the verified 251 match. (The 0.8.1 pins
+/// "Mch Add (...) New (...) Bse (...)" and the per-candidate "Mch 0*[C ...]"
+/// dump are gone at 0.8.5.)
 #[test]
 fn mch_lines_big() {
     let dir = temp_dir("mch-big");
@@ -304,8 +322,9 @@ fn mch_lines_big() {
     assert_eq!(
         stdout,
         concat!(
-            "Val   256 * [ 0:       282>         0<       282~       282#   1:       251+ 256] bse=250 fnd=251=251(1)\n",
-            "Add         [  :       282>         0<       282] bse=250 ret=6\n",
+            "Val   256 * [ 0:       171>         0<       171~       171#   1:       251+ 256] bse=250 fnd=251=251(1)\n",
+            "Mch Old Max Distance = 79\n",
+            "Add         [  :       171>         0<       171] bse=250 ret=6\n",
             "Suboptimal Match at 250: from 251(1), length 256\n",
         ),
         "exact Mch output"
@@ -316,7 +335,9 @@ fn mch_lines_big() {
 /// DBGCMP (`-dcmp`), 0.8.5 formats (Task 16 port): the check() prologue
 /// ("Cmp Col|Gld (…): " — `JMatchTable.cpp:825-830`, was "Fnd (…): ") and
 /// the result line (`:857-864`, run capped at EQLMAX 256 — was 24 — with
-/// the bytes printed `%02x` hex, was `%3o` octal). Exactly one line here.
+/// the bytes printed `%02x` hex, was `%3o` octal). Exactly one line here,
+/// identical to the 0.8.1-engine pin (pinned against the 0.8.5 C++
+/// engine's debug build).
 #[test]
 fn cmp_check_line_big() {
     let dir = temp_dir("cmp-big");
@@ -331,49 +352,27 @@ fn cmp_check_line_big() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
-/// DBGDST (`-ddst`, `JDiff.cpp:574-577` 0.8.1 wiring, kept until Task 17
-/// moves the 0.8.5 site to verbose>2 with 10 buckets): the hashtable
-/// distribution after the prescan, over 128 buckets.
-///
-/// 0.8.5 formulas (spec §18.E, `JHashPos.cpp:192-238`): `Overload =
-/// colMax/4 - 1` (0 while colMax is 4), and the guarded summary lines with a
-/// trailing `%`: `Avg/Min/Max/% = liMax > 0 ? 100 - (liMin/(liMax/100)) : -1`
-/// and `Load = liCnt / (miHshPme/100)`. The fixture moved from the 1000-byte
-/// pair to 100000 bytes because the 0.8.5 Avg/Min/Max guard does not cover
-/// `liMax < 100` (inner `liMax/100` = 0 → C++ SIGFPE, port panics): at 1000
-/// bytes `liMax` is 7, at 100000 bytes it is 781.
-///
-/// Values are derived by exact simulation of the ported algorithm (default
-/// 8 MB table: prime 524287; all 99969 prescan adds store, no load rollover;
-/// the *2+byte keys mod 524287 clump, keeping 61424 bucket positions ≤ max):
-/// 128 buckets of width 100000/128 = 781, buckets 0..2 empty, bucket 127
-/// full, Avg/Min/Max 479/0/781 → 100 - (0/7) = 100, Load 61424/5242 = 11.
-// TODO(T17): the 0.8.5 call sites pass 10 buckets under -vvv
-// (`JDiff.cpp:324-327,784-787`); re-pin then (the oracle then reproduces
-// this output directly).
+/// DBGDST (`-ddst`) at 0.8.5: the flag is accepted but has **zero print
+/// sites** (spec §18.G/§21.13). The 0.8.1 site (distribution after the
+/// prescan, 128 buckets) is gone with the 0.8.5 prescan; `dist()` now serves
+/// only the release-visible verbose>2 call sites (`JDiff.cpp:324-327,784-787`,
+/// 10 buckets), which need `-vvv`, not `-ddst`. The debug stream must stay
+/// completely empty.
+// TODO(T20): the -vvv dist output (verbose-driven, 10 buckets) is part of
+// the 0.8.5 verbose block; it becomes assertable with the Task 20 verbose
+// work.
 #[test]
-fn dst_distribution_lines_big() {
+fn dst_flag_is_silent() {
     let dir = temp_dir("dst-big");
     let mut org = lcg(1, 100_000);
     let mut new = org.clone();
     new[250] ^= 0xFF;
     let (stdout, out) = run_dbg(&dir, &org, &new, &["-ddst"], "dstB");
     assert_eq!(out.status.code(), Some(0));
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 2 + 128 + 2, "2 + 128 buckets + 2 summaries");
-    // Bucket width = 100000/128 = 781 positions ("Pos=" bounds are idx*781).
-    assert_eq!(lines[0], "Hash Dist Overload    = 0");
-    assert_eq!(lines[1], "Hash Dist Reliability = 48");
-    assert_eq!(
-        lines[2],
-        "Hash Dist        0 Pos=         0:       781 Cnt=       0 Rlb=-1"
+    assert!(
+        stdout.is_empty(),
+        "-ddst has zero print sites at 0.8.5: {stdout:?}"
     );
-    assert_eq!(
-        lines[129],
-        "Hash Dist      127 Pos=     99187:     99968 Cnt=     781 Rlb=1"
-    );
-    assert_eq!(lines[130], "Hash Dist Avg/Min/Max/% = 479/0/781/100%");
-    assert_eq!(lines[131], "Hash Dist Load          = 61424/524287=11%");
     fs::remove_dir_all(&dir).unwrap();
 }
 

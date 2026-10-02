@@ -26,14 +26,14 @@
 //! vectors (deterministic, matches the observable behavior); documented in
 //! [`JHashPos::get`]'s zero-bucket answer and pinned by the tests.
 //!
-//! # Interim `hash` shim (controller ruling, option B)
+//! # The hash function (0.8.5)
 //!
 //! 0.8.5 moved the hash function out of `JHashPos` into `JDiff::hash`
 //! (`JDiff.cpp:361-371`), ported as the pure function
-//! [`crate::jdiff::hash_key`]. The engine call sites still use this module's
-//! [`JHashPos::hash`] — kept as the 0.8.1 pure `*2 + byte` shim — until
-//! Task 17 rewires them; the DBGHSK "Hash Key" trace site rides along with
-//! the shim (0.8.5 has zero DBGHSK sites; Task 21 owns the site census).
+//! [`crate::jdiff::hash_key`] which adds the equal-run counter into the
+//! value. This module stores and looks up keys only; the 0.8.1
+//! `JHashPos::hash` shim and its DBGHSK trace were retired with the Task 17
+//! engine rewire (0.8.5 has zero DBGHSK sites, spec §18.G).
 //!
 //! # Debug prints (spec §14, `debug` feature)
 //!
@@ -53,8 +53,10 @@
 //!
 //! let mut tbl = JHashPos::new(1); // 1 MB: 65536 elements -> prime 65521
 //! let mut key = 0u32;
+//! let mut old = -1i32;
+//! let mut eql = 0i32;
 //! for b in b"the quick brown fox" {
-//!     tbl.hash(*b as i32, &mut key);
+//!     key = jojodiff_cli_rs::jdiff::hash_key(key, &mut old, *b as i32, &mut eql);
 //! }
 //! tbl.add(key, 4242, 0); // store the sample (highest quality)
 //!
@@ -64,8 +66,9 @@
 //! ```
 
 use crate::defs::{SMPSZE, get_lower_prime};
+use crate::jdebug::dbg_print;
 #[cfg(feature = "debug")]
-use crate::jdebug::{DBGHSH, DBGHSK, c_chr, dbg, dbg_print};
+use crate::jdebug::{DBGHSH, dbg};
 
 /// Override when the collision counter exceeds this threshold
 /// (`JHashPos.cpp:33`).
@@ -168,34 +171,6 @@ impl JHashPos {
         }
 
         tbl
-    }
-
-    /// Interim engine shim for the 0.8.1 hash (`JHashPos.h:109-117`): the
-    /// value corresponds to a sample of 32 bytes, the u32 arithmetic wraps
-    /// exactly like the 32-bit C++ `hkey` of the oracle build.
-    ///
-    /// 0.8.5 has no `JHashPos::hash` — the function moved to `JDiff::hash`
-    /// (`JDiff.cpp:361-371`), ported as [`crate::jdiff::hash_key`] which adds
-    /// the equal-run counter into the value. The engine call sites still
-    /// call this shim until Task 17 rewires them (controller ruling, option
-    /// B), so the hash values feeding the engine stay the 0.8.1 pure
-    /// `*2 + byte`; engine outputs still shift in this task through the
-    /// 0.8.5 table sizing and quality gate. The DBGHSK trace rides along
-    /// (0.8.5 has no DBGHSK site here; Task 21 owns the site census).
-    pub fn hash(&self, byte: i32, cur: &mut u32) {
-        *cur = cur.wrapping_mul(2).wrapping_add(byte as u32);
-
-        /* Debug: 0.8.1 hash-function trace (JHashPos.h:111-116), kept only
-         * while the shim is live. */
-        #[cfg(feature = "debug")]
-        if dbg(DBGHSK) {
-            dbg_print(format_args!(
-                "Hash Key {:x} {:x} {}\n",
-                cur,
-                byte as u32,
-                c_chr(byte)
-            ));
-        }
     }
 
     /// Hashtable add (`JHashPos.cpp:99-139`).
@@ -337,9 +312,11 @@ impl JHashPos {
 
     /// Print the hashtable distribution over `bck` buckets
     /// (`JHashPos::dist`, `JHashPos.cpp:192-238`); `max` is the largest
-    /// position to find. Debug builds only; the 0.8.5 engine call sites are
-    /// `JDiff.cpp:324-327,784-787` (verbose>2, 10 buckets) — this port's
-    /// legacy DBGDST call site stays until Task 17 rewires it.
+    /// position to find. **Not debug-gated**: the 0.8.5 engine calls it from
+    /// release-visible verbose>2 sites (`JDiff.cpp:324-327,784-787`,
+    /// 10 buckets — the jdiff tail for incremental scanning and the
+    /// buildFullIndex tail); the 0.8.1 DBGDST debug call site is gone
+    /// (spec §18.G: `-d dst` has zero sites).
     ///
     /// The 0.8.5 quirks are preserved: positions beyond the last bucket are
     /// *not* counted (`liIdx >= aiBck` only assigns `liIdx = 0`, the increment
@@ -352,7 +329,6 @@ impl JHashPos {
     /// SIGFPE (integer division by zero); this port panics on the same
     /// division. (0.8.5's own call sites pass 10 buckets over positions well
     /// above 1000, so the shipped binary never reaches it.)
-    #[cfg(feature = "debug")]
     pub fn dist(&self, max: i64, bck: i32) {
         dbg_print(format_args!(
             "Hash Dist Overload    = {}\n",
@@ -562,15 +538,22 @@ mod tests {
             .collect();
 
         // Sample 32-byte windows over the data, as the diff engine will:
-        // window i gets the incremental hash of data[i..i + 32].
+        // window i gets the incremental hash of data[i..i + 32] (0.8.5
+        // hash: the equal-run counter rides in the key).
         let mut keys = Vec::with_capacity(1000);
-        for i in 0..1000i64 {
-            let mut key = 0u32;
-            for &b in &data[i as usize..i as usize + 32] {
-                tbl.hash(i32::from(b), &mut key);
+        let mut key = 0u32;
+        let mut old = -1i32;
+        let mut eql = 0i32;
+        let mut win: std::collections::VecDeque<i32> = std::collections::VecDeque::new();
+        for (i, &b) in data.iter().enumerate() {
+            key = crate::jdiff::hash_key(key, &mut old, i32::from(b), &mut eql);
+            win.push_back(i32::from(b));
+            if win.len() > 32 {
+                win.pop_front();
+                let wp = (i - 31) as i64; // window start position
+                tbl.add(key, wp, 0); // highest quality
+                keys.push((key, wp));
             }
-            tbl.add(key, i, 0); // highest quality
-            keys.push(key);
         }
 
         // 0.8.5 oracle (`JHashPos.cpp:99-138`): col_cnt starts at col_max 4,
@@ -579,50 +562,53 @@ mod tests {
         // (prime 65521), so every add stores into bucket key % prime.
         let mut oracle_key = [0u32; PRIME as usize];
         let mut oracle_pos = [0i64; PRIME as usize];
-        for (p, &k) in keys.iter().enumerate() {
+        for &(k, wp) in &keys {
             let idx = (k % PRIME) as usize;
             oracle_key[idx] = k;
-            oracle_pos[idx] = p as i64;
+            oracle_pos[idx] = wp;
         }
         let occupied = keys
             .iter()
-            .map(|&k| k % PRIME)
+            .map(|&(k, _)| k % PRIME)
             .collect::<HashSet<_>>()
             .len();
-        assert!(occupied < 1000); // overwrites really occurred
+        assert!(occupied < keys.len()); // overwrites really occurred
 
         // Every lookup answers exactly per the oracle, and the hit counter
         // matches (including the get(0) above).
         let mut hits = 1;
-        for &k in &keys {
+        for &(k, wp) in &keys {
             let idx = (k % PRIME) as usize;
             let found = tbl.get(k, &mut pos);
             assert_eq!(found, k == oracle_key[idx], "key {k} bucket {idx}");
             if found {
                 assert_eq!(pos, oracle_pos[idx], "key {k} bucket {idx}");
+                assert_eq!(pos, wp);
                 hits += 1;
             }
         }
         assert_eq!(tbl.hash_hits(), hits);
-        assert!(hits < 1000); // misses really occurred
+        assert!(hits < keys.len() as i32); // misses really occurred
 
         // A key that was never stored answers false.
         assert!(!tbl.get(u32::MAX, &mut pos));
     }
 
-    /// The interim engine shim: 0.8.1's `JHashPos::hash` (`*2 + byte`,
-    /// wrapping on u32) which the engine keeps using until Task 17 rewires
-    /// the call sites to [`crate::jdiff::hash_key`] (controller ruling,
-    /// option B).
+    /// The 0.8.5 rolling key (`JDiff::hash`, `JDiff.cpp:361-371`): with eql
+    /// pinned at 0 (alternating bytes) the value reduces to the pure
+    /// `*2 + byte` accumulation wrapping on u32.
     #[test]
-    fn hash_shim_wraps_u32() {
-        let tbl = JHashPos::new(1);
+    fn rolling_key_wraps_u32() {
         let mut h = 0u32;
+        let mut old = -1i32;
+        let mut eql = 0i32;
         let mut k = 0u32;
         for b in 0u32..300 {
-            tbl.hash(b as i32, &mut h);
-            k = k.wrapping_mul(2).wrapping_add(b);
+            let byte = (b % 2) as i32; // alternating: eql stays 0
+            h = crate::jdiff::hash_key(h, &mut old, byte, &mut eql);
+            k = k.wrapping_mul(2).wrapping_add(byte as u32);
         }
         assert_eq!(h, k);
+        assert_eq!(eql, 0);
     }
 }
