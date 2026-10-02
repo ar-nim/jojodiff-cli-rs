@@ -692,13 +692,15 @@ fn big_pair() -> (Vec<u8>, Vec<u8>) {
 /// Fixture pair: (original bytes, new bytes).
 type FixturePair = (Vec<u8>, Vec<u8>);
 
-// TODO(T19): the 0.8.5 writer (implicit MOD, spec §18.C) makes every patch of
+// TODO(T20): the 0.8.5 writer (implicit MOD, spec §18.C) makes every patch of
 // this matrix carry implicit-MOD runs — e.g. tiny/default now begins
 // `ESC EQL 12 "byeby" ESC INS e` — and the current `jptch` decoder is still
 // jpatch.cpp's 0.8.1 reader, which silently drops implicit-MOD data bytes
-// (observed: tiny/default restores "hello world e"). Task 19 lands the 0.8.5
-// JPatcht reader, which restores these patches byte-exact; the round-trip
-// gate itself (restores B byte-exact) is NOT loosened.
+// (observed: tiny/default restores "hello world e"). Task 19 landed the 0.8.5
+// JPatcht reader and the library-level replacement gate
+// `library_roundtrip_jdiff_patcht` (below); this CLI-driven gate re-enables
+// when Task 20 deletes the 0.8.1 binary and wires `-u`/argv[0] through the
+// library. The round-trip gate itself (restores B byte-exact) is NOT loosened.
 #[ignore]
 #[test]
 fn roundtrip_all_option_sets() {
@@ -1173,4 +1175,419 @@ fn seek_read_write_error_exits() {
     }
 
     fs::remove_dir_all(&dir).unwrap();
+}
+
+// ===========================================================================
+// Task 19: library-level patch gates (`JPatcht` + `JFileOut`)
+// ===========================================================================
+//
+// The CLI round-trip gates above drive the binaries, whose `jptch` is still
+// the 0.8.1 reader (drops implicit-MOD bytes) until Task 20 — they stay
+// `#[ignore]`d TODO(T20). These are their library-level replacements:
+// JDiff + JOutBin produce a patch, JPatcht + JFileOut apply it, in memory.
+//
+// Library traces and error lines go to the process streams (stddbg = stderr
+// by default; the C++ `fprintf(stderr, ...)` sites), which an in-process
+// test cannot capture — the two `*_child` gates below re-exec this test
+// binary with `--exact` and assert the captured stderr bytes.
+
+use std::cell::RefCell;
+use std::io::{Cursor, Write};
+use std::rc::Rc;
+
+use jojodiff_cli_rs::defs::{EXI_ERR, EXI_OK};
+use jojodiff_cli_rs::jdiff::JDiff;
+use jojodiff_cli_rs::jfile::{JFileAhead, JFileMem};
+use jojodiff_cli_rs::jfileout::JFileOut;
+use jojodiff_cli_rs::jout::JOutBin;
+use jojodiff_cli_rs::jpatcht::JPatcht;
+
+/// `Rc<RefCell<Vec<u8>>>` sink so the patch bytes survive the boxed
+/// `Box<dyn JOut>` (JOutBin::into_inner sits behind the concrete type).
+#[derive(Clone)]
+struct SharedSink(Rc<RefCell<Vec<u8>>>);
+
+impl Write for SharedSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Library-level engine parameters — the knobs the CLI option sets map to
+/// (defaults and `-b`/`-f`/`-ff` presets per `src/bin/jdiff.rs`; `-s 1` is
+/// the hashtable MB count). The exact CLI wiring is Task 20; the round-trip
+/// property does not depend on which valid engine configuration produced
+/// the patch. `src_bkt`/`src_scn` stay at the defaults except `-ff`
+/// (prescan off).
+#[derive(Clone, Copy)]
+struct LibParams {
+    hsh_mbt: i32,
+    mch_max: i32,
+    mch_min: i32,
+    ahd_max: i64,
+    cmp_all: bool,
+    src_scn: bool,
+}
+
+const P_DEFAULT: LibParams = LibParams {
+    hsh_mbt: 8,
+    mch_max: 32,
+    mch_min: 8,
+    ahd_max: 256 * 1024,
+    cmp_all: true,
+    src_scn: true,
+};
+
+const P_B: LibParams = LibParams {
+    hsh_mbt: 32,
+    mch_max: 128,
+    mch_min: 16,
+    ahd_max: 4096 * 1024,
+    cmp_all: true,
+    src_scn: true,
+};
+
+const P_F: LibParams = LibParams {
+    hsh_mbt: 4,
+    mch_max: 16,
+    mch_min: 8,
+    ahd_max: 64 * 1024,
+    cmp_all: false,
+    src_scn: true,
+};
+
+const P_FF: LibParams = LibParams {
+    hsh_mbt: 1,
+    mch_max: 16,
+    mch_min: 4,
+    ahd_max: 4096 * 1024,
+    cmp_all: false,
+    src_scn: false,
+};
+
+const P_S1: LibParams = LibParams {
+    hsh_mbt: 1,
+    mch_max: 32,
+    mch_min: 8,
+    ahd_max: 256 * 1024,
+    cmp_all: true,
+    src_scn: true,
+};
+
+const P_MIN1MAX1: LibParams = LibParams {
+    hsh_mbt: 8,
+    mch_max: 1,
+    mch_min: 1,
+    ahd_max: 256 * 1024,
+    cmp_all: true,
+    src_scn: true,
+};
+
+/// Produces a patch with the library engine (`JDiff` + `JOutBin` over
+/// in-memory readers), like the CLI's default run.
+fn lib_diff(org: Vec<u8>, new: Vec<u8>, p: LibParams) -> Vec<u8> {
+    let sink = SharedSink(Rc::new(RefCell::new(Vec::new())));
+    let mut jd = JDiff::new(
+        Box::new(JFileMem::new(org)),
+        Box::new(JFileMem::new(new)),
+        Box::new(JOutBin::new(sink.clone())),
+        p.hsh_mbt,
+        0,
+        true,
+        p.src_scn,
+        p.mch_max,
+        p.mch_min,
+        p.ahd_max,
+        p.cmp_all,
+    );
+    let rc = jd.jdiff();
+    assert_eq!(rc, 0, "library jdiff must succeed on differing pairs");
+    let bytes = std::mem::take(&mut *sink.0.borrow_mut());
+    assert!(!bytes.is_empty(), "patch for a differing pair is non-empty");
+    bytes
+}
+
+/// Applies `patch` to `org` with the 0.8.5 library reader over in-memory
+/// files (the byte-loop fallback of `JFileOut::copyfrom`).
+fn lib_apply(org: &[u8], patch: &[u8], v: i32) -> (i32, Vec<u8>) {
+    let mut org_f = JFileMem::new(org.to_vec());
+    let mut pch_f = JFileMem::new(patch.to_vec());
+    let mut jp = JPatcht::new(&mut org_f, &mut pch_f, JFileOut::new(Vec::new()), v);
+    let rc = jp.jpatch();
+    (rc, jp.into_inner().into_inner())
+}
+
+/// Same, over buffered look-ahead readers (the `getbuf` fast path of
+/// `JFileOut::copyfrom`).
+fn lib_apply_ahead(org: &[u8], patch: &[u8]) -> (i32, Vec<u8>) {
+    let mut org_f = JFileAhead::new(Cursor::new(org.to_vec()), "Org", 1024, 64);
+    let mut pch_f = JFileAhead::new(Cursor::new(patch.to_vec()), "Pch", 1024, 64);
+    let mut jp = JPatcht::new(&mut org_f, &mut pch_f, JFileOut::new(Vec::new()), 0);
+    let rc = jp.jpatch();
+    (rc, jp.into_inner().into_inner())
+}
+
+/// Library-level replacement for the CLI round-trip gates
+/// (`roundtrip_gate` in tests/oracle.rs and `roundtrip_all_option_sets`
+/// above, both `#[ignore]`d TODO(T20) while the `jptch` binary is still the
+/// 0.8.1 reader): the library diff output applied by the 0.8.5 `JPatcht`
+/// restores the new file byte-exact, across the fixture pairs and the
+/// option sets that still run. Every leg applies through JFileMem AND the
+/// buffered JFileAhead reader.
+#[test]
+fn library_roundtrip_jdiff_patcht() {
+    let sets: [(&str, LibParams); 6] = [
+        ("default", P_DEFAULT),
+        ("-b", P_B),
+        ("-f", P_F),
+        ("-ff", P_FF),
+        ("-s 1", P_S1),
+        ("-min 1 -max 1", P_MIN1MAX1),
+    ];
+
+    // The tiny pair takes the full matrix.
+    for (label, p) in sets {
+        let patch = lib_diff(ORG_A.to_vec(), NEW_B.to_vec(), p);
+        let (rc, out) = lib_apply(ORG_A, &patch, 0);
+        assert_eq!(rc, EXI_OK, "{label} mem apply");
+        assert_eq!(out, NEW_B, "{label} mem round trip");
+        let (rc, out) = lib_apply_ahead(ORG_A, &patch);
+        assert_eq!(rc, EXI_OK, "{label} ahead apply");
+        assert_eq!(out, NEW_B, "{label} ahead round trip");
+    }
+
+    // The corpus pairs take the fast subsets (engine run time).
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures");
+    for (pair, org_name, new_name, subset) in [
+        (
+            "bkocomu",
+            "bkocomu.0000.fil",
+            "bkocomu.0009.fil",
+            [&"default", &"-f", &"-ff", &"-b"],
+        ),
+        (
+            "test2",
+            "test2.001.txt",
+            "test2.002.txt",
+            [&"default", &"-f", &"-ff", &"-b"],
+        ),
+    ] {
+        let org = fs::read(fixtures.join(org_name)).expect("read org fixture");
+        let new = fs::read(fixtures.join(new_name)).expect("read new fixture");
+        for label in subset {
+            let p = sets
+                .iter()
+                .find(|(l, _)| l == label)
+                .expect("known label")
+                .1;
+            let patch = lib_diff(org.clone(), new.clone(), p);
+            let (rc, out) = lib_apply(&org, &patch, 0);
+            assert_eq!(rc, EXI_OK, "{pair}/{label} mem apply");
+            assert_eq!(out, new, "{pair}/{label} mem round trip");
+            let (rc, out) = lib_apply_ahead(&org, &patch);
+            assert_eq!(rc, EXI_OK, "{pair}/{label} ahead apply");
+            assert_eq!(out, new, "{pair}/{label} ahead round trip");
+        }
+    }
+}
+
+/// Cross-version compatibility gate (spec §18.C/§22.3) at library level:
+/// every committed 0.8.1 golden patch (`tests/fixtures/golden/**`, generated
+/// by the 0.8.1 C++ oracle) applies through the 0.8.5 `JPatcht` and restores
+/// the corresponding "new" fixture byte-exact. Explicit opcodes are a subset
+/// of the 0.8.5 grammar — this pins the one-way compatibility.
+#[test]
+fn golden_081_patches_apply_and_restore() {
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures");
+    let golden = fixtures.join("golden");
+    assert!(
+        golden.is_dir(),
+        "committed goldens missing at {}",
+        golden.display()
+    );
+
+    let mut checked = 0;
+    for (pair, org_name, new_name) in [
+        ("bkocomu", "bkocomu.0000.fil", "bkocomu.0009.fil"),
+        ("test2", "test2.001.txt", "test2.002.txt"),
+    ] {
+        let org = fs::read(fixtures.join(org_name)).expect("read org fixture");
+        let new = fs::read(fixtures.join(new_name)).expect("read new fixture");
+        for entry in fs::read_dir(golden.join(pair)).expect("golden pair dir") {
+            let path = entry.expect("golden entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jdf") {
+                continue; // listings (.asc/.rgn) and stderr captures are not patches
+            }
+            let patch = fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            let (rc, out) = lib_apply(&org, &patch, 0);
+            assert_eq!(rc, EXI_OK, "{}: apply failed", path.display());
+            assert_eq!(out, new, "{}: restored bytes differ", path.display());
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= 22,
+        "expected the 22 committed golden .jdf patches (10 bkocomu + 12 test2), found {checked}"
+    );
+}
+
+/// Re-execs this test binary for `test_name` with `guard` set and captures
+/// the child's output — the only way to pin library output that the port
+/// writes to the process streams (stddbg = stderr by default). The child
+/// runs under `--nocapture` so nothing intercepts the streams.
+fn run_self(test_name: &str, guard: &'static str) -> Output {
+    Command::new(std::env::current_exe().expect("current test binary"))
+        .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+        .env(guard, "1")
+        .output()
+        .expect("re-exec test binary")
+}
+
+/// The trailing-byte warning line is byte-exact and goes to (real) stderr
+/// (`JPatcht.cpp:241-245`), with the `EXI_ERR` return.
+#[test]
+fn patcht_trailing_byte_warning_line() {
+    const GUARD: &str = "T19_WARN_CHILD";
+    if std::env::var_os(GUARD).is_some() {
+        let (rc, out) = lib_apply(ORG_A, &[0xA7], 0);
+        assert_eq!(rc, EXI_ERR);
+        assert!(out.is_empty());
+        return;
+    }
+    let out = run_self("patcht_trailing_byte_warning_line", GUARD);
+    assert!(out.status.success(), "child failed: {}", stderr_str(&out));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "Warning: unexpected trailing byte at end of file, patch file may be corrupted.\n"
+    );
+}
+
+/// Verbose traces are byte-exact with `JPatcht.cpp`'s formats
+/// (`:101-107` per-byte, `:156-158/:166-169/:179-182` ESC traces,
+/// `:265-335` op summaries and the EOF line) and gated exactly as the C++
+/// gates them (all verbose-driven, none debug-driven): per-byte lines at
+/// `> 1`, ESC traces at `> 2`, MOD/INS summaries at `== 1`, DEL/EQL/BKT/EOF
+/// at `>= 1`. Positions print with `P8zd` (p12() below handles the
+/// debug/release width switch).
+#[test]
+fn patcht_verbose_traces_byte_exact() {
+    const GUARD: &str = "T19_VERBOSE_CHILD";
+    if std::env::var_os(GUARD).is_some() {
+        // Child: run every case; assertions on the applied bytes run here,
+        // the parent asserts the stderr bytes below.
+        let (rc, out) = lib_apply(ORG_A, PATCH_AB_081, 0);
+        assert_eq!((rc, out.as_slice()), (EXI_OK, NEW_B));
+        for v in [1, 2, 3] {
+            let (rc, out) = lib_apply(ORG_A, PATCH_AB_081, v);
+            assert_eq!((rc, out.as_slice()), (EXI_OK, NEW_B), "v={v}");
+        }
+        let (rc, out) = lib_apply(b"0123456789", &[0xA7, 0xA6, b'A', 0xA7, 0xA6, b'B'], 3);
+        assert_eq!(rc, EXI_OK);
+        assert_eq!(out, [b'A', 0xA7, 0xA6, b'B']);
+        let (rc, out) = lib_apply(b"0123456789", &[0xA7, 0xA6, b'A', 0xA7, 0xA7, b'B'], 3);
+        assert_eq!(rc, EXI_OK);
+        assert_eq!(out, [b'A', 0xA7, b'B']);
+        let (rc, out) = lib_apply(b"0123456789", &[0xA7, 0xA6, b'A', 0xA7, 0x01, b'B'], 3);
+        assert_eq!(rc, EXI_OK);
+        assert_eq!(out, [b'A', 0xA7, 0x01, b'B']);
+        return;
+    }
+    let out = run_self("patcht_verbose_traces_byte_exact", GUARD);
+    assert!(out.status.success(), "child failed: {}", stderr_str(&out));
+
+    /// Two `P8zd`-formatted positions joined by one space — the prefix of
+    /// every verbose trace line (`P8zd " " P8zd`).
+    fn pp(org: i64, out: i64) -> String {
+        format!("{} {}", p12(org), p12(out))
+    }
+
+    let v0 = ""; // v = 0 is silent (first child case emits nothing)
+    let v1 = format!(
+        // EQL (>=1) + MOD/INS summaries (==1) + EOF (>=1).
+        "{} EQL 12\n\
+         {} MOD 5\n\
+         {} INS 1\n\
+         {} EOF\n",
+        pp(0, 0),
+        pp(12, 12),
+        pp(17, 17),
+        pp(17, 18),
+    );
+    let v2 = format!(
+        // Per-byte lines (>1) replace the ==1-only summaries.
+        "{} EQL 12\n\
+         {} MOD 62 b\n\
+         {} MOD 79 y\n\
+         {} MOD 65 e\n\
+         {} MOD 62 b\n\
+         {} MOD 79 y\n\
+         {} INS 65 e\n\
+         {} EOF\n",
+        pp(0, 0),
+        pp(12, 12),
+        pp(13, 13),
+        pp(14, 14),
+        pp(15, 15),
+        pp(16, 16),
+        pp(17, 17),
+        pp(17, 18),
+    );
+    let v3 = v2.clone(); // no ESC sequences in PATCH_AB_081
+    let esc_same = format!(
+        // ESC <same-opr> inside a run: trace + ESC + opr byte as data.
+        "{} MOD 41 A\n\
+         {} ESC a6\n\
+         {} MOD a7  \n\
+         {} MOD a6  \n\
+         {} MOD 42 B\n\
+         {} EOF\n",
+        pp(0, 0),
+        pp(1, 1),
+        pp(1, 1),
+        pp(2, 2),
+        pp(3, 3),
+        pp(4, 4),
+    );
+    let esc_esc = format!(
+        // ESC ESC inside a run: "ESC ESC" trace, one literal ESC out.
+        "{} MOD 41 A\n\
+         {} ESC ESC\n\
+         {} MOD a7  \n\
+         {} MOD 42 B\n\
+         {} EOF\n",
+        pp(0, 0),
+        pp(1, 1),
+        pp(1, 1),
+        pp(2, 2),
+        pp(3, 3),
+    );
+    let esc_xxx = format!(
+        // ESC <unknown> inside a run: "ESC XXX" trace, both bytes as data
+        // (the %c of 0x01 is the filtered ' ').
+        "{} MOD 41 A\n\
+         {} ESC XXX\n\
+         {} MOD a7  \n\
+         {} MOD 01  \n\
+         {} MOD 42 B\n\
+         {} EOF\n",
+        pp(0, 0),
+        pp(1, 1),
+        pp(1, 1),
+        pp(2, 2),
+        pp(3, 3),
+        pp(4, 4),
+    );
+
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        v0.to_string() + &v1 + &v2 + &v3 + &esc_same + &esc_esc + &esc_xxx,
+    );
 }

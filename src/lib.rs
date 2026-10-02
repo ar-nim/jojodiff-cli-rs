@@ -13,9 +13,11 @@ pub mod defs;
 pub mod jdebug;
 pub mod jdiff;
 pub mod jfile;
+pub mod jfileout;
 pub mod jhashpos;
 pub mod jmatchtable;
 pub mod jout;
+pub mod jpatcht;
 
 /// Shared test utilities (test builds only).
 #[cfg(test)]

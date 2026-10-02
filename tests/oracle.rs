@@ -524,11 +524,13 @@ fn live_oracle_jptch_matches() {
 /// patch-producing option set. Includes in-memory mode on BOTH pairs: the
 /// Rust reader serves full content (spec §15.3), so the NUL pair — not
 /// oracle-comparable in that mode — is verified by round-trip.
-// TODO(T19): the 0.8.5 writer's implicit MOD (spec §18.C) is unreadable by
+// TODO(T20): the 0.8.5 writer's implicit MOD (spec §18.C) is unreadable by
 // the current `jptch` — jpatch.cpp's 0.8.1 decoder silently drops
 // implicit-MOD data bytes (observed: bkocomu/default round-trip corrupts).
-// Task 19 lands the 0.8.5 JPatcht reader, which restores these patches
-// byte-exact; the gate itself is NOT loosened.
+// Task 19 landed the 0.8.5 JPatcht reader and the library-level replacement
+// gate `library_roundtrip_jdiff_patcht` (tests/roundtrip.rs); this CLI-driven
+// gate re-enables when Task 20 deletes the 0.8.1 binary and wires
+// `-u`/argv[0] through the library. The gate itself is NOT loosened.
 #[ignore]
 #[test]
 fn roundtrip_gate() {
