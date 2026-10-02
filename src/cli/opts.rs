@@ -39,6 +39,13 @@ use std::io::Write;
 /// argument (the trailing `::` glibc syntax).
 pub const OPT_SHT: &str = "a:bcd:fhi:jk:lm:n:pqrst::uvx:y";
 
+/// The table code of the long-only `--compat-081` (port-only extension,
+/// spec §21.16): it has no short-option letter — upstream's single-letter
+/// option space is fully allocated — so its `val` is a non-ASCII sentinel
+/// the short-option string can never collide with (the glibc analog of a
+/// `val` beyond the `getopt` short-letter range).
+pub const VAL_COMPAT_081: char = '\u{2603}';
+
 /// Whether a long option takes an argument (`main.cpp:238-261`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HasArg {
@@ -57,7 +64,12 @@ pub struct LongOpt {
 }
 
 /// The long-option table (`gsOptLng`, `main.cpp:238-261`), in the C++ order
-/// (order matters for the ambiguity message's possibility list).
+/// (order matters for the ambiguity message's possibility list), plus the
+/// appended port-only `--compat-081` row (§21.16). Appending keeps every
+/// upstream row's order (and thus the possibility-list order) unchanged;
+/// the new name still joins the `--c` prefix's possibility list, so `--c`
+/// becomes ambiguous (console | compat-081) — the same effect glibc shows
+/// when a c-prefixed long option is added.
 pub const OPT_LNG: &[LongOpt] = &[
     LongOpt {
         name: "better",
@@ -163,6 +175,14 @@ pub const OPT_LNG: &[LongOpt] = &[
         name: "verbose",
         has_arg: HasArg::No,
         val: 'v',
+    },
+    // Port-only extension (spec §21.16, appended after the upstream rows to
+    // keep their order unchanged): long-only 0.8.1-format patch output;
+    // meaningful on the diff side, accepted and ignored when patching.
+    LongOpt {
+        name: "compat-081",
+        has_arg: HasArg::No,
+        val: VAL_COMPAT_081,
     },
 ];
 
@@ -601,9 +621,35 @@ mod tests {
         assert_eq!(short_spec('t'), Some(b';')); // optional
         assert_eq!(short_spec('y'), Some(b' '));
         assert_eq!(short_spec('Z'), None);
-        // Every code in the long table exists in the short string.
+        // Every code in the long table exists in the short string — except
+        // the long-only `--compat-081` sentinel (port-only, §21.16), which
+        // the short string must NOT contain.
         for o in OPT_LNG {
-            assert!(short_spec(o.val).is_some(), "-{}", o.val);
+            if o.val == VAL_COMPAT_081 {
+                assert_eq!(short_spec(o.val), None, "--compat-081 is long-only");
+            } else {
+                assert!(short_spec(o.val).is_some(), "-{}", o.val);
+            }
         }
+    }
+
+    /// The long-only `--compat-081` (§21.16): resolves exactly (and via its
+    /// unique `--compat` prefix), takes no argument, and leaves `--c`
+    /// ambiguous (console | compat-081).
+    #[test]
+    fn compat_081_long_only_option() {
+        let (opts, operands, _) = scan(&["--compat-081", "a", "b"]);
+        assert_eq!(opts, vec![Opt::Code(VAL_COMPAT_081)]);
+        assert_eq!(operands, ["a", "b"]);
+
+        let (opts, _, _) = scan(&["--compat"]);
+        assert_eq!(opts, vec![Opt::Code(VAL_COMPAT_081)], "unique prefix");
+
+        let (opts, _, _) = scan(&["--c"]);
+        assert_eq!(opts, vec![Opt::Unknown], "--c stays ambiguous");
+
+        // A value argument is rejected ("doesn't allow an argument" → '?').
+        let (opts, _, _) = scan(&["--compat-081=x"]);
+        assert_eq!(opts, vec![Opt::Unknown]);
     }
 }

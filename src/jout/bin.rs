@@ -18,11 +18,30 @@
 //! `ESC MOD` is still emitted when switching INS→MOD. The pending-equal
 //! threshold drops from 4 to `MINEQL` = 2, so runs of ≥3 equal bytes become
 //! `ESC EQL <len>`.
+//!
+//! # `--compat-081` (spec §21.16, port-only extension)
+//!
+//! [`JOutBin::new`] keeps the 0.8.5 behavior; [`JOutBin::with_compat_081`]
+//! selects the byte-exact **0.8.1 writer policy**: `opr_cur` seeds `ESC`
+//! (0.8.1 `JOutBin.cpp:27`), every non-ESC operator emits `ESC <opr>`
+//! unconditionally (0.8.1 `JOutBin.cpp:118-123`), and the pending-equal
+//! flush threshold is `> 4` with `eql_buf[4]` (0.8.1 `:162,214-216`) — so
+//! the emitted patch contains zero implicit-MOD segments and any 0.8.1-era
+//! patcher can apply it. Everything else (length tiers, ESC escaping, the
+//! `ESC ESC` pending-escape flush and the statistics counters) is identical
+//! to the 0.8.5 writer; the engine's match decisions are unaffected (the
+//! engine follows the `put` return contract, whichever threshold is in
+//! effect).
 
 use std::io::Write;
 
 use super::{JOut, OutStats};
 use crate::defs::{BKT, DEL, EQL, ESC, INS, MINEQL, MOD};
+
+/// 0.8.1 EQL flush threshold and buffer size (`miEqlBuf[4]` with the
+/// `mzEqlCnt > 4` flush, 0.8.1 `JOutBin.cpp:162,214-216`; the 0.8.5 writer
+/// lowered both to `MINEQL` = 2).
+const EQL_BUF_081: usize = 4;
 
 /// Binary patch writer (`JOutBin`, `JOutBin.cpp:27-232`), generic over any
 /// `std::io::Write` sink (the C++ writes to a `FILE *`).
@@ -30,28 +49,54 @@ pub struct JOutBin<W: Write> {
     out: W,
     stats: OutStats,
     /// Current operand: INS, MOD, EQL or DEL. ESC means none
-    /// (`miOprCur`, `JOutBin.h:52`). The constructor seeds MOD
-    /// (`JOutBin.cpp:27`; 0.8.1 seeded ESC).
+    /// (`miOprCur`, `JOutBin.h:52`). Seeded MOD in the default mode
+    /// (`JOutBin.cpp:27`; 0.8.1 seeded ESC — the compat-mode seed).
     opr_cur: i32,
     /// Number of pending equal bytes (`mzEqlCnt`, `JOutBin.h:53`).
     eql_cnt: i64,
-    /// First `MINEQL` equal bytes (`miEqlBuf[MINEQL]`, `JOutBin.h:54`).
-    eql_buf: [i32; MINEQL as usize],
+    /// Pending equal bytes (`miEqlBuf`): the first `MINEQL` (0.8.5) or the
+    /// first `EQL_BUF_081` (compat) — the buffer is always sized for the
+    /// larger 0.8.1 threshold.
+    eql_buf: [i32; EQL_BUF_081],
     /// Pending escape character in data stream? (`mbOutEsc`, `JOutBin.h:55`).
     out_esc: bool,
+    /// `--compat-081` (spec §21.16): emit the byte-exact 0.8.1 wire format
+    /// (see the module docs).
+    compat_081: bool,
 }
 
 impl<W: Write> JOutBin<W> {
     /// `JOutBin::JOutBin` (`JOutBin.cpp:27`): `miOprCur = MOD`, `mzEqlCnt = 0`,
     /// `mbOutEsc = false`, all statistics zeroed (`JOut` ctor, `JOut.h:61-65`).
+    /// Keeps the 0.8.5 writer policy; see [`JOutBin::with_compat_081`].
     pub fn new(out: W) -> Self {
+        JOutBin::with_compat_081(out, false)
+    }
+
+    /// Creates the writer with the 0.8.1 policy when `compat_081` is true
+    /// (the `--compat-081` flag, spec §21.16): `opr_cur` seeds ESC so the
+    /// first MOD run gets an explicit `ESC MOD`, `ufPutOpr` emits
+    /// `ESC <opr>` for every non-ESC operator, and the EQL flush threshold
+    /// is `> 4` with a 4-byte buffer.
+    pub fn with_compat_081(out: W, compat_081: bool) -> Self {
         JOutBin {
             out,
             stats: OutStats::default(),
-            opr_cur: MOD,
+            opr_cur: if compat_081 { ESC } else { MOD },
             eql_cnt: 0,
-            eql_buf: [0; MINEQL as usize],
+            eql_buf: [0; EQL_BUF_081],
             out_esc: false,
+            compat_081,
+        }
+    }
+
+    /// The pending-equal flush threshold in effect: `> 4` in compat mode
+    /// (0.8.1 `JOutBin.cpp:162,214-216`), `> MINEQL` in the default mode.
+    fn eql_threshold(&self) -> i64 {
+        if self.compat_081 {
+            EQL_BUF_081 as i64
+        } else {
+            i64::from(MINEQL)
         }
     }
 
@@ -121,7 +166,8 @@ impl<W: Write> JOutBin<W> {
     /// closes the previous data stream. 0.8.5: the `ESC <opr>` pair is only
     /// emitted when `opr != MOD || opr_cur == INS` — no MOD is needed after
     /// an EQL, BKT or DEL (implicit MOD) — and `opr_cur` is assigned here for
-    /// every call.
+    /// every call. Compat mode (§21.16) emits `ESC <opr>` unconditionally,
+    /// like the 0.8.1 `ufPutOpr` (`JOutBin.cpp:118-123`).
     fn put_opr(&mut self, opr: i32) {
         if self.out_esc {
             self.raw(ESC as u8);
@@ -132,8 +178,9 @@ impl<W: Write> JOutBin<W> {
         }
 
         if opr != ESC {
-            // No need to output a MOD after an EQL, BKT or DEL
-            if opr != MOD || self.opr_cur == INS {
+            // No need to output a MOD after an EQL, BKT or DEL (0.8.5);
+            // compat mode emits every opcode (0.8.1 JOutBin.cpp:118-123).
+            if self.compat_081 || opr != MOD || self.opr_cur == INS {
                 self.raw(ESC as u8);
                 self.raw(opr as u8);
                 self.stats.ctl += 2;
@@ -176,10 +223,14 @@ impl<W: Write> JOut for JOutBin<W> {
         _pos_org: i64,
         _pos_new: i64,
     ) -> bool {
-        /* Output a pending EQL operand (if MINEQL or more equal bytes) */
+        /* Output a pending EQL operand (if more than MINEQL, resp. 4 in
+         * compat mode, equal bytes — 0.8.5 `JOutBin.cpp:175` with MINEQL=2;
+         * 0.8.1 `:162` with the 4-byte `miEqlBuf`). */
+        let min_eql = self.eql_threshold();
         if opr != EQL && self.eql_cnt > 0 {
-            if self.eql_cnt > i64::from(MINEQL) || (self.opr_cur != MOD && opr != MOD) {
-                // as of 3 equal bytes => output as EQL (ESC EQL <cnt>)
+            if self.eql_cnt > min_eql || (self.opr_cur != MOD && opr != MOD) {
+                // as of 3 equal bytes (0.8.5) resp. 5 (compat) => output as
+                // EQL (ESC EQL <cnt>)
                 self.put_opr(EQL);
                 self.put_len(self.eql_cnt);
 
@@ -225,10 +276,10 @@ impl<W: Write> JOut for JOutBin<W> {
             }
 
             EQL => {
-                if self.eql_cnt < i64::from(MINEQL) {
+                if self.eql_cnt < min_eql {
                     self.eql_buf[self.eql_cnt as usize] = org;
                     self.eql_cnt += 1;
-                    return self.eql_cnt >= i64::from(MINEQL);
+                    return self.eql_cnt >= min_eql;
                 } else {
                     self.eql_cnt += len;
                     return true;
@@ -504,5 +555,211 @@ mod tests {
                 eql: 7, // 42 43 44 (3) + 47 48 49 4A (4) went out via EQL records
             }
         );
+    }
+
+    // =======================================================================
+    // `--compat-081` writer policy (spec §21.16): byte-exact 0.8.1 JOutBin —
+    // `opr_cur` seeds ESC (0.8.1 JOutBin.cpp:27), every non-ESC operator
+    // emits `ESC <opr>` unconditionally (0.8.1 :118-123), EQL flush
+    // threshold `> 4` with `eql_buf[4]` (0.8.1 :162,214-216). Everything
+    // else is identical to the 0.8.5 writer.
+    // =======================================================================
+
+    /// Drives `put` with `(opr, len, org, new)` tuples over a compat-mode
+    /// `JOutBin` like [`run_stats`], ending with the engine's end-of-stream
+    /// flush `put(ESC, 0, 0, 0, …)`.
+    fn run_compat_stats(ops: &[(i32, i64, i32, i32)]) -> (Vec<u8>, OutStats) {
+        let mut jout = JOutBin::with_compat_081(Vec::new(), true);
+        for &(opr, len, org, new) in ops {
+            jout.put(opr, len, org, new, 0, 0);
+        }
+        jout.put(ESC, 0, 0, 0, 0, 0);
+        let stats = jout.stats();
+        (jout.into_inner(), stats)
+    }
+
+    /// Brief step-1 vector: the Task 18 op sequence (EQL 25 flush, MOD
+    /// "MODIFIED", EQL 11 flush, MOD "XYZ") yields the 0.8.5 vector
+    /// `a7 a3 18 "MODIFIED" a7 a3 0a "XYZ"` in default mode and the 0.8.1
+    /// vector `a7 a3 18 a7 a6 "MODIFIED" a7 a3 0a a7 a6 "XYZ"` in compat
+    /// mode — the explicit `ESC MOD` pair after every EQL record
+    /// (0.8.1 JOutBin.cpp:118-123; the 0.8.5 writer suppresses it).
+    #[test]
+    fn compat_081_brief_vectors_emit_explicit_esc_mod() {
+        // Both runs are driven exactly like the engine would per the `put`
+        // return contract: byte-wise EQL puts until `put` returns true
+        // (2 bytes in 0.8.5 mode, 4 in compat mode), then `flushEql`'s
+        // single `put(EQL, n, 0, 0, …)` for the remainder — the pending
+        // counts (25 resp. 11) are mode-independent.
+        let ops: Vec<(i32, i64, i32, i32)> = [
+            (EQL, 1, 0x61, 0x61),
+            (EQL, 1, 0x62, 0x62),
+            (EQL, 1, 0x63, 0x63),
+            (EQL, 1, 0x64, 0x64),
+            (EQL, 21, 0, 0), // pending equal run: 25 bytes
+            (MOD, 1, 0x00, b'M' as i32),
+            (MOD, 1, 0x00, b'O' as i32),
+            (MOD, 1, 0x00, b'D' as i32),
+            (MOD, 1, 0x00, b'I' as i32),
+            (MOD, 1, 0x00, b'F' as i32),
+            (MOD, 1, 0x00, b'I' as i32),
+            (MOD, 1, 0x00, b'E' as i32),
+            (MOD, 1, 0x00, b'D' as i32),
+            (EQL, 1, 0x63, 0x63),
+            (EQL, 1, 0x64, 0x64),
+            (EQL, 1, 0x65, 0x65),
+            (EQL, 1, 0x66, 0x66),
+            (EQL, 7, 0, 0), // pending equal run: 11 bytes
+            (MOD, 1, 0x00, b'X' as i32),
+            (MOD, 1, 0x00, b'Y' as i32),
+            (MOD, 1, 0x00, b'Z' as i32),
+        ]
+        .to_vec();
+
+        // Default mode keeps the 0.8.5 vector (implicit MOD after the EQLs).
+        let (out, st) = run_stats(&ops);
+        let mut expected: Vec<u8> = vec![0xA7, 0xA3, 0x18];
+        expected.extend_from_slice(b"MODIFIED");
+        expected.extend_from_slice(&[0xA7, 0xA3, 0x0A]);
+        expected.extend_from_slice(b"XYZ");
+        assert_eq!(out, expected, "0.8.5 vector for the brief op sequence");
+        assert_eq!((st.dta, st.ctl, st.eql), (11, 6, 36));
+
+        // Compat mode inserts the explicit ESC MOD pairs.
+        let (out, st) = run_compat_stats(&ops);
+        let mut expected: Vec<u8> = vec![0xA7, 0xA3, 0x18, 0xA7, 0xA6];
+        expected.extend_from_slice(b"MODIFIED");
+        expected.extend_from_slice(&[0xA7, 0xA3, 0x0A, 0xA7, 0xA6]);
+        expected.extend_from_slice(b"XYZ");
+        assert_eq!(out, expected, "0.8.1 vector for the brief op sequence");
+        assert_eq!((st.dta, st.ctl, st.eql), (11, 10, 36));
+    }
+
+    /// Brief step-1 vector: a 3-byte equal run after MOD stays MOD **data**
+    /// in compat mode (0.8.1 threshold `eql_cnt > 4`, `:162`), where the
+    /// 0.8.5 writer (threshold `> MINEQL` = 2) emits an EQL record.
+    #[test]
+    fn compat_081_three_equal_run_stays_mod_data() {
+        let ops: [(i32, i64, i32, i32); 5] = [
+            (MOD, 1, 0x00, 0x61), // 'a'
+            (EQL, 1, 0x78, 0x78), // 'x'
+            (EQL, 1, 0x79, 0x79), // 'y': count 2
+            (EQL, 1, 0x7A, 0x7A), // 'z': count 3
+            (MOD, 1, 0x00, 0x62), // 'b': flush
+        ];
+
+        // 0.8.5: 3 > MINEQL (2) => ESC EQL 03.
+        let (out, st) = run_stats(&ops);
+        assert_eq!(out, [0x61, 0xA7, 0xA3, 0x02, 0x62]);
+        assert_eq!((st.ctl, st.eql), (3, 3));
+
+        // Compat: 3 is not > 4 => the run stays MOD data; the leading MOD
+        // run itself is explicit (ESC seed).
+        let (out, st) = run_compat_stats(&ops);
+        assert_eq!(out, [0xA7, 0xA6, 0x61, 0x78, 0x79, 0x7A, 0x62]);
+        assert_eq!((st.ctl, st.eql, st.dta), (2, 0, 5));
+    }
+
+    /// Compat seeds `opr_cur = ESC` (0.8.1 JOutBin.cpp:27): the first MOD
+    /// run carries an explicit `ESC MOD` (the 0.8.5 seed is MOD, so the
+    /// leading run is implicit), and INS→MOD still switches the opcode
+    /// exactly once.
+    #[test]
+    fn compat_081_mod_at_start_explicit_and_ins_switch_once() {
+        let ops: [(i32, i64, i32, i32); 4] = [
+            (MOD, 1, 0x00, 0x61),
+            (MOD, 1, 0x00, 0x62),
+            (INS, 1, 0x00, 0x63),
+            (MOD, 1, 0x00, 0x64),
+        ];
+
+        // 0.8.5: implicit leading MOD, one opcode switch (INS→MOD).
+        let (out, _) = run_stats(&ops);
+        assert_eq!(out, [0x61, 0x62, 0xA7, 0xA5, 0x63, 0xA7, 0xA6, 0x64]);
+
+        // Compat: explicit leading MOD, then INS, then the INS→MOD switch.
+        let (out, st) = run_compat_stats(&ops);
+        assert_eq!(
+            out,
+            [0xA7, 0xA6, 0x61, 0x62, 0xA7, 0xA5, 0x63, 0xA7, 0xA6, 0x64]
+        );
+        assert_eq!(
+            out.iter().filter(|&&b| b == ESC as u8).count(),
+            3,
+            "leading MOD + MOD→INS + INS→MOD switches"
+        );
+        assert_eq!((st.dta, st.ctl), (4, 6));
+    }
+
+    /// EQL flush threshold boundary (0.8.1 :162,214-216): exactly 4 pending
+    /// equals between MOD runs stay MOD data (`eql_cnt > 4` is false) and 5
+    /// become an EQL record; 4 equals between INS runs are forced into an
+    /// explicit EQL record by the second flush clause
+    /// (`miOprCur != MOD && aiOpr != MOD`), which is mode-independent.
+    #[test]
+    fn compat_081_eql_threshold_boundary() {
+        // The engine drives byte-wise EQL puts until `put` returns true
+        // (`eql_cnt >= threshold`), then flushes the remainder through
+        // `flushEql` as one `put(EQL, n, 0, 0, …)` — reproduced here.
+        let four: [(i32, i64, i32, i32); 6] = [
+            (MOD, 1, 0x00, 0x61),
+            (EQL, 1, 0x31, 0x31),
+            (EQL, 1, 0x32, 0x32),
+            (EQL, 1, 0x33, 0x33),
+            (EQL, 1, 0x34, 0x34), // count 4 => true (threshold 4)
+            (MOD, 1, 0x00, 0x62),
+        ];
+        let (out, st) = run_compat_stats(&four);
+        assert_eq!(out, [0xA7, 0xA6, 0x61, 0x31, 0x32, 0x33, 0x34, 0x62]);
+        assert_eq!((st.ctl, st.dta, st.eql), (2, 6, 0));
+
+        let five: [(i32, i64, i32, i32); 7] = [
+            (MOD, 1, 0x00, 0x61),
+            (EQL, 1, 0x31, 0x31),
+            (EQL, 1, 0x32, 0x32),
+            (EQL, 1, 0x33, 0x33),
+            (EQL, 1, 0x34, 0x34), // count 4 => true
+            (EQL, 1, 0x35, 0x35), // flushEql remainder => count 5
+            (MOD, 1, 0x00, 0x62),
+        ];
+        let (out, st) = run_compat_stats(&five);
+        assert_eq!(out, [0xA7, 0xA6, 0x61, 0xA7, 0xA3, 0x04, 0xA7, 0xA6, 0x62]);
+        assert_eq!((st.ctl, st.dta, st.eql), (7, 2, 5));
+
+        // 4 equals between INS runs: forced explicit EQL record.
+        let ins: [(i32, i64, i32, i32); 6] = [
+            (INS, 1, 0x00, 0x41),
+            (EQL, 1, 0x31, 0x31),
+            (EQL, 1, 0x32, 0x32),
+            (EQL, 1, 0x33, 0x33),
+            (EQL, 1, 0x34, 0x34),
+            (INS, 1, 0x00, 0x42),
+        ];
+        let (out, st) = run_compat_stats(&ins);
+        assert_eq!(out, [0xA7, 0xA5, 0x41, 0xA7, 0xA3, 0x03, 0xA7, 0xA5, 0x42]);
+        assert_eq!((st.ctl, st.dta, st.eql), (7, 2, 4));
+    }
+
+    /// MOD runs following DEL/BKT carry an explicit `ESC MOD` in compat
+    /// mode (0.8.1 emits every opcode; the 0.8.5 writer leaves them
+    /// implicit, pinned by `mod_after_del_bkt_is_implicit`).
+    #[test]
+    fn compat_081_mod_after_del_bkt_is_explicit() {
+        let (out, st) = run_compat_stats(&[
+            (DEL, 5, 0, 0),
+            (MOD, 1, 0x00, 0x41),
+            (BKT, 3, 0, 0),
+            (MOD, 1, 0x00, 0x42),
+        ]);
+        assert_eq!(
+            out,
+            [
+                0xA7, 0xA4, 0x04, // ESC DEL 5
+                0xA7, 0xA6, 0x41, // ESC MOD 'A'
+                0xA7, 0xA2, 0x02, // ESC BKT 3
+                0xA7, 0xA6, 0x42, // ESC MOD 'B'
+            ]
+        );
+        assert_eq!((st.dta, st.ctl, st.del, st.bkt), (2, 10, 5, 3));
     }
 }

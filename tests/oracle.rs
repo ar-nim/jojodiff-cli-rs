@@ -672,6 +672,99 @@ fn roundtrip_gate() {
     }
 }
 
+/// Resolves the optional 0.8.1 oracle (§22.1): `$JOJODIFF_ORACLE_081` names
+/// either the 0.8.1 `jptch` binary itself or a directory holding it (as
+/// built by `scripts/build-oracle-081.sh`, which produces `jdiff` + `jptch`).
+/// None = the gate skips.
+fn oracle081_jptch() -> Option<PathBuf> {
+    let path = PathBuf::from(std::env::var_os("JOJODIFF_ORACLE_081")?);
+    if path.is_file() {
+        return path.canonicalize().ok();
+    }
+    if !path.is_dir() {
+        return None;
+    }
+    ["jptch", "jpatch"]
+        .iter()
+        .map(|name| path.join(name))
+        .find(|cand| cand.is_file())
+        .and_then(|cand| cand.canonicalize().ok())
+}
+
+/// Optional §22.1 gate for the port-only `--compat-081` (§21.16): when a
+/// 0.8.1 C++ oracle is present, its `jptch` must apply every
+/// `--compat-081` patch and restore the new file exactly — the whole point
+/// of the format switch. Skips when `$JOJODIFF_ORACLE_081` is unset (like
+/// the live-oracle gates above).
+#[test]
+fn oracle_081_applies_compat_081_patches() {
+    let Some(jptch) = oracle081_jptch() else {
+        eprintln!("skipping: no 0.8.1 oracle ($JOJODIFF_ORACLE_081 unset or without jptch/jpatch)");
+        return;
+    };
+    let rust_jdiff = PathBuf::from(env!("CARGO_BIN_EXE_jdiff"));
+
+    // Corpus: the tiny pair (TINY_ORG/TINY_NEW) plus both bundled pairs,
+    // over a few option sets.
+    let tiny_dir = temp_dir("o81-tiny");
+    let tiny_org = tiny_dir.join("a.bin");
+    let tiny_new = tiny_dir.join("b.bin");
+    fs::write(&tiny_org, TINY_ORG).expect("write tiny org");
+    fs::write(&tiny_new, TINY_NEW).expect("write tiny new");
+
+    let corpus: Vec<(String, PathBuf, PathBuf, Vec<u8>)> = {
+        let mut v = vec![(
+            "tiny".to_string(),
+            tiny_org.clone(),
+            tiny_new.clone(),
+            TINY_NEW.to_vec(),
+        )];
+        for (pair, org, new) in PAIRS {
+            v.push((
+                (*pair).to_string(),
+                fixture(org),
+                fixture(new),
+                fs::read(fixture(new)).expect("read new file"),
+            ));
+        }
+        v
+    };
+    let option_sets: [&[&str]; 4] = [&[], &["-b"], &["-p", "-q"], &["-x", "5"]];
+
+    for (pair, org, new, new_bytes) in &corpus {
+        for opts in option_sets {
+            let tag = format!("{}-{}", pair, opts.join(""));
+            let dir = temp_dir(&format!("o81-{tag}"));
+            let patch = dir.join("patch.jdf");
+            let patched = dir.join("patched.bin");
+
+            // The Rust diff with --compat-081: the flag is prepended to
+            // jdiff_args' [opts… org new out] (GNU permutation keeps the
+            // operand order).
+            let mut args: Vec<OsString> = vec![OsStr::new("--compat-081").to_os_string()];
+            args.extend(jdiff_args(opts, org, new, &patch));
+            let d = run_in(&dir, &rust_jdiff, &args);
+            assert_exit1(&d, &format!("jdiff --compat-081 {tag}"));
+
+            // The C++ 0.8.1 oracle's jptch applies it.
+            let jargs: Vec<OsString> = vec![
+                org.as_os_str().to_os_string(),
+                patch.as_os_str().to_os_string(),
+                patched.as_os_str().to_os_string(),
+            ];
+            let p = run_in(&dir, &jptch, &jargs);
+            assert_exit0(&p, &format!("0.8.1 jptch apply {tag}"));
+            assert_eq!(
+                fs::read(&patched).expect("patched output"),
+                *new_bytes,
+                "0.8.1 jptch restore failed for {tag}"
+            );
+            fs::remove_dir_all(&dir).expect("clean temp dir");
+        }
+    }
+    fs::remove_dir_all(&tiny_dir).expect("clean tiny dir");
+}
+
 // ---------------------------------------------------------------------------
 // Layer 4: francisdb cross-validation (runs everywhere, spec §16.4)
 // ---------------------------------------------------------------------------

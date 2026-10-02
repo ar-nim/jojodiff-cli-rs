@@ -56,7 +56,7 @@ use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::process::exit;
 
-use jojodiff_cli_rs::cli::opts::{Getopt, Opt};
+use jojodiff_cli_rs::cli::opts::{Getopt, Opt, VAL_COMPAT_081};
 use jojodiff_cli_rs::defs::{
     EXI_ARG, EXI_DIF, EXI_EQL, EXI_ERR, EXI_FRT, EXI_LRG, EXI_MEM, EXI_OK, EXI_OUT, EXI_RED,
     EXI_SCD, EXI_SEK, EXI_WRI, JDIFF_COPYRIGHT, JDIFF_VERSION, MAX_OFF_T, SMPSZE, c_atoi,
@@ -124,6 +124,7 @@ fn real_main() -> i32 {
     let mut li_tst: i32 = 0; /* test to execute : 0 = normal, 1 etc... see JTest */
     let mut seq_org: bool = false; /* Sequential source file? */
     let mut seq_new: bool = false; /* Sequential destination file? */
+    let mut compat_081 = false; /* --compat-081: 0.8.1-format patch output (§21.16) */
 
     /* Parse option-switches (`main.cpp:318-476`): getopt_long with GNU
      * permutation; `?` (unknown option or argument error) sets liHlp=1 and
@@ -228,6 +229,14 @@ fn real_main() -> i32 {
                 out_typ = 3;
                 lb_stdio = true;
                 li_tst = optarg.as_ref().map_or(0, |a| c_atoi(a)); // never used
+            }
+
+            VAL_COMPAT_081 => {
+                // --compat-081 (port-only, §21.16): 0.8.1-format patch
+                // output on the diff side; accepted and ignored when
+                // patching (and for the `-l`/`-r` listings, which are
+                // diagnostic formats no patcher applies).
+                compat_081 = true;
             }
 
             'a' => {
@@ -494,7 +503,9 @@ fn real_main() -> i32 {
             };
         let jout: Box<dyn JOut> = match out_typ {
             1 => Box::new(JOutAsc::new(writer)),
-            0 => Box::new(JOutBin::new(writer)),
+            // --compat-081 (§21.16) selects the byte-exact 0.8.1 writer
+            // policy; the default keeps the 0.8.5 implicit-MOD format.
+            0 => Box::new(JOutBin::with_compat_081(writer, compat_081)),
             _ => Box::new(JOutRgn::new(writer)),
         };
 

@@ -16,7 +16,10 @@
 //! The tests spawn the real binary (`env!("CARGO_BIN_EXE_jdiff")`) and capture
 //! stdout/stderr via `Command::output()`. argv[0] dispatch is exercised by
 //! copying the binary to `jpatch`/`jptch`/`jdedup` names in a temp dir
-//! (spec §21.2 — there is exactly one binary).
+//! (spec §21.2 — there is exactly one binary). The port-only `--compat-081`
+//! (spec §21.16, Task 23) has its own section after the option-matrix gate:
+//! writer vectors live inline in `src/jout/bin.rs`, the 0.8.1-oracle gate in
+//! `tests/oracle.rs`.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -24,6 +27,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+
+use jojodiff_cli_rs::defs::{BKT, ESC, INS, MOD};
 
 /// Byte-exact greeting block (`main.cpp:480-509`): version line, copyright,
 /// blank line, GPL block (0.8.5 wording, final line
@@ -1625,6 +1630,286 @@ fn roundtrip_all_option_sets() {
             );
         }
     }
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+// ===========================================================================
+// `--compat-081`: 0.8.1-format patch output (§21.16, §22.1)
+// ===========================================================================
+
+/// A bundled corpus fixture (`tests/fixtures/<name>`).
+fn fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(name)
+}
+
+/// Counts the data runs that begin **without** an explicit `ESC MOD` /
+/// `ESC INS` operator ("implicit-MOD segments"), walking `patch` with the
+/// JPatcht sequence grammar (`src/jpatcht.rs`, `JPatcht.cpp:209-338`): at a
+/// sequence start (file start, after a DEL/EQL/BKT record, or at the end of
+/// the stream) the 0.8.5 decoder defaults the operator to MOD and consumes
+/// data unless the `ESC <opcode>` header is present. Inside a MOD/INS data
+/// run, `ESC <same-opr>`, `ESC ESC` and `ESC <non-opcode>` are data;
+/// `ESC <other-opcode>` starts a new record. A 0.8.1-style patch (the
+/// `--compat-081` output, §21.16) has zero implicit-MOD segments.
+fn count_implicit_mod_segments(patch: &[u8]) -> usize {
+    // Opcode range BKT..=MOD (0xA2..=0xA6): BKT, EQL, DEL, INS, MOD.
+    let is_opcode = |b: u8| (BKT..=MOD).contains(&i32::from(b));
+    // Advances past one `ufGetInt` length tier (`JPatcht.cpp:50-85`); a
+    // truncated length simply ends the walk.
+    let skip_len = |patch: &[u8], i: &mut usize| {
+        let Some(extra) = patch.get(*i).map(|b| match *b {
+            0..=251 => 0,
+            252 => 1,
+            253 => 2,
+            254 => 4,
+            _ => 8,
+        }) else {
+            return;
+        };
+        *i = (*i + 1 + extra).min(patch.len());
+    };
+
+    let mut i = 0;
+    let mut implicit = 0;
+    // Some(op) = inside the data run of the explicit `ESC op` record
+    // (op ∈ {MOD, INS}); None = at a sequence start.
+    let mut run: Option<u8> = None;
+    while i < patch.len() {
+        match run {
+            Some(op) => {
+                if patch[i] == ESC as u8 {
+                    if i + 1 >= patch.len() {
+                        break; // trailing lone ESC at end of stream
+                    }
+                    let nxt = patch[i + 1];
+                    if is_opcode(nxt) && nxt != op {
+                        i += 2; // new explicit record
+                        if nxt == MOD as u8 || nxt == INS as u8 {
+                            run = Some(nxt);
+                        } else {
+                            run = None;
+                            skip_len(patch, &mut i);
+                        }
+                    } else {
+                        i += 2; // ESC ESC / ESC same-op / ESC unknown: data
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            None => {
+                if patch[i] == ESC as u8 && i + 1 < patch.len() && is_opcode(patch[i + 1]) {
+                    let nxt = patch[i + 1];
+                    i += 2;
+                    if nxt == MOD as u8 || nxt == INS as u8 {
+                        run = Some(nxt);
+                    } else {
+                        skip_len(patch, &mut i);
+                    }
+                } else if patch[i] == ESC as u8 && i + 1 == patch.len() {
+                    break; // trailing lone ESC (JPatcht trailing-byte case)
+                } else {
+                    // Raw data byte, ESC ESC or ESC <unknown> at a sequence
+                    // start: the decoder defaults to MOD — implicit segment.
+                    implicit += 1;
+                    run = Some(MOD as u8);
+                }
+            }
+        }
+    }
+    implicit
+}
+
+/// Positive control for the walker: the default 0.8.5 patch of the tiny
+/// pair (PATCH_AB) rides the implicit MOD exactly once ("byeby" after the
+/// EQL record), while the explicit 0.8.1 form has zero implicit segments.
+#[test]
+fn implicit_mod_walker_classifies_the_reference_patches() {
+    assert_eq!(count_implicit_mod_segments(PATCH_AB), 1);
+    assert_eq!(count_implicit_mod_segments(PATCH_AB_081), 0);
+}
+
+/// §22.1 gate for the port-only `--compat-081` (§21.16): every patch
+/// produced over the corpus (both synthetic pairs and both bundled fixture
+/// pairs × a few option sets) contains **zero** implicit-MOD segments
+/// (structural decoder walk) and round-trips through `jdiff -u`.
+#[test]
+fn compat_081_patches_have_zero_implicit_mod_segments() {
+    let corpus: Vec<(&str, Vec<u8>, Vec<u8>)> = vec![
+        ("tiny", ORG_A.to_vec(), NEW_B.to_vec()),
+        ("big", big_pair().0, big_pair().1),
+        (
+            "test2",
+            fs::read(fixture("test2.001.txt")).expect("read test2.001"),
+            fs::read(fixture("test2.002.txt")).expect("read test2.002"),
+        ),
+        (
+            "bkocomu",
+            fs::read(fixture("bkocomu.0000.fil")).expect("read bkocomu.0000"),
+            fs::read(fixture("bkocomu.0009.fil")).expect("read bkocomu.0009"),
+        ),
+    ];
+    let option_sets: [&[&str]; 5] = [&[], &["-b"], &["-f"], &["-p", "-q"], &["-x", "5"]];
+
+    let dir = temp_dir("compat-struct");
+    for (name, org, new) in &corpus {
+        let pdir = dir.join(name);
+        fs::create_dir_all(&pdir).expect("create corpus dir");
+        let a = write_file(&pdir.join("a.bin"), org);
+        let b = write_file(&pdir.join("b.bin"), new);
+
+        for opts in option_sets {
+            let tag: String = opts.join("").replace('-', "");
+            let patch = pdir.join(format!("p{tag}.jdf"));
+            let mut jargs: Vec<&OsStr> = vec![OsStr::new("--compat-081")];
+            jargs.extend(opts.iter().map(OsStr::new));
+            jargs.extend([a.as_os_str(), b.as_os_str(), patch.as_os_str()]);
+            let drun = run(&jargs);
+            assert_eq!(
+                drun.status.code(),
+                Some(1),
+                "--compat-081 {opts:?} diff on {name}: {}",
+                stderr_str(&drun)
+            );
+            assert!(
+                stderr_str(&drun).is_empty(),
+                "--compat-081 {opts:?} diff on {name} must be silent"
+            );
+
+            let patch_bytes = fs::read(&patch).expect("read patch");
+            let segments = count_implicit_mod_segments(&patch_bytes);
+            assert_eq!(
+                segments, 0,
+                "--compat-081 {opts:?} patch on {name} must have zero implicit-MOD segments"
+            );
+
+            let out = pdir.join("out.bin");
+            let mut uargs: Vec<&OsStr> = vec![OsStr::new("-u")];
+            uargs.extend([a.as_os_str(), patch.as_os_str(), out.as_os_str()]);
+            let urun = run(&uargs);
+            assert_eq!(
+                urun.status.code(),
+                Some(0),
+                "--compat-081 {opts:?} apply on {name}: {}",
+                stderr_str(&urun)
+            );
+            assert!(
+                stderr_str(&urun).is_empty(),
+                "--compat-081 {opts:?} apply on {name} must be silent"
+            );
+            assert_eq!(
+                fs::read(&out).unwrap(),
+                *new,
+                "{opts:?} round trip on {name}"
+            );
+        }
+    }
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `--compat-081` on the diff side (§21.16): the tiny pair's patch comes out
+/// in the explicit 0.8.1 format — byte-identical to PATCH_AB_081, since the
+/// engine decisions stay 0.8.5 and this pair's records only differ in the
+/// opcode prefix — and both `jdiff -u` and an argv[0]=`jptch` copy restore
+/// it exactly.
+#[test]
+fn compat_081_diff_produces_explicit_patch() {
+    let dir = temp_dir("compat-cli");
+    let a = write_file(&dir.join("a.bin"), ORG_A);
+    let b = write_file(&dir.join("b.bin"), NEW_B);
+    let patch = dir.join("p.jdf");
+
+    let out = run(&[
+        OsStr::new("--compat-081"),
+        a.as_os_str(),
+        b.as_os_str(),
+        patch.as_os_str(),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_str(&out));
+    assert!(stderr_str(&out).is_empty());
+    assert!(out.stdout.is_empty());
+    assert_eq!(
+        fs::read(&patch).unwrap(),
+        PATCH_AB_081,
+        "--compat-081 patch must be the explicit 0.8.1 format"
+    );
+
+    // `jdiff -u` restores.
+    let o1 = dir.join("out1.bin");
+    let urun = run(&[
+        OsStr::new("-u"),
+        a.as_os_str(),
+        patch.as_os_str(),
+        o1.as_os_str(),
+    ]);
+    assert_eq!(urun.status.code(), Some(0), "{}", stderr_str(&urun));
+    assert!(stderr_str(&urun).is_empty());
+    assert_eq!(fs::read(&o1).unwrap(), NEW_B);
+
+    // An argv[0]=`jptch` copy restores too (spec §21.2 dispatch).
+    let jptch = dir.join("jptch");
+    fs::copy(env!("CARGO_BIN_EXE_jdiff"), &jptch).expect("copy binary");
+    let o2 = dir.join("out2.bin");
+    let prun = run_copied(&jptch, &[a.as_os_str(), patch.as_os_str(), o2.as_os_str()]);
+    assert_eq!(prun.status.code(), Some(0), "{}", stderr_str(&prun));
+    assert!(stderr_str(&prun).is_empty());
+    assert_eq!(fs::read(&o2).unwrap(), NEW_B);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// GNU permutation (`--compat-081` after the filenames) and the patch side's
+/// accept-and-ignore (`-u --compat-081`, and a `jpatch`-named argv[0] copy):
+/// the flag only selects the diff-side writer, so patches still apply.
+#[test]
+fn compat_081_permutation_and_patch_side_ignored() {
+    let dir = temp_dir("compat-perm");
+    let a = write_file(&dir.join("a.bin"), ORG_A);
+    let b = write_file(&dir.join("b.bin"), NEW_B);
+
+    // Flag after the filenames: identical explicit patch.
+    let p = dir.join("p.jdf");
+    let out = run(&[
+        a.as_os_str(),
+        b.as_os_str(),
+        p.as_os_str(),
+        OsStr::new("--compat-081"),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_str(&out));
+    assert!(stderr_str(&out).is_empty());
+    assert_eq!(fs::read(&p).unwrap(), PATCH_AB_081);
+
+    // Patch side accepts and ignores: `jdiff -u --compat-081`.
+    let o1 = dir.join("out1.bin");
+    let urun = run(&[
+        OsStr::new("--compat-081"),
+        OsStr::new("-u"),
+        a.as_os_str(),
+        p.as_os_str(),
+        o1.as_os_str(),
+    ]);
+    assert_eq!(urun.status.code(), Some(0), "{}", stderr_str(&urun));
+    assert!(stderr_str(&urun).is_empty());
+    assert_eq!(fs::read(&o1).unwrap(), NEW_B);
+
+    // … and under an argv[0]=`jpatch` copy.
+    let jpatch = dir.join("jpatch");
+    fs::copy(env!("CARGO_BIN_EXE_jdiff"), &jpatch).expect("copy binary");
+    let o2 = dir.join("out2.bin");
+    let prun = run_copied(
+        &jpatch,
+        &[
+            OsStr::new("--compat-081"),
+            a.as_os_str(),
+            p.as_os_str(),
+            o2.as_os_str(),
+        ],
+    );
+    assert_eq!(prun.status.code(), Some(0), "{}", stderr_str(&prun));
+    assert!(stderr_str(&prun).is_empty());
+    assert_eq!(fs::read(&o2).unwrap(), NEW_B);
     fs::remove_dir_all(&dir).unwrap();
 }
 

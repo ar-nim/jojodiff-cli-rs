@@ -90,6 +90,7 @@ buffering"; the table gives the real values):
 | `-n <count>` | Minimum number of matches to search (default 2; was `-min`) |
 | `-x <count>` | Maximum number of matches to search (default 128; was `-max`) |
 | `-d <name>` | Debug flag by name (`hsh ahd cmp prg buf hsk ahh bkt red mch dst`); needs the `debug` feature |
+| `--compat-081` | Emit 0.8.1-format patches (explicit `ESC MOD` opcodes, EQL from 5 equal bytes) for old-patcher interop; long-only, diff-side — accepted and ignored when patching |
 
 The index table size is always lowered to the nearest lower prime. Presets (`-b`, `-f`,
 ...) should be used before other options (parse order is part of the contract).
@@ -132,6 +133,22 @@ from 3 bytes on (0.8.1 needed 5). Consequences, all verified in the test suite:
   0.8.1 golden corpus with `jdiff -u` and with an argv[0]=`jptch` copy of the binary.
 - Listings (`-l`/`-r`) are diagnostic formats, not applied by patchers; they are not
   affected by compatibility concerns.
+
+### `--compat-081`: 0.8.1-format output for old patchers
+
+`jdiff --compat-081 <original> <new> <patch>` writes the patch in the exact **0.8.1
+wire format** instead: every MOD/INS data run carries its explicit `ESC MOD`/`ESC INS`
+opcode (no implicit MOD), and equal runs are buffered until 5 bytes before becoming an
+`ESC EQL len` record — so any 0.8.1-era patcher can apply it. The option is long-only
+(upstream's single-letter space is fully allocated), meaningful on the diff side, and
+accepted and ignored when patching.
+
+Format-level compatibility only: the match decisions remain the 0.8.5 engine's, so the
+patch content still differs from what a 0.8.1 `jdiff` would emit for the same pair —
+only the wire format is 0.8.1's. Two caveats: EQL/DEL/BKT lengths above 4 GiB use the
+9-byte length tier, which only patchers built with `JDIFF_LARGEFILE` accept; and since
+listings are not applied by patchers, `-l`/`-r` are unaffected by the flag. The reading
+side of this port accepts both patch styles regardless of the flag.
 
 ## The `-t` option is broken (upstream behaviour, ported faithfully)
 
