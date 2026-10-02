@@ -111,9 +111,16 @@ fn option_sets_for(pair: &str) -> Vec<(&'static str, &'static [&'static str], &'
 /// gate is `eql <= SMPSZE*2` (0.8.1: `<= SMPSZE-4`), so samples with 29..32
 /// equal bytes now store at high quality. The 1.8 MB repetitive bkocomu pair
 /// diverges under every option set; the text pair only where the prime
-/// actually differs (`s1`: 65521 vs 0.8.1's 1048573). TODO(T17/T22): byte
-/// parity returns with the 0.8.5 engine port and the 0.8.5-oracle re-pinned
-/// goldens.
+/// actually differs (`s1`: 65521 vs 0.8.1's 1048573).
+///
+/// Task 16's 0.8.5 dynamic `JMatchTable` (two bucket tables on `|delta|`/org,
+/// aging lists with element reuse, incremental best-tracking, EQLMAX-capped
+/// compares) shifts the engine's match decisions on the text pair as well:
+/// only `ff` (compare-all disables the soft-ahead windows the table's EOB
+/// handling rides on) and `min1max1` (a single-match round leaves the new
+/// best-tracking nothing to re-order) still reproduce the 0.8.1 goldens.
+/// TODO(T17/T22): byte parity returns with the 0.8.5 engine port and the
+/// 0.8.5-oracle re-pinned goldens.
 fn committed_golden_sets(pair: &str) -> Vec<(&'static str, &'static [&'static str], &'static str)> {
     option_sets_for(pair)
         .into_iter()
@@ -121,8 +128,11 @@ fn committed_golden_sets(pair: &str) -> Vec<(&'static str, &'static [&'static st
         // Task 15: every bkocomu set diverges (the already-excluded `l`
         // included), so the whole pair drops out of the layer until T22.
         .filter(|&(name, _, _)| !(pair == "bkocomu" && name == "l"))
-        .filter(|&(name, _, _)| pair != "bkocomu")
+        .filter(|&(_, _, _)| pair != "bkocomu")
         .filter(|&(name, _, _)| !(pair == "test2" && name == "s1"))
+        // Task 16: on the text pair only ff and min1max1 keep 0.8.1 parity
+        // (see the doc comment above); the rest diverges until T17/T22.
+        .filter(|&(name, _, _)| !(pair == "test2" && !matches!(name, "ff" | "min1max1")))
         .collect()
 }
 

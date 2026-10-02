@@ -52,7 +52,6 @@ use jojodiff_cli_rs::defs::{
 use jojodiff_cli_rs::jdebug::{DBG_TO_STDOUT, dbg_print};
 use jojodiff_cli_rs::jdiff::JDiff;
 use jojodiff_cli_rs::jfile::{JFile, JFileAhead, JFileMem};
-use jojodiff_cli_rs::jmatchtable::HSH_RPR;
 use jojodiff_cli_rs::jout::{JOut, JOutAsc, JOutBin, JOutRgn};
 
 fn main() {
@@ -377,9 +376,11 @@ fn real_main() -> i32 {
             hsh.hash_hits()
         ));
         dbg_print(format_args!("Hashtable errors        = {}\n", jd.hsh_err()));
+        // 0.8.5: instance counter via getHshRpr (JMatchTable.cpp:930-932);
+        // the 0.8.1 global static is retired (spec §18.E).
         dbg_print(format_args!(
             "Hashtable repairs       = {}\n",
-            HSH_RPR.load(std::sync::atomic::Ordering::Relaxed)
+            jd.hsh_rpr()
         ));
         dbg_print(format_args!(
             "Hashtable overloading   = {}\n",

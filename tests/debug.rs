@@ -288,9 +288,13 @@ fn hsh_ini_and_add_lines_big() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
-/// DBGMCH (`-dmch`): the "Mch Add" line (`JMatchTable.cpp:166-170`) and the
-/// table dump line (`JMatchTable.cpp:302-310`). On this fixture exactly two
-/// lines are produced; all fields are deterministic.
+/// DBGMCH (`-dmch`), 0.8.5 formats (Task 16 port): the isBest election line
+/// (`JMatchTable.cpp:633-642`: "Val/Old/Inv", compare, '*' when elected, the
+/// node dump), the "Add" line (`:349-354`, `ret=` is the eMatchReturn
+/// discriminant — 6 = Valid) and the getbest verdict (`:153-168`). On this
+/// fixture exactly three lines are produced; all fields are deterministic.
+/// (The 0.8.1 pins "Mch Add (...) New (...) Bse (...)" and the per-candidate
+/// "Mch 0*[C ...]" dump are gone at 0.8.5.)
 #[test]
 fn mch_lines_big() {
     let dir = temp_dir("mch-big");
@@ -300,16 +304,19 @@ fn mch_lines_big() {
     assert_eq!(
         stdout,
         concat!(
-            "Mch Add (       282,       282) New (       282,       282) Bse (250)\n",
-            "Mch 0*[C       999,       999,       282, 718]       251:0:1024\n",
+            "Val   256 * [ 0:       282>         0<       282~       282#   1:       251+ 256] bse=250 fnd=251=251(1)\n",
+            "Add         [  :       282>         0<       282] bse=250 ret=6\n",
+            "Suboptimal Match at 250: from 251(1), length 256\n",
         ),
         "exact Mch output"
     );
     fs::remove_dir_all(&dir).unwrap();
 }
 
-/// DBGCMP (`-dcmp`): the check() prologue ("Fnd (…): ", no newline) and
-/// result line (`JMatchTable.cpp:398-402,430-437`). Exactly one line here.
+/// DBGCMP (`-dcmp`), 0.8.5 formats (Task 16 port): the check() prologue
+/// ("Cmp Col|Gld (…): " — `JMatchTable.cpp:825-830`, was "Fnd (…): ") and
+/// the result line (`:857-864`, run capped at EQLMAX 256 — was 24 — with
+/// the bytes printed `%02x` hex, was `%3o` octal). Exactly one line here.
 #[test]
 fn cmp_check_line_big() {
     let dir = temp_dir("cmp-big");
@@ -318,7 +325,7 @@ fn cmp_check_line_big() {
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(
         stdout,
-        "Fnd (       250,       250,1024,1):        251        251 24 OK! (j)152 == (j)152\n",
+        "Cmp Col (       250,       250,1024,1):        251        251 256 OK! ( )b9 == ( )b9\n",
         "exact check output"
     );
     fs::remove_dir_all(&dir).unwrap();

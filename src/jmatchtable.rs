@@ -1,609 +1,1353 @@
 //! Matching table: selection of the best of the possibly matching regions
-//! found between the two files, ported 1:1 from C++ `src/JMatchTable.cpp` +
-//! `headers/JMatchTable.h` (spec §8).
+//! found between the two files, ported 1:1 from the 0.8.5 C++ `src/JMatchTable.cpp`
+//! + `src/JMatchTable.h` (spec §18.E).
 //!
-//! Because of the statistical nature of the hash table, the best solution is
-//! not necessarily found first. The table therefore memorizes a number of
-//! possibly matching positions (`add`), optimizes them by looking
-//! `max(reliability, 1024)` bytes around each one (`get`) and selects the
-//! best verified solution. A fixed pool of [`MCH_MAX`] nodes is kept on an
-//! intrusive free list; collision chains are bucketed on
-//! `delta = fnd_org - fnd_new` with the C trunc-mod then negate rule, so
-//! `-1` and `+1` share bucket 1.
+//! The 0.8.5 table is **dynamic**: its size comes from the `-x` value
+//! (`miMchSze = max(13, aiMchSze)`; the bucket prime derives from the
+//! UNCLAMPED value, `getLowerPrime(aiMchSze * 2)`), elements are never freed
+//! but live on the `mpNew`/`mpOld` aging lists and are reused when
+//! [`JMatchTable::is_old2_reuse`] says so ("full" = no reusable element), and
+//! the best match is tracked **incrementally** by [`JMatchTable::is_best`]
+//! during `add`/`cleanup` instead of being rescanned on demand.
 //!
-//! The C++ constructor state (hashtable, both files, cmp-all flag) moved into
-//! [`JMatchTable::get`] by design (controller ruling, ledger T5 ↔ spec §6):
-//! [`JMatchTable::new`] takes no arguments.
+//! Two bucket tables detect candidate joins: `mpCol` on `|delta| % pme`
+//! (colliding matches, `JMatchTable.cpp:197` — the C `abs` macro shares one
+//! bucket between a delta and its negation) and `mpGld` on `org % pme`
+//! (gliding matches, `:215` — a hash-based detection now, where 0.8.1
+//! chained a single last-match pointer).
 //!
-//! Debug prints (`DBGMCH`/`DBGCMP` sites, spec §14) live behind the `debug`
-//! feature with their exact C++ format strings: "Mch Add"/"Mch Ful"
-//! (`JMatchTable.cpp:166-176`), the per-candidate table dump
-//! (`JMatchTable.cpp:302-319`), "Mch Err" (`JMatchTable.cpp:325-328`) and the
-//! check() prologue/result pair (`JMatchTable.cpp:398-437`). Positions use
-//! the debug-build `P8zd` width 10 (`crate::defs::p8`).
+//! # Rust adaptations (mechanical, no behavior change)
+//!
+//! * The C++ constructor stores `mpHsh`/`mpFilOrg`/`mpFilNew` pointers; the
+//!   engine owns them as sibling fields here, so `cleanup` receives the
+//!   hashtable's reliability value (`mpHsh->get_reliability()`,
+//!   `:377`) and the file readers are passed into `add`/`cleanup` (used by
+//!   `check`) — the same pattern the 0.8.1 port established for `get`.
+//! * Node pointers (`rMch *`) become `Option<usize>` arena indices; the
+//!   arena is zero-initialized where the C++ `malloc`s garbage — `add` fills
+//!   every field of a node before anyone reads it, and the "stale `ipNxt`"
+//!   walks (`addNew` deliberately leaves the last node's next dangling) read
+//!   values the C++ also wrote earlier, so behavior is identical.
+//! * The ctor parameters `miAhdMax` (stored, never read) and `MAXGLD` are
+//!   dead at 0.8.5 and ported as dead code (spec §21.13).
+//!
+//! Debug prints (`DBGMCH`/`DBGCMP` sites) live behind the `debug` feature
+//! with their exact C++ format strings (`JMatchTable.cpp:154,278,350,391,
+//! 414,502,633,704` DBGMCH; `:826,858` DBGCMP — the compare prologue is
+//! "Cmp Gld|Col (...)" now, was "Fnd (...)"). Positions use the debug-build
+//! `P8zd` width 10 ([`crate::defs::p8`]).
 //!
 //! # Example
 //!
 //! ```
 //! use jojodiff_cli_rs::jfile::JFileMem;
-//! use jojodiff_cli_rs::jhashpos::JHashPos;
-//! use jojodiff_cli_rs::jmatchtable::JMatchTable;
+//! use jojodiff_cli_rs::jmatchtable::{JMatchTable, MchRet};
 //!
-//! // Two all-zero files; a hash hit claims a match org 100 / new 900.
-//! let mut org = JFileMem::new(vec![0u8; 200]);
-//! let mut new = JFileMem::new(vec![0u8; 1000]);
-//! let mut tbl = JMatchTable::new();
-//! assert_eq!(tbl.add(100, 900, 0, 0), 1); // new entry, space left
+//! // Two all-zero files; a hash hit claims a match org 1000 / new 500.
+//! let mut org = JFileMem::new(vec![0u8; 4096]);
+//! let mut new = JFileMem::new(vec![0u8; 4096]);
+//! let mut tbl = JMatchTable::new(64, true, 1024);
+//! assert_eq!(tbl.add(1000, 500, 600, &mut org, &mut new), MchRet::Best);
 //!
-//! // get verifies the match by comparing the files and returns the
-//! // optimized (rewound to the 24-equal-run anchor) positions.
-//! let hsh = JHashPos::new(251);
-//! assert_eq!(
-//!     tbl.get(900, 900, &hsh, &mut org, &mut new, true),
-//!     Some((100, 900))
-//! );
+//! // cleanup verifies and elects the best; getbest returns the tracked
+//! // best without rescanning: the run anchor the compare started from.
+//! assert_eq!(tbl.cleanup(0, 600, 48, &mut org, &mut new), MchRet::Best);
+//! assert_eq!(tbl.getbest(0, 600), Some((1100, 600)));
 //! ```
 
-use std::sync::atomic::{AtomicI32, Ordering};
-
+use crate::defs::{get_lower_prime, EOB, ReadType, SMPSZE};
 #[cfg(feature = "debug")]
 use crate::defs::p8;
-use crate::defs::{EOF, MCH_MAX, MCH_PME, ReadType, SMPSZE};
-#[cfg(feature = "debug")]
-use crate::jdebug::{DBGCMP, DBGMCH, c_chr, dbg, dbg_print};
 use crate::jfile::JFile;
-use crate::jhashpos::JHashPos;
+#[cfg(feature = "debug")]
+use crate::jdebug::{c_chr, dbg, dbg_print, DBGCMP, DBGMCH};
+#[cfg(feature = "debug")]
+use std::sync::atomic::{AtomicI64, Ordering};
 
-/// Number of repaired hash hits (`siHshRpr`, `JMatchTable.cpp:58`): every
-/// compare-refuted match decrements its node count and increments this
-/// counter. The verbose statistics (Task 8/11) report it.
-pub static HSH_RPR: AtomicI32 = AtomicI32::new(0);
+// Continuous runs of 8 (> 7) equal bytes are worth the jump
+// Extend to 12 to explore, so we can prefer longer runs
+// These settings provide a good tradeoff between maximum equal bytes and minimum overhead bytes
+// (`JMatchTable.cpp:36-38`)
+/// Run length worth a jump (`EQLSZE`, `JMatchTable.cpp:36`).
+pub const EQLSZE: i32 = 8;
+/// Minimum reported run length (`EQLMIN`, `JMatchTable.cpp:37`); `check`
+/// returns a run only when it is strictly longer.
+pub const EQLMIN: i32 = 4;
+/// Equal-run cap of `check` (`EQLMAX`, `JMatchTable.cpp:38`).
+pub const EQLMAX: i32 = 256;
 
-/// One match-table element (`rMch`, `JMatchTable.h:108-119`).
+/// Max compare distance (`MAXDST`, `JMatchTable.cpp:40`: `2 * 1024 * 1024`,
+/// an int in the C++, used in `off_t` arithmetic) — on HDD +/-40ms at
+/// 100Mb/s + 10ms seek time.
+pub const MAXDST: i64 = 2 * 1024 * 1024;
+/// Min compare distance (`MINDST`, `JMatchTable.cpp:41`) — on SSD +/- 4ms at
+/// 1Gb/s + 1ms seek time.
+pub const MINDST: i64 = 1024;
+/// Max distance for gliding matches (`MAXGLD`, `JMatchTable.cpp:42`).
+///
+/// Dead code: no reference to this macro remains in the 0.8.5 sources —
+/// ported as a dead constant for parity (spec §21.13).
+#[allow(dead_code)]
+pub const MAXGLD: i32 = 128;
+
+/// Fuzzy factor (`FZY`, `JMatchTable.cpp:46`): for differences smaller than
+/// this number of bytes, take the longest looking sequence. Reason: control
+/// bytes consume byte too, so taking the longer one is better.
+pub const FZY: i64 = 0;
+
+// Cmp codes (`JMatchTable.cpp:49-51`)
+/// Compare result: invalid match, reusable (`CMPINV`).
+const CMPINV: i32 = -1;
+/// Compare result: skipped as too old, reactivable by a new hash hit (`CMPSKP`).
+const CMPSKP: i32 = -2;
+/// Compare result: end-of-buffer reached (`CMPEOB`) — also `check`'s
+/// "EOB reached, no equal bytes found" return.
+const CMPEOB: i32 = -3;
+
+/// Match-table return taxonomy (`eMatchReturn`, `JMatchTable.h:53`).
+///
+/// Declaration order defines the discriminants 0-6 printed by the `%d` of
+/// the "Add ... ret=" debug trace (`JMatchTable.cpp:353`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MchRet {
+    Error,    // Table in an unexpectedly full state (should not occur)
+    Full,     // No free or reusable element: searching must stop
+    Enlarged, // Existing solution has been enlarged
+    Invalid,  // Match does not point to a valid solution
+    Good,     // Good match found (EQLSZE <= compare < EQLMAX)
+    Best,     // Perfect match found (compare >= EQLMAX)
+    Valid,    // Solution added
+}
+
+/// One match-table element (`rMch`, `JMatchTable.h:106-119`). The C++ links
+/// nodes with pointers; the port uses arena indices. `ipNxt` is the aging
+/// list link whose stale value is deliberately never cleared on removal
+/// (`addNew`'s "saves one assignment" trick, `:887`) — the arena never frees,
+/// so the stale-chain walks read defined values exactly like the C++.
+#[derive(Clone)]
 struct Node {
-    /// Next element in collision list / free list (`ipNxt`).
-    next: Option<usize>,
-    /// Number of colliding matches (`iiCnt`).
+    /// Next element on the pseudo-ordered aging stack (`ipNxt`).
+    nxt: Option<usize>,
+    /// Next element in collision bucket (`ipCol`).
+    col: Option<usize>,
+    /// Next element in gliding bucket list (`ipGld`).
+    gld: Option<usize>,
+
+    /// Number of colliding matches (= confirming matches) (`iiCnt`).
     cnt: i32,
-    /// Type of match: 0=unknown, 1=colliding, -1=gliding (`iiTyp`).
-    typ: i32,
+    /// Gliding match recurrence, 0=no, <0=mixed, >0=glide (`iiGld`).
+    gldcnt: i32,
     /// First found match, new file position (`izBeg`).
     beg: i64,
     /// Last found match, new file position (`izNew`).
     r#new: i64,
     /// Last found match, org file position (`izOrg`).
     org: i64,
-    /// Delta key: `izOrg = izNew + izDlt` (`izDlt`).
-    delta: i64,
+    /// Delta: `izOrg = izNew + izDlt` (`izDlt`).
+    dlt: i64,
+    /// Result of last compare position (`izTst`).
+    tst: i64,
+    /// Result of last compare (`iiCmp`): [`CMPINV`]/[`CMPSKP`]/[`CMPEOB`] or
+    /// the last verified run length.
+    cmp: i32,
 }
 
-/// JojoDiff matching table (`JMatchTable.h:36`): builds and maintains a table
+/// JojoDiff matching table (`JMatchTable.h:33`): builds and maintains a table
 /// of matching regions between two files and selects the "best" match.
 pub struct JMatchTable {
-    /// Fixed pool of match nodes (`msMch`).
+    /// Table of matches (`msMch`): `miMchSze` elements, allocated once.
     nodes: Vec<Node>,
-    /// Hashtable on delta with match chains (`mpMch`).
-    buckets: [Option<usize>; MCH_PME as usize],
-    /// Free list of matches (`mpMchFre`).
-    free: Option<usize>,
-    /// Last gliding match (`mpMchGld`).
-    gld: Option<usize>,
-    /// Last gliding match's next delta (`mzGldDlt`).
-    gld_delta: i64,
-}
+    /// Size of the matching table (`miMchSze`, const): `max(13, -x value)`.
+    /// Only the #if debug sanity checks read it, like the C++ (plus the
+    /// tests).
+    #[cfg_attr(not(feature = "debug"), allow(dead_code))]
+    mch_sze: i32,
+    /// Free index (`miMchFre`): counts down the never-used elements; 0.8.5
+    /// has no free list — exhausted, allocation reuses aging elements.
+    mch_fre: i32,
+    /// Size of the matching hashtables (`miMchPme`):
+    /// `get_lower_prime(unclamped -x value * 2)` — the unclamped-value quirk.
+    mch_pme: i32,
+    /// Hashtable on `|izDlt|` for detecting colliding matches (`mpCol`).
+    col_tbl: Vec<Option<usize>>,
+    /// Hashtable on `izOrg` for detecting gliding matches (`mpGld`).
+    gld_tbl: Vec<Option<usize>>,
+    /// List of old elements (`mpOld`).
+    mp_old: Option<usize>,
+    /// List of new elements (`mpNew`).
+    mp_new: Option<usize>,
+    /// Last of new elements (`mpLst`).
+    mp_lst: Option<usize>,
+    /// Current best element (`mpBst`).
+    mp_bst: Option<usize>,
+    /// Current best source position (`mzBstOrg`).
+    z_bst_org: i64,
+    /// Current best destin position (`mzBstNew`).
+    z_bst_new: i64,
+    /// Current best (estimated) length (`miBstCmp`).
+    i_bst_cmp: i32,
+    /// Limit for being old (`mzOld`).
+    z_old: i64,
 
-impl Default for JMatchTable {
-    fn default() -> Self {
-        Self::new()
-    }
+    /// Compare all matches, even if data not in buffer? (`mbCmpAll`, const).
+    cmp_all: bool,
+    /// Lookahead & lookback range (`miAhdMax`, const).
+    ///
+    /// Dead code: the C++ constructor stores it but no 0.8.5 method reads it
+    /// — kept for parity (spec §21.13).
+    #[allow(dead_code)]
+    ahd_max: i32,
+    /// Current reliability range from the hashtable (`miRlb`), refreshed by
+    /// `cleanup` (mechanically passed in — see the module docs).
+    rlb: i32,
+    /// Number of repaired hash hits, matches repaired by comparing
+    /// (`miHshRpr`; the 0.8.1 global static retired per spec §18.E).
+    hsh_rpr: i32,
 }
 
 impl JMatchTable {
-    /// Construct a matching table (`JMatchTable.cpp:61-85`): the node pool is
-    /// chained into a free list (node i → i+1, last → none) headed at node 0,
-    /// all 127 buckets start empty and there is no gliding match yet. The
-    /// C++ mallocs the pool and leaves node fields uninitialized; they are
-    /// zero-initialized here — `add` always writes them before any read.
-    pub fn new() -> Self {
-        // Initialize linked list of free nodes (JMatchTable.cpp:73-78).
-        let mut nodes = Vec::with_capacity(MCH_MAX as usize);
-        for idx in 0..MCH_MAX as usize {
-            nodes.push(Node {
-                next: if idx + 1 < MCH_MAX as usize {
-                    Some(idx + 1)
-                } else {
-                    None
-                },
-                // malloc'ed garbage in the C++; `add` fills the fields of a
-                // node before anyone reads them (JMatchTable.cpp:150-156).
-                cnt: 0,
-                typ: 0,
-                beg: 0,
-                r#new: 0,
-                org: 0,
-                delta: 0,
-            });
-        }
+    /// Construct a matching table (`JMatchTable.cpp:78-105`).
+    ///
+    /// `mch_sze` is the `-x` value: the table size is `max(13, mch_sze)`
+    /// while the bucket prime is `get_lower_prime(mch_sze * 2)` from the
+    /// **unclamped** value (`:85,97` — with `-x 5`: size 13, prime
+    /// `get_lower_prime(10)` = 7). The C++ initializer `miMchFre(miMchSze)`
+    /// reads the already-initialized (clamped) member — member initializers
+    /// run in declaration order — so the free count starts at the clamped
+    /// size too (verified against the real ctor shape with g++; the written
+    /// spec §21.15 attributes the quirk to `miMchFre` instead).
+    ///
+    /// The C++ `malloc`s the node array (garbage fields, filled by `add`
+    /// before any read) and `calloc`s the two bucket tables; the port
+    /// zero-initializes all three (spec §21.5 deviation, deterministic).
+    /// `mch_sze * 2` is computed in i64 and clamped to `i32::MAX` (the C++
+    /// int multiply overflows UB for huge `-x`).
+    ///
+    /// `cmp_all` selects hard vs soft compare-ahead in `check`; `ahd_max` is
+    /// stored but never read (dead, `:86`).
+    pub fn new(mch_sze: i32, cmp_all: bool, ahd_max: i32) -> Self {
+        // miMchSze(aiMchSze < 13 ? 13 : aiMchSze), miMchFre(miMchSze) (:85)
+        let clamped = if mch_sze < 13 { 13 } else { mch_sze };
+
+        // miMchPme = getLowerPrime(aiMchSze * 2) — the UNCLAMPED value (:97).
+        let two_sze = i64::from(mch_sze) * 2;
+        let mch_pme = if two_sze > i64::from(i32::MAX) {
+            get_lower_prime(i32::MAX)
+        } else {
+            get_lower_prime(two_sze as i32)
+        };
+        // calloc(miMchPme, sizeof(tMch*)) for negative/zero primes fails in
+        // the C++ (null, then UB on first use — no throw in the oracle
+        // build); the port panics instead of dereferencing null.
+        assert!(mch_pme > 0, "JMatchTable: getLowerPrime({mch_sze} * 2) = {mch_pme} is not positive (C++ calloc failure / UB)");
+
         JMatchTable {
-            nodes,
-            buckets: [None; MCH_PME as usize], // memset, JMatchTable.cpp:80
-            free: Some(0),                     // mpMchFre = msMch
-            gld: None,                         // mpMchGld = null
-            gld_delta: 0,                      // mzGldDlt = 0; unused until first add
+            nodes: vec![
+                Node {
+                    nxt: None,
+                    col: None,
+                    gld: None,
+                    cnt: 0,
+                    gldcnt: 0,
+                    beg: 0,
+                    r#new: 0,
+                    org: 0,
+                    dlt: 0,
+                    tst: 0,
+                    cmp: 0,
+                };
+                clamped as usize
+            ],
+            mch_sze: clamped,
+            mch_fre: clamped,
+            mch_pme,
+            col_tbl: vec![None; mch_pme as usize],
+            gld_tbl: vec![None; mch_pme as usize],
+            mp_old: None,
+            mp_new: None,
+            mp_lst: None,
+            mp_bst: None,
+            z_bst_org: 0,
+            z_bst_new: 0,
+            i_bst_cmp: 0,
+            z_old: 0,
+            cmp_all,
+            ahd_max,
+            rlb: 0,
+            hsh_rpr: 0,
         }
     }
 
-    /// Add given match to the table of matches (`JMatchTable.cpp:103-180`):
-    /// add to the gliding match if the delta continues it, else to a colliding
-    /// match with equal delta, else create a new node from the free list.
+    /// Add given match to the array of matches (`JMatchTable::add`,
+    /// `JMatchTable.cpp:188-363`):
     ///
-    /// Returns `2` if an existing entry has been enlarged, `1` if a new entry
-    /// has been added with space left and `0` if a new entry has been added
-    /// with the table now full (or not added at all).
+    /// - Add to a colliding (equal delta) or gliding (equal org) match if
+    ///   possible, or
+    /// - Add at the end of the list from the free counter, or
+    /// - Reuse (override) an old match if [`JMatchTable::is_old2_reuse`]
+    ///   allows it.
     ///
-    /// `base_new` feeds only the DBGMCH "Mch Add" print and `eql_new` nothing
-    /// at all, exactly as in the C++ release/debug builds.
-    pub fn add(&mut self, fnd_org: i64, fnd_new: i64, _base_new: i64, _eql_new: i32) -> i32 {
-        let delta = fnd_org - fnd_new; // lzDlt
-
-        // Add to gliding match (JMatchTable.cpp:116-126).
-        if let Some(gld) = self.gld {
-            if delta == self.gld_delta {
-                let g = &mut self.nodes[gld];
-                g.typ = -1;
-                g.cnt += 1;
-                g.r#new = fnd_new;
-                self.gld_delta -= 1;
-                return 2;
-            }
-            self.gld = None;
-        }
-
-        // Add or override colliding match (JMatchTable.cpp:128-142):
-        // liIdx = lzDlt % MCH_PME; if (liIdx < 0) liIdx = -liIdx — the C
-        // trunc-mod then negate, so -1 and +1 share bucket 1. Deliberately
-        // not `rem_euclid`, which would map -1 to bucket 126 instead.
-        let mut idx = delta % MCH_PME;
-        if idx < 0 {
-            idx = -idx;
-        }
-        let idx = idx as usize;
-
-        let mut cur = self.buckets[idx];
+    /// `red_new` is the current read position. The file readers back
+    /// `check`'s compares (mechanically passed — the C++ stores pointers).
+    pub fn add(
+        &mut self,
+        fnd_org: i64, // azFndOrgAdd: match to add
+        fnd_new: i64, // azFndNewAdd
+        red_new: i64, // azRedNew: current read position
+        org: &mut dyn JFile,
+        newf: &mut dyn JFile,
+    ) -> MchRet {
+        // Join colliding matches (:195-210)
+        let dlt = fnd_org - fnd_new; // lzDlt: delta key of the match
+        let idx_dlt = (dlt.abs() % i64::from(self.mch_pme)) as usize; // abs(lzDlt) % miMchPme (:197)
+        let mut cur = self.col_tbl[idx_dlt];
         while let Some(ci) = cur {
-            if self.nodes[ci].delta == delta {
-                // Add to colliding match.
-                let n = &mut self.nodes[ci];
-                n.cnt += 1;
-                n.typ = 1;
-                n.r#new = fnd_new;
-                n.org = fnd_org;
-                return 2;
+            if self.nodes[ci].dlt == dlt {
+                // remove from gliding matches if single-counted (:201-202)
+                if self.nodes[ci].cnt == 1 {
+                    self.del_gld(ci);
+                }
+
+                // add to colliding match (:205-206)
+                self.nodes[ci].cnt += 1;
+                self.nodes[ci].r#new = fnd_new;
+
+                break;
+            } /* if colliding */
+            cur = self.nodes[ci].col;
+        } /* for colliding */
+
+        // Join gliding matches (:212-237)
+        // liIdxGld is assigned whenever the gliding scan runs (lpCur == null),
+        // which is also the only case the new-element linking below reads it.
+        let mut idx_gld: usize = 0;
+        if cur.is_none() {
+            // C++ `%` on a negative org yields a negative index (UB); the
+            // engine only adds matches at non-negative org positions.
+            idx_gld = (fnd_org % i64::from(self.mch_pme)) as usize;
+            cur = self.gld_tbl[idx_gld];
+            while let Some(gi) = cur {
+                if self.nodes[gi].org == fnd_org {
+                    // remove from colliding matches (:219-220)
+                    if self.nodes[gi].cnt == 1 {
+                        self.del_col(gi);
+                    }
+
+                    // add to gliding match (:223-224)
+                    self.nodes[gi].cnt += 1;
+                    self.nodes[gi].r#new = fnd_new;
+
+                    // set gliding recurrence (:227-232)
+                    if self.nodes[gi].gldcnt == 0 {
+                        if fnd_new <= self.nodes[gi].beg + i64::from(SMPSZE) {
+                            // C++: int assignment of an off_t difference.
+                            self.nodes[gi].gldcnt = (fnd_new - self.nodes[gi].beg) as i32;
+                        } else {
+                            self.nodes[gi].gldcnt = SMPSZE;
+                        }
+                    }
+
+                    break;
+                } /* if gliding */
+                cur = self.nodes[gi].gld;
+            } /* for gliding */
+        } /* join gliding */
+
+        // remove first renewed item from the oldlist (:239-244)
+        if let Some(ci) = cur {
+            if self.mp_old == Some(ci) {
+                self.mp_old = self.nodes[ci].nxt; // remove from oldlist
+                self.nextold(red_new, org, newf); // puts a reusable element in front of mpOld
+                self.add_new(ci); // add to the newlist
             }
-            cur = self.nodes[ci].next;
         }
 
-        // Create new match (JMatchTable.cpp:144-179).
-        if let Some(ni) = self.free {
-            // Remove from free-list.
-            self.free = self.nodes[ni].next;
+        // allocate new element (:246-306)
+        if cur.is_none() {
+            // get free element
+            if self.mch_fre > 0 {
+                // take unused element
+                self.mch_fre -= 1;
+                cur = Some(self.mch_fre as usize); // lpCur = &msMch[miMchFre]
+            } else if let Some(oi) = self.mp_old {
+                // sanity check (:254-263)
+                #[cfg(feature = "debug")]
+                {
+                    let o = &self.nodes[oi];
+                    if o.cmp != CMPINV // Invalids may be reused ?
+                        && o.cmp != CMPEOB // EOB with low iiCnt may be reused ?
+                        && ((o.cmp != 0 && o.r#new >= red_new)
+                            || (o.cmp > 0 && o.tst + i64::from(o.cmp) > red_new))
+                    {
+                        dbg_print(format_args!(
+                            "Mch Add ({}>{}<{}) Reusing valid new element {} !\n",
+                            p8(o.org),
+                            p8(o.dlt),
+                            p8(o.r#new),
+                            o.cmp
+                        ));
+                    }
+                }
 
-            // Fill out the form.
-            let n = &mut self.nodes[ni];
-            n.org = fnd_org;
-            n.r#new = fnd_new;
-            n.beg = fnd_new;
-            n.delta = delta;
-            n.cnt = 1;
-            n.typ = 0;
+                // reuse old element (:266-268)
+                cur = Some(oi);
+                self.mp_old = self.nodes[oi].nxt;
+                self.nextold(red_new, org, newf); // prepare next old element
 
-            // Add to hashtable (prepend to the bucket chain).
-            n.next = self.buckets[idx];
-            self.buckets[idx] = Some(ni);
+                // remove old element from gliding & colliding lists (:270-274)
+                if self.nodes[oi].cnt == 1 || self.nodes[oi].gldcnt == 0 {
+                    self.del_col(oi);
+                }
+                if self.nodes[oi].cnt == 1 || self.nodes[oi].gldcnt != 0 {
+                    self.del_gld(oi);
+                }
 
-            // Potential gliding match.
-            self.gld = Some(ni);
-            self.gld_delta = delta - 1;
+                // debug reporting (:277-284)
+                #[cfg(feature = "debug")]
+                if dbg(DBGMCH) {
+                    let o = &self.nodes[oi];
+                    dbg_print(format_args!(
+                        "Del         [{:2}:{}>{}<{}~{}#{:4}+{:4}] bse={}\n",
+                        o.gldcnt,
+                        p8(o.org),
+                        p8(o.dlt),
+                        p8(o.beg),
+                        p8(o.r#new),
+                        o.cnt,
+                        o.cmp,
+                        red_new
+                    ));
+                }
+            } else {
+                return MchRet::Error; // should not occur
+            }
 
-            /* Debug: new-match trace (JMatchTable.cpp:166-170); izOrg/izNew
-             * were just filled with fnd_org/fnd_new. */
+            let ci = cur.unwrap();
+
+            // fill out the form (:289-297)
+            {
+                let n = &mut self.nodes[ci];
+                n.org = fnd_org;
+                n.r#new = fnd_new;
+                n.beg = fnd_new;
+                n.dlt = dlt;
+                n.cnt = 1;
+                n.gldcnt = 0;
+                n.cmp = 0;
+                n.tst = -1;
+            }
+
+            // add to colliding hashtable (:299-301)
+            self.nodes[ci].col = self.col_tbl[idx_dlt];
+            self.col_tbl[idx_dlt] = Some(ci);
+
+            // add to gliding hashtable (:303-305)
+            self.nodes[ci].gld = self.gld_tbl[idx_gld];
+            self.gld_tbl[idx_gld] = Some(ci);
+        }
+
+        // evaluate new (iiCnt==1) or skipped (iiCmp==-3) elements (:308-355)
+        let mut ret = MchRet::Enlarged; // return code
+        let ci = cur.unwrap();
+        if self.nodes[ci].cnt == 1 || self.nodes[ci].cmp == CMPSKP {
+            // reactivate skipped elements (:312-313)
+            if self.nodes[ci].cmp == CMPSKP {
+                self.nodes[ci].cmp = 0;
+            }
+
+            ret = self.is_good_or_best(red_new, ci, org, newf);
+            match ret {
+                MchRet::Invalid => {
+                    if self.nodes[ci].tst >= self.nodes[ci].r#new {
+                        // Invalids are marked -1 for reuse (unless they were
+                        // incompletely evaluated) (:318-320)
+                        self.hsh_rpr += 1; // miHshRpr++
+                        self.nodes[ci].cmp = CMPINV; // mark as invalid for reuse
+
+                        // put new invalid elements in front of the new list
+                        // to be reused (:322-328)
+                        if self.nodes[ci].cnt == 1 {
+                            if self.mp_new.is_none() {
+                                self.mp_lst = Some(ci);
+                            }
+                            self.nodes[ci].nxt = self.mp_new;
+                            self.mp_new = Some(ci);
+                        }
+                    } else {
+                        // Invalids that were not fully evaluated are treated
+                        // like valids, so no break (:332-339)
+                        if self.nodes[ci].cnt == 1 {
+                            self.add_new(ci);
+                        }
+                    }
+                }
+                MchRet::Valid | MchRet::Good | MchRet::Best => {
+                    // put new valid elements on the new elements list (:337-338)
+                    if self.nodes[ci].cnt == 1 {
+                        self.add_new(ci);
+                    }
+                }
+                MchRet::Enlarged | MchRet::Error | MchRet::Full => {
+                    // should not occur (:341-345)
+                }
+            } /* switch */
+
+            // debug reporting (:349-354)
             #[cfg(feature = "debug")]
             if dbg(DBGMCH) {
                 dbg_print(format_args!(
-                    "Mch Add ({},{}) New ({},{}) Bse ({})\n",
+                    "Add         [  :{}>{}<{}] bse={} ret={}\n",
                     p8(fnd_org),
+                    p8(dlt),
                     p8(fnd_new),
-                    p8(fnd_org),
-                    p8(fnd_new),
-                    _base_new,
+                    red_new,
+                    ret as i32
                 ));
             }
+        } /* if enlarged else add */
 
-            if self.free.is_some() { 1 } else { 0 } // still place ?
+        // Check if there's still room for new elements (:357-361)
+        if self.mch_fre == 0 && self.mp_old.is_none() {
+            MchRet::Full // table is full
         } else {
-            /* Debug: table-full trace (JMatchTable.cpp:174-176). */
-            #[cfg(feature = "debug")]
-            if dbg(DBGMCH) {
-                dbg_print(format_args!("Mch ({}, {}) Ful\n", p8(fnd_org), p8(fnd_new),));
+            ret // Good, bad or ugly :-)
+        }
+    } /* add() */
+
+    /// Get the best (=nearest) optimized and valid match from the array of
+    /// matches (`JMatchTable::getbest`, `JMatchTable.cpp:117-171`).
+    ///
+    /// Returns the tracked best `(org, new)` positions, or `None` when no
+    /// solution has been found — the best was elected incrementally by
+    /// [`JMatchTable::is_best`] during `add`/`cleanup`; no rescanning happens
+    /// here. With `cmp_all` off, enlarged EOB elements are re-evaluated first
+    /// (`:124-145`).
+    pub fn getbest(&mut self, red_org: i64, red_new: i64) -> Option<(i64, i64)> {
+        let _ = red_org; // azRedOrg: accepted, unused — as in the C++ body
+
+        // Re-evaluate enlarged EOB's (because they are evaluated based on
+        // iiCnt) (:124-145)
+        if !self.cmp_all {
+            // join old and new lists
+            if self.mp_new.is_some() {
+                let lst = self
+                    .mp_lst
+                    .expect("mpNew non-null implies mpLst non-null (C++ invariant)");
+                self.nodes[lst].nxt = self.mp_old;
+                self.mp_old = self.mp_new;
+                self.mp_new = None;
+                self.mp_lst = None;
             }
 
-            0 // not added
-        }
-    }
-
-    /// Get the nearest optimized and valid match from the table
-    /// (`JMatchTable.cpp:186-332`). Returns the verified best position on
-    /// `(org, new)` files, or `None` when no candidate survives verification.
-    #[allow(clippy::too_many_arguments)]
-    pub fn get(
-        &mut self,
-        _red_org: i64, // azRedOrg: unused, as in the C++
-        red_new: i64,
-        hsh: &JHashPos,
-        org: &mut dyn JFile,
-        new: &mut dyn JFile,
-        cmp_all: bool,
-    ) -> Option<(i64, i64)> {
-        const FZY: i64 = 0; // Fuzzy factor (JMatchTable.cpp:185)
-
-        // Current reliability range, at least 1024 (JMatchTable.cpp:206-207).
-        let rlb_raw = hsh.reliability();
-        let mut rlb = rlb_raw;
-        if rlb < 1024 {
-            rlb = 1024;
-        }
-
-        let mut bst: Option<usize> = None; // lpBst
-        let mut bst_org: i64 = 0; // azBstOrg / azBstNew are out-parameters in
-        let mut bst_new: i64 = 0; // the C++; the caller seeds 0 (JDiff.cpp:292)
-        let mut bst_cnt: i32 = 0; // liBstCnt
-        let mut bst_cmp: i32 = 0; // liBstCmp: uninitialized in C++, only read
-        // once a best exists
-
-        // Loop on the table (JMatchTable.cpp:210-323).
-        for &head in self.buckets.iter() {
-            let mut cur = head;
-            while let Some(ci) = cur {
-                let (typ, cnt, beg, nnew, node_org, delta) = {
-                    let n = &self.nodes[ci];
-                    (n.typ, n.cnt, n.beg, n.r#new, n.org, n.delta)
-                };
-                let cur_cnt = if typ < 0 { 0 } else { cnt }; // liCurCnt
-
-                // Skip empty or old entries (JMatchTable.cpp:214-218): the
-                // "old" test uses the raw reliability, not the 1024 floor.
-                if cnt == 0 || nnew + i64::from(rlb_raw) < red_new {
-                    // do nothing: skip empty or old entries
-                }
-                // Else if potentially better (JMatchTable.cpp:219-223).
-                else if bst.is_none()
-                    || (beg - i64::from(rlb) < bst_new + FZY // probably nearer
-                        && (red_new < bst_new + FZY // still possible to improve?
-                            || cur_cnt > bst_cnt))
-                // or probably longer
+            // evaluate
+            let mut bst_eob = false;
+            let mut lp_cur = self.mp_old;
+            while let Some(ci) = lp_cur {
+                let cmp = self.nodes[ci].cmp;
+                let tst = self.nodes[ci].tst;
+                let nnew = self.nodes[ci].r#new;
+                if Some(ci) != self.mp_bst
+                    && cmp <= CMPEOB // EOB ?
+                    && nnew > tst // Enlarged ? //@flawed !
+                    && self.is_best(ci, red_new, 0, tst, cmp)
                 {
-                    // Calculate the test position (JMatchTable.cpp:225-234).
-                    let mut tst_new = beg - i64::from(rlb);
-                    let dst: i32 = if tst_new >= red_new {
-                        rlb
-                    } else {
-                        tst_new = red_new;
-                        // C++ narrows this off_t difference to int here
-                        // ("TODO liDst may overflow ??" is kept verbatim).
-                        let d = (beg - tst_new) as i32;
-                        if d < rlb { rlb } else { d }
-                    };
-
-                    // Calculate the test position on the original file by
-                    // applying delta (JMatchTable.cpp:236-257).
-                    let mut tst_org;
-                    if typ < 0 {
-                        // We're on a gliding match.
-                        if tst_new >= beg {
-                            // Within gliding match.
-                            tst_org = node_org;
-                        } else {
-                            // Before gliding match.
-                            tst_org = tst_new + delta;
-                            if tst_org < 0 {
-                                tst_new -= tst_org;
-                                tst_org = 0;
-                            }
-                        }
-                    } else {
-                        // Colliding match.
-                        tst_org = tst_new + delta;
-                        if tst_org < 0 {
-                            tst_new -= tst_org;
-                            tst_org = 0;
-                        }
-                    }
-
-                    // Compare (JMatchTable.cpp:260): cmp_all reads hard (1),
-                    // otherwise soft (2).
-                    let mut cmp = check(org, new, &mut tst_org, &mut tst_new, dst, !cmp_all);
-
-                    // Soft eof reached, then rely on hash function
-                    // (JMatchTable.cpp:262-276).
-                    if cmp == 1 {
-                        if cnt < 2 {
-                            cmp = 7; // most probably unequal
-                        } else {
-                            // Estimate a realistic "find" position.
-                            if beg >= red_new {
-                                tst_new = beg;
-                            } else if nnew >= red_new {
-                                tst_new = red_new;
-                            } else {
-                                cmp = 7;
-                            }
-                            tst_org = tst_new + delta;
-                        }
-                    }
-
-                    // Remove false matches (JMatchTable.cpp:278-282).
-                    if cmp >= 2 {
-                        self.nodes[ci].cnt -= 1;
-                        HSH_RPR.fetch_add(1, Ordering::Relaxed); // siHshRpr++
-                    }
-
-                    // Evaluate: keep the best solution (JMatchTable.cpp:284-299).
-                    if cmp <= 1 {
-                        let better = bst.is_none() // first found
-                            || tst_new + FZY < bst_new // substantially nearer
-                            || (tst_new <= bst_new + FZY // potentially longer
-                                && cur_cnt > bst_cnt
-                                && cmp <= bst_cmp);
-                        if better {
-                            // New solution seems to be better.
-                            bst_org = tst_org;
-                            bst_new = tst_new;
-                            bst = Some(ci);
-                            bst_cnt = cur_cnt;
-                            bst_cmp = cmp;
-                        }
-                    }
-
-                    /* Debug: table dump — inside the better-branch, after the
-                     * evaluation, like the C++ (JMatchTable.cpp:302-310). The
-                     * `%c` is `*` when this node is the current best
-                     * (pointer identity), else the compare-state marker. */
-                    #[cfg(feature = "debug")]
-                    if dbg(DBGMCH) {
-                        let marker = if bst == Some(ci) {
-                            '*'
-                        } else if cmp == 0 {
-                            '='
-                        } else if cmp == 1 {
-                            '?'
-                        } else {
-                            ':'
-                        };
-                        dbg_print(format_args!(
-                            "Mch {:1}{}[{}{},{},{},{:4}]{}:{}:{}\n",
-                            cmp,
-                            marker,
-                            if typ < 0 {
-                                'G'
-                            } else if typ > 0 {
-                                'C'
-                            } else {
-                                ' '
-                            },
-                            p8(node_org),
-                            p8(nnew),
-                            p8(beg),
-                            cnt,
-                            p8(tst_new),
-                            delta,
-                            dst,
-                        ));
-                    }
+                    bst_eob = true;
                 }
-                // Else (not empty/old, not potentially better): only a DBGMCH
-                // line, gated twice in the C++ (JMatchTable.cpp:314-319).
-                else {
-                    #[cfg(feature = "debug")]
-                    if dbg(DBGMCH) && cnt > 0 && beg > 0 {
-                        dbg_print(format_args!(
-                            "Mch  :[{}{},{},{},{:4}] D={}\n",
-                            if typ < 0 {
-                                'G'
-                            } else if typ > 0 {
-                                'C'
-                            } else {
-                                ' '
-                            },
-                            p8(node_org),
-                            p8(nnew),
-                            p8(beg),
-                            cnt,
-                            delta,
-                        ));
-                    }
+                lp_cur = self.nodes[ci].nxt;
+            }
+
+            // recalc mzBstOrg if needed (:142-144)
+            if bst_eob && self.z_bst_org == 0 {
+                if let Some(bst) = self.mp_bst {
+                    let (mut o, mut n) = (self.z_bst_org, self.z_bst_new);
+                    self.calc_pos_org(bst, &mut o, &mut n);
+                    self.z_bst_org = o;
+                    self.z_bst_new = n;
                 }
-                cur = self.nodes[ci].next;
             }
         }
 
-        // Mch Err (JMatchTable.cpp:325-328); return (lpBst != null).
+        // get best match (:147-151)
+        let ret = self.mp_bst.map(|_| (self.z_bst_org, self.z_bst_new));
+
+        // debug feedback (:153-168)
         #[cfg(feature = "debug")]
-        if dbg(DBGMCH) && bst.is_none() {
-            dbg_print(format_args!("Mch Err\n"));
+        if dbg(DBGMCH) {
+            match self.mp_bst {
+                None => {
+                    dbg_print(format_args!("Match Failure at {}\n", red_new));
+                }
+                Some(b) => {
+                    let bst_new = self.z_bst_new;
+                    if red_new != bst_new {
+                        dbg_print(format_args!(
+                            "Suboptimal Match at {}: from {}({}), length {}\n",
+                            red_new,
+                            bst_new,
+                            bst_new - red_new,
+                            self.nodes[b].cmp
+                        ));
+                    } else if self.nodes[b].cmp < EQLSZE {
+                        dbg_print(format_args!(
+                            "Short Match at {}: from {}, length {}\n",
+                            red_new, bst_new, self.nodes[b].cmp
+                        ));
+                    } else {
+                        dbg_print(format_args!(
+                            "Optimal Match at {}: from {}, length {}\n",
+                            red_new, bst_new, self.nodes[b].cmp
+                        ));
+                    }
+                }
+            }
         }
-        if bst.is_some() {
-            Some((bst_org, bst_new))
+
+        ret
+    } /* getbest() */
+
+    /// Cleanup, check free space and fastcheck best match
+    /// (`JMatchTable::cleanup`, `JMatchTable.cpp:373-438`).
+    ///
+    /// `rlb` is the hashtable's current reliability (`mpHsh->get_reliability()`,
+    /// `:377` — mechanically passed, see the module docs); `bse_org` is
+    /// accepted but unused, like the C++ `azBseOrg` parameter.
+    pub fn cleanup(
+        &mut self,
+        bse_org: i64, // azBseOrg: cleanup all matches before this position (unused, as in the C++)
+        red_new: i64, // azRedNew: current reading position
+        rlb: i32,
+        org: &mut dyn JFile,
+        newf: &mut dyn JFile,
+    ) -> MchRet {
+        let _ = bse_org;
+
+        // get actual reliability distance (:377)
+        self.rlb = rlb;
+
+        // join old and new lists (:379-385)
+        if self.mp_new.is_some() {
+            let lst = self
+                .mp_lst
+                .expect("mpNew non-null implies mpLst non-null (C++ invariant)");
+            self.nodes[lst].nxt = self.mp_old;
+            self.mp_old = self.mp_new;
+            self.mp_new = None;
+            self.mp_lst = None;
+        }
+
+        // sanity checks (:387-397)
+        #[cfg(feature = "debug")]
+        if dbg(DBGMCH) {
+            let (mut li_new, mut li_old) = (0, 0);
+            let mut p = self.mp_new;
+            while let Some(ci) = p {
+                li_new += 1;
+                p = self.nodes[ci].nxt;
+            }
+            p = self.mp_old;
+            while let Some(ci) = p {
+                li_old += 1;
+                p = self.nodes[ci].nxt;
+            }
+            if self.mch_fre + li_old + li_new != self.mch_sze {
+                dbg_print(format_args!(
+                    "Mch Cln Wrong table size {}+{}+{} != {} !\n",
+                    li_new, li_old, self.mch_fre, self.mch_sze
+                ));
+            }
+        }
+
+        // evaluate existing entries (:399-407)
+        self.mp_bst = None; // reset best pointer
+        self.z_old = red_new;
+
+        let mut lp_cur = self.mp_old;
+        while let Some(ci) = lp_cur {
+            if self.is_old2_skip(ci, red_new) {
+                self.nodes[ci].cmp = CMPSKP; // Mark very old elements as skipped
+            } else {
+                self.is_good_or_best(red_new, ci, org, newf);
+            }
+            lp_cur = self.nodes[ci].nxt;
+        }
+
+        // prepare the oldlist (:410)
+        self.nextold(red_new, org, newf);
+
+        // redo sanity checks (:413-423)
+        #[cfg(feature = "debug")]
+        if dbg(DBGMCH) {
+            let (mut li_new, mut li_old) = (0, 0);
+            // The C++ walks the new list with the extra bound
+            // lpCur != mpLst->ipNxt (short-circuited away when mpNew is null).
+            let lst_nxt = self.mp_lst.map(|l| self.nodes[l].nxt).flatten();
+            let mut p = self.mp_new;
+            while let Some(ci) = p {
+                if Some(ci) == lst_nxt {
+                    break;
+                }
+                li_new += 1;
+                p = self.nodes[ci].nxt;
+            }
+            p = self.mp_old;
+            while let Some(ci) = p {
+                li_old += 1;
+                p = self.nodes[ci].nxt;
+            }
+            if self.mch_fre + li_new + li_old != self.mch_sze {
+                dbg_print(format_args!(
+                    "Mch Cln Wrong table size {}+{}+{} != {} !\n",
+                    li_new, li_old, self.mch_fre, self.mch_sze
+                ));
+            }
+        }
+
+        // issue return value (:425-437)
+        if self.mp_old.is_none() && self.mch_fre == 0 {
+            MchRet::Full //
+        } else if self.mp_bst.is_none() {
+            MchRet::Invalid //
+        } else if self.z_bst_new != red_new {
+            MchRet::Valid //
+        } else if self.i_bst_cmp >= EQLMAX {
+            MchRet::Best //
+        } else if self.i_bst_cmp >= EQLSZE {
+            MchRet::Good //
         } else {
-            None
+            MchRet::Valid //
+        }
+    } /* cleanup() */
+
+    /// Evaluate a match (`JMatchTable::isGoodOrBest`,
+    /// `JMatchTable.cpp:443-538`).
+    ///
+    /// `lzDst` is only read by the #if debug doublecheck, like the C++ —
+    /// release builds legitimately never read the assignment.
+    #[cfg_attr(not(feature = "debug"), allow(unused_assignments))]
+    fn is_good_or_best(
+        &mut self,
+        red_new: i64, // azRedNew: current read position
+        cur: usize,   // lpCur: element to evaluate
+        org: &mut dyn JFile,
+        newf: &mut dyn JFile,
+    ) -> MchRet {
+        /* check if the match yields a solution on this position (:455) */
+        let mut tst_new = red_new; // lzTstNew: start test at current read position
+
+        /* calculate the test position on the original file by applying
+         * izDlt (:458) */
+        let mut tst_org: i64 = 0; // lzTstOrg
+        let gliding = self.calc_pos_org(cur, &mut tst_org, &mut tst_new); // lbGld
+
+        /* reuse earlier compare result (:461-498) */
+        // lzDst: distance: number of bytes to compare before failing; -1
+        // marks the reuse branches for the debug doublecheck. Only the
+        // #if debug block reads it, like the C++.
+        #[cfg_attr(not(feature = "debug"), allow(unused_mut, unused_variables, unused_assignments))]
+        let mut dst: i64 = -1;
+        let mut cur_cmp: i32; // liCurCmp: current match compare state
+
+        {
+            let n = &self.nodes[cur];
+            if tst_new <= n.tst {
+                // The test position is still before the previous test result,
+                // so reuse the previous test result. (:463-474)
+                let mut cc = n.cmp;
+                if cc == CMPSKP || cc == CMPINV {
+                    cc = 0;
+                }
+                if gliding {
+                    tst_new = n.tst;
+                    tst_org = n.org;
+                } else {
+                    tst_org += n.tst - tst_new;
+                    tst_new = n.tst;
+                }
+                cur_cmp = cc;
+            } else if !gliding
+                && n.cmp > 0
+                && n.tst - tst_new + i64::from(n.cmp) > i64::from(EQLMIN)
+            {
+                // The new test position is within the previous test result.
+                // Report the remaining length (:476-478). C++: int assignment
+                // of an off_t expression.
+                cur_cmp = (n.tst - tst_new + i64::from(n.cmp)) as i32;
+            } else {
+                // The previous test result cannot be reused: check (again)
+                // determine number of bytes to check (:482-486)
+                let mut d = n.beg - tst_new; // lzDst
+                // The C++ spells the clamp as if/else-if (:483-486) — kept 1:1.
+                #[allow(clippy::manual_clamp)]
+                if d < MINDST {
+                    d = MINDST;
+                } else if d > MAXDST {
+                    d = MAXDST;
+                }
+                dst = d;
+
+                // check (:489-490): cmp_all reads hard, otherwise soft
+                let sft = if self.cmp_all {
+                    ReadType::HardAhead
+                } else {
+                    ReadType::SoftAhead
+                };
+                let gld_arg = if gliding { n.gldcnt } else { 0 };
+                // C++ passes the off_t lzDst to check's int aiLen (truncating).
+                cur_cmp = check(org, newf, &mut tst_org, &mut tst_new, d as i32, gld_arg, sft);
+
+                // store result (:493-497)
+                let n = &mut self.nodes[cur];
+                n.tst = tst_new;
+                if n.cmp == CMPINV && cur_cmp <= 0 {
+                    // don't erase an invalid marker
+                } else {
+                    n.cmp = cur_cmp;
+                }
+            }
+        }
+
+        // Debug doublecheck (:501-518): only for the reuse branches (dst == -1).
+        #[cfg(feature = "debug")]
+        if dbg(DBGMCH) && dst == -1 {
+            let mut chk_org = tst_org;
+            let mut chk_new = tst_new;
+            let sft = if self.cmp_all {
+                ReadType::HardAhead
+            } else {
+                ReadType::SoftAhead
+            };
+            let chk_cmp = check(org, newf, &mut chk_org, &mut chk_new, 0, 0, sft);
+            if (chk_cmp == 0 && cur_cmp == 0) || chk_cmp == CMPEOB {
+                // that's ok
+            } else if (chk_cmp != cur_cmp && self.nodes[cur].cmp < EQLMAX)
+                || chk_org != tst_org
+                || chk_new != tst_new
+            {
+                dbg_print(format_args!(
+                    "Mch Chk Err :{}={}+{} Chk: {}={}+{}!\n",
+                    tst_org, tst_new, cur_cmp, chk_org, chk_new, chk_cmp
+                ));
+            }
+        }
+
+        // If iiCmp>=EQLMAX, the test result probably extends till izNew (:521-523)
+        if self.nodes[cur].cmp >= EQLMAX && self.nodes[cur].r#new > tst_new + i64::from(cur_cmp) {
+            // C++: int += off_t (truncating).
+            cur_cmp = cur_cmp.wrapping_add((self.nodes[cur].r#new - tst_new) as i32);
+        }
+
+        // evaluate: keep the best solution (:526)
+        self.is_best(cur, red_new, tst_org, tst_new, cur_cmp);
+
+        if cur_cmp == 0 {
+            MchRet::Invalid //
+        } else if tst_new != red_new {
+            MchRet::Valid //
+        } else if cur_cmp >= EQLMAX {
+            MchRet::Best //
+        } else if cur_cmp >= EQLSZE {
+            MchRet::Good //
+        } else {
+            MchRet::Valid //
+        }
+    } /* isGoodOrBest */
+
+    /// Check if given solution is the best one (`JMatchTable::isBest`,
+    /// `JMatchTable.cpp:543-656`).
+    fn is_best(
+        &mut self,
+        cur: usize,       // lpCur
+        red_new: i64,     // azRedNew
+        mut tst_org: i64, // lzTstOrg
+        mut tst_new: i64, // lzTstNew
+        mut cur_cmp: i32, // liCurCmp
+    ) -> bool {
+        let mut cur_cnt: i32 = -1; // liCurCnt: current match confirmation count
+
+        /* Evaluate potential of EOB matches (:553-587) */
+        if cur_cmp <= CMPEOB {
+            // EOB was reached, so rely on info from the hashtable: iiCnt,
+            // izBeg and izNew
+            if cur_cnt < 0 {
+                cur_cnt = if self.nodes[cur].gldcnt > 0 {
+                    1 + self.nodes[cur].cnt / 2
+                } else {
+                    self.nodes[cur].cnt
+                };
+            }
+
+            if tst_new <= self.nodes[cur].beg {
+                // We're still before the first detected match, so a potential
+                // solution probably starts at given match
+                cur_cmp = cur_cnt;
+                tst_new = self.nodes[cur].beg;
+                tst_org = self.nodes[cur].org;
+            } else if tst_new <= self.nodes[cur].r#new + i64::from(self.rlb) {
+                // We're in between the first and last detected match:
+                // Estimate the number of bytes needed to reach an equality.
+                cur_cmp = cur_cnt;
+                let d = 1 + i64::from(self.rlb) - i64::from(self.rlb.min(self.nodes[cur].cnt));
+                tst_new += d;
+                tst_org += d;
+            } else {
+                // The match is aging, reduce iiCnt by its age and estimate
+                // the distance to an equality. C++: int assignment of an
+                // off_t quotient (miRlb / 8 == 0 divides by zero in both).
+                cur_cmp = cur_cnt
+                    - 1
+                    - ((tst_new - self.nodes[cur].r#new) / i64::from(self.rlb / 8)) as i32;
+                let d = i64::from(cur_cnt - cur_cmp);
+                tst_new += d;
+                tst_org += d;
+            }
+            if cur_cmp < 1 {
+                cur_cmp = 1; // something may be there, better than nothing
+            } else {
+                cur_cmp = 1 + EQLMAX.min(cur_cmp) / 2; // reduce hashtable match, real compares are better
+            }
+
+            // store result for isOld functions, negate to indicate EOB (:584-586)
+            if cur_cmp > 3 {
+                self.nodes[cur].cmp = -cur_cmp;
+            }
+        }
+
+        /* Elect the best one (:590-611) */
+        if cur_cmp > 0 {
+            if self.mp_bst.is_none() {
+                self.mp_bst = Some(cur); // first one, take it
+            } else if cur_cmp < 2 && self.i_bst_cmp > 4 {
+                // do nothing to avoid using low-quality matches
+                // (liCurCmp < 2 == low quality)
+            } else if self.i_bst_cmp < 2 && cur_cmp > 4 {
+                self.mp_bst = Some(cur); // avoid using low-quality matches (liBstCmp < 2 == low quality)
+            } else if tst_new + FZY < self.z_bst_new {
+                self.mp_bst = Some(cur); // new one is clearly better (nearer)
+            } else if tst_new <= self.z_bst_new + FZY {
+                // maybe better (nearer): check in more detail
+                if tst_new - i64::from(cur_cmp) < self.z_bst_new - i64::from(self.i_bst_cmp) {
+                    self.mp_bst = Some(cur); // new one is longer
+                } else if tst_new - i64::from(cur_cmp)
+                    == self.z_bst_new - i64::from(self.i_bst_cmp)
+                {
+                    // If all else is equal, then rely on the hash counter
+                    if cur_cnt < 0 {
+                        // note: no `1 +` here, unlike the EOB branch above
+                        cur_cnt = if self.nodes[cur].gldcnt > 0 {
+                            self.nodes[cur].cnt / 2
+                        } else {
+                            self.nodes[cur].cnt
+                        };
+                    }
+                    let b = self.mp_bst.expect("mpBst non-null in the elect chain");
+                    let bst_cnt = if self.nodes[b].gldcnt > 0 {
+                        self.nodes[b].cnt / 2
+                    } else {
+                        self.nodes[b].cnt
+                    };
+                    if cur_cnt > bst_cnt {
+                        self.mp_bst = Some(cur); // higher hash-match counter = probably longer
+                    }
+                }
+            }
+
+            if self.mp_bst == Some(cur) {
+                self.z_bst_new = tst_new;
+                self.z_bst_org = tst_org;
+                self.i_bst_cmp = cur_cmp;
+
+                // Determine the limit for being old (:619-626):
+                // - current mpBst runs till izTst + iiCmp, so all matches
+                //   before this point are useless
+                // - except if a new mpBst is found that is earlier but shorter
+                // - therefore, miRlb is used as safety range
+                self.z_old = self.nodes[cur].tst + i64::from(self.nodes[cur].cmp.min(0))
+                    - i64::from(self.rlb);
+                if self.z_old < red_new {
+                    self.z_old = red_new;
+                }
+            }
+        } /* if liCurCmp > 0 */
+
+        // debug feedback (:632-653)
+        #[cfg(feature = "debug")]
+        if dbg(DBGMCH) {
+            let n = &self.nodes[cur];
+            let val_old_inv = if cur_cmp > 0 {
+                "Val"
+            } else if n.r#new < red_new {
+                "Old"
+            } else {
+                "Inv"
+            };
+            dbg_print(format_args!(
+                "{} {:5} {} [{:2}:{}>{}<{}~{}#{:4}:{}+{:4}] bse={} fnd={}={}({})\n",
+                val_old_inv,
+                cur_cmp,
+                if self.mp_bst == Some(cur) { '*' } else { ' ' },
+                n.gldcnt,
+                p8(n.org),
+                p8(n.dlt),
+                p8(n.beg),
+                p8(n.r#new),
+                n.cnt,
+                p8(n.tst),
+                n.cmp,
+                red_new,
+                tst_org,
+                tst_new,
+                tst_new - red_new,
+            ));
+
+            // Measure old distance (function-local static in the C++)
+            let dist = red_new - n.r#new;
+            if cur_cmp > 0 && dist > LL_OLD_MAX.load(Ordering::Relaxed) {
+                LL_OLD_MAX.store(dist, Ordering::Relaxed);
+                dbg_print(format_args!("Mch Old Max Distance = {}\n", dist));
+            }
+        }
+
+        self.mp_bst == Some(cur)
+    } /* isBest */
+
+    /// Prepare next reusable old element (`JMatchTable::nextold`,
+    /// `JMatchTable.cpp:662-724`). Returns true = found, false = notfound.
+    fn nextold(&mut self, red_new: i64, org: &mut dyn JFile, newf: &mut dyn JFile) -> bool {
+        // The file readers back only the debug-verify block below, like the
+        // C++ #if debug — silent in release builds.
+        #[cfg(not(feature = "debug"))]
+        let _ = (org, newf);
+
+        // find first old item on old list (:669-680)
+        while let Some(head) = self.mp_old {
+            if self.is_old2_reuse(head, red_new) {
+                break;
+            } else {
+                // not an old item: remove from oldlist
+                self.mp_old = self.nodes[head].nxt;
+
+                // add to newlist
+                self.add_new(head);
+            }
+        }
+
+        // reuse new invalid items (marked with iiCmp == -1) (:682-700)
+        if self.mp_old.is_none() && self.mp_new.is_some() {
+            let lst = self
+                .mp_lst
+                .expect("mpNew non-null implies mpLst non-null (C++ invariant)");
+            self.nodes[lst].nxt = None; // mpLst->ipNxt = null
+            let mut lp_cur = self.mp_new;
+            while let Some(ci) = lp_cur {
+                if self.nodes[ci].cmp != CMPINV {
+                    break;
+                }
+                // Remove from new list
+                self.mp_new = self.nodes[ci].nxt;
+                let nxt = self.nodes[ci].nxt;
+
+                if self.nodes[ci].cnt > 1 && self.nodes[ci].r#new > self.nodes[ci].tst {
+                    // Reactivate an enlarged invalid: move to end of newlist
+                    self.nodes[ci].cmp = 0;
+                    self.add_new(ci);
+                } else {
+                    // Move to old list
+                    self.nodes[ci].nxt = self.mp_old;
+                    self.mp_old = Some(ci);
+                    break;
+                }
+                // The for-increment follows the stale next link, exactly like
+                // the C++ (the arena never frees, so the value is defined).
+                lp_cur = nxt;
+            }
+        }
+
+        // debug-verify (:702-721)
+        #[cfg(feature = "debug")]
+        if dbg(DBGMCH) {
+            if let Some(head) = self.mp_old {
+                let mut chk_new = red_new;
+                let mut chk_org = if self.nodes[head].gldcnt > 0 {
+                    self.nodes[head].org
+                } else {
+                    chk_new + self.nodes[head].dlt
+                };
+                let sft = if self.cmp_all {
+                    ReadType::HardAhead
+                } else {
+                    ReadType::SoftAhead
+                };
+                let cmp = check(org, newf, &mut chk_org, &mut chk_new, 32, 0, sft);
+                if cmp > 0 {
+                    let n = &self.nodes[head];
+                    dbg_print(format_args!(
+                        "Mch Nxt Err [{:2}:{}>{}<{}~{}#{:4}:{}+{:4}] bse={} tst:{}-{}({})={} is not invalid !\n",
+                        n.gldcnt,
+                        p8(n.org),
+                        p8(n.dlt),
+                        p8(n.beg),
+                        p8(n.r#new),
+                        n.cnt,
+                        p8(n.tst),
+                        n.cmp,
+                        red_new,
+                        p8(chk_org),
+                        p8(chk_new),
+                        (chk_new - red_new) as i32,
+                        cmp,
+                    ));
+                }
+            }
+        }
+
+        self.mp_old.is_some()
+    }
+
+    /// Check if a match can be skipped (`isOld2Skip`,
+    /// `JMatchTable.cpp:733-743`).
+    ///
+    /// Skipping is mainly done for performance reasons. Skipped items however
+    /// are dropped from the matching table if they are not renewed, so
+    /// skipping may improve accuracy. Adversely, skipping a useful match will
+    /// reduce accuracy, so we need to be careful.
+    fn is_old2_skip(&self, cur: usize, red_new: i64) -> bool {
+        let n = &self.nodes[cur];
+        match n.cmp {
+            CMPSKP => true,
+            CMPINV | 0 => n.r#new + MAXDST <= red_new,
+            // CMPEOB and default (any other compare result)
+            _ => (n.r#new + MAXDST <= red_new) && (n.tst + i64::from(n.cmp.abs()) < red_new),
         }
     }
 
-    /// Cleanup & check if there is free space in the table of matches
-    /// (`JMatchTable.cpp:337-371`): removes empty (`cnt == 0`) and old
-    /// (`new < base_new`) nodes from every chain onto the free list; returns
-    /// whether the free list is non-empty afterwards.
-    pub fn cleanup(&mut self, base_new: i64) -> bool {
-        // Loop on the table (JMatchTable.cpp:341-368).
-        for head in self.buckets.iter_mut() {
-            let mut prv: Option<usize> = None; // lpPrv
-            let mut cur = *head; // lpCur
-            while let Some(ci) = cur {
-                // If bad or old.
-                if self.nodes[ci].cnt == 0 || self.nodes[ci].r#new < base_new {
-                    // Remove from list.
-                    let nxt = self.nodes[ci].next;
-                    match prv {
-                        None => *head = nxt,
-                        Some(p) => self.nodes[p].next = nxt,
-                    }
+    /// Check if a match can be reused (deleted) (`isOld2Reuse`,
+    /// `JMatchTable.cpp:755-768`).
+    ///
+    /// Matches are never deleted but instead reused (overwritten) by new
+    /// matches. The matchtable is "full" when no more matches can be reused.
+    /// If the matchtable is full, searching must stop, which is bad.
+    /// Reusing (overwriting) a still usable match however is also bad.
+    ///
+    /// A match is considered still usable if may contain information beyond
+    /// the current best match. This is flawed, because a next best match may
+    /// be shorter than the current. So reusing valid matches is risky but
+    /// necessary to maximize the search.
+    fn is_old2_reuse(&self, cur: usize, red_new: i64) -> bool {
+        let _ = red_new; // azRedNew: accepted, unused — as in the C++ body
+        let n = &self.nodes[cur];
+        match n.cmp {
+            CMPSKP => true,
+            CMPINV => true,
+            CMPEOB => Some(cur) != self.mp_bst && n.r#new < self.z_old,
+            0 => n.r#new < n.tst || n.r#new < self.z_old,
+            _ => {
+                Some(cur) != self.mp_bst
+                    && n.r#new < self.z_old
+                    && n.tst + i64::from(n.cmp.abs()) < self.z_old
+            }
+        }
+    }
 
-                    // Add to free-list.
-                    self.nodes[ci].next = self.free;
-                    self.free = Some(ci);
+    /// Calculate position on original file corresponding to given new file
+    /// position (`calcPosOrg`, `JMatchTable.cpp:777-799`). Returns
+    /// true = gliding offsets, false = normal offsets.
+    fn calc_pos_org(&self, cur: usize, tst_org: &mut i64, tst_new: &mut i64) -> bool {
+        /* calculate the test position on the original file by applying izDlt */
+        if self.nodes[cur].gldcnt > 0 && *tst_new >= self.nodes[cur].beg {
+            // we're within a gliding match
+            *tst_org = self.nodes[cur].org;
+            true
+        } else {
+            // we're before or after a gliding match
+            // or on a colliding match
+            if *tst_new + self.nodes[cur].dlt >= 0 {
+                *tst_org = *tst_new + self.nodes[cur].dlt;
+            } else {
+                // azTstOrg would become negative, so advance azTstNew till
+                // azTstOrg == 0 (:794-795)
+                *tst_new = -self.nodes[cur].dlt;
+                *tst_org = 0;
+            }
+            false
+        }
+    }
 
-                    // Next.
-                    cur = match prv {
-                        None => *head,
-                        Some(p) => self.nodes[p].next,
-                    };
+    /// Add element to the newlist (`addNew`, `JMatchTable.cpp:882-888`).
+    ///
+    /// The last node's `nxt` is deliberately left dangling ("saves one
+    /// assignment", `:887`) — stale-chain walks rely on it, exactly as in
+    /// the C++.
+    fn add_new(&mut self, cur: usize) {
+        if self.mp_new.is_none() {
+            self.mp_new = Some(cur);
+        } else {
+            let lst = self
+                .mp_lst
+                .expect("mpNew non-null implies mpLst non-null (C++ invariant)");
+            self.nodes[lst].nxt = Some(cur);
+        }
+        self.mp_lst = Some(cur);
+    }
+
+    /// Delete element from gliding hashtable (`delGld`,
+    /// `JMatchTable.cpp:893-907`).
+    fn del_gld(&mut self, cur: usize) {
+        // C++ `%` on a negative izOrg yields a negative index (UB); izOrg is
+        // only ever filled from non-negative match positions.
+        let idx = (self.nodes[cur].org % i64::from(self.mch_pme)) as usize;
+        if self.gld_tbl[idx] == Some(cur) {
+            self.gld_tbl[idx] = self.nodes[cur].gld;
+        } else {
+            let mut p = self.gld_tbl[idx];
+            while let Some(gi) = p {
+                if self.nodes[gi].gld == Some(cur) {
+                    self.nodes[gi].gld = self.nodes[cur].gld;
+                    break;
                 } else {
-                    prv = Some(ci);
-                    cur = self.nodes[ci].next;
+                    p = self.nodes[gi].gld;
                 }
             }
         }
+    }
 
-        self.free.is_some()
+    /// Delete element from colliding hashtable (`delCol`,
+    /// `JMatchTable.cpp:912-926`).
+    fn del_col(&mut self, cur: usize) {
+        let idx = (self.nodes[cur].dlt.abs() % i64::from(self.mch_pme)) as usize;
+        if self.col_tbl[idx] == Some(cur) {
+            self.col_tbl[idx] = self.nodes[cur].col;
+        } else {
+            let mut p = self.col_tbl[idx];
+            while let Some(ci) = p {
+                if self.nodes[ci].col == Some(cur) {
+                    self.nodes[ci].col = self.nodes[cur].col;
+                    break;
+                } else {
+                    p = self.nodes[ci].col;
+                }
+            }
+        }
+    }
+
+    /// Get number of hash repairs (matches repaired by comparing)
+    /// (`getHshRpr`, `JMatchTable.cpp:930-932`). Instance counter — the
+    /// 0.8.1 process-global static is retired (spec §18.E).
+    pub fn get_hsh_rpr(&self) -> i32 {
+        self.hsh_rpr
     }
 }
 
-/// Verify and optimize matches (`JMatchTable::check`, `JMatchTable.cpp:389-460`).
+/// Debug-only "Mch Old Max Distance" high-water mark (the C++ keeps a
+/// function-local `static long llOldMax` inside `isBest`'s debug block,
+/// `JMatchTable.cpp:645`).
+#[cfg(feature = "debug")]
+static LL_OLD_MAX: AtomicI64 = AtomicI64::new(0);
+
+/// Verify and optimize matches (`JMatchTable::check`,
+/// `JMatchTable.cpp:817-877`).
 ///
-/// Searches at the given positions for a run of `SMPSZE - 8` (24) equal
-/// bytes, continuing for `len` bytes unless soft reading (`soft = true`,
-/// read-type 2) stops at the end-of-buffer. On success both positions are
-/// rewound to the start of the equal run (the optimization anchor).
+/// Searches at the given positions for a run of equal bytes, continuing for
+/// `len` bytes unless soft reading stops at the end-of-buffer. On a mismatch
+/// before EQLSZE, a gliding compare (`gld != 0`) rewinds the original
+/// position to its anchor (`azPosOrg -= liEql`) and lets only the new
+/// position slide; a non-gliding compare advances both.
 ///
-/// Returns `0` = run found, `1` = end-of-buffer reached, `2` = no run of
-/// equal bytes found.
-///
-/// Debug builds print the DBGCMP prologue before comparing and the result
-/// line after it (`JMatchTable.cpp:398-402,430-437`); the result line reports
-/// the *raw* return value before the `1 → 2` soft/hard-eof adjustment of the
-/// final switch, like the C++ print placement.
+/// Returns `0` = no equal bytes found (also for hard EOF),
+/// [`CMPEOB`] = EOB reached, no equal bytes found, or the number of equal
+/// bytes when strictly greater than [`EQLMIN`] (both positions rewound to
+/// the run anchor).
 fn check(
     org: &mut dyn JFile,
-    new: &mut dyn JFile,
-    pos_org: &mut i64,
-    pos_new: &mut i64,
-    mut len: i32,
-    soft: bool,
+    newf: &mut dyn JFile,
+    pos_org: &mut i64, // azPosOrg: in/out
+    pos_new: &mut i64, // azPosNew: in/out
+    mut len: i32,      // aiLen: number of bytes to compare
+    gld: i32,          // aiGld: gliding match recurrence
+    sft: ReadType,     // aiSft: 1=hard read, 2=soft read
 ) -> i32 {
-    let mut lc_org = EOF; // lcOrg
-    let mut lc_new = EOF; // lcNew
-    let mut eql = 0; // liEql
-    let mut ret = 0; // liRet
+    let mut lc_org: i32 = 0; // lcOrg: byte from source file (C++ zero-init)
+    let mut lc_new: i32 = 0; // lcNew: byte from destination file
+    let mut eql: i32 = 0; // liEql: equal bytes counter
 
-    // Read type (aiSft): cmp_all passes 1=hard, else 2=soft
-    // (JMatchTable.cpp:260).
-    let sft = if soft {
-        ReadType::SoftAhead
-    } else {
-        ReadType::HardAhead
-    };
-
-    /* Debug: compare prologue, "Fnd (…): " without newline
-     * (JMatchTable.cpp:398-402). */
+    /* Debug: compare prologue (:825-830) */
     #[cfg(feature = "debug")]
     if dbg(DBGCMP) {
         dbg_print(format_args!(
-            "Fnd ({},{},{:4},{}): ",
+            "Cmp {} ({},{},{:4},{}): ",
+            if gld != 0 { "Gld" } else { "Col" },
             p8(*pos_org),
             p8(*pos_new),
             len,
-            if soft { 2 } else { 1 },
+            sft as i32,
         ));
     }
 
-    // Compare bytes: mismatches do not fail here (JMatchTable.cpp:405-415).
-    while len > SMPSZE - 8 && ret == 0 && eql < SMPSZE - 8 {
+    /* Compare bytes (:833-855): the two break branches are separate
+     * conditions in the C++ (`liEql >= EQLSZE` / `aiLen <= 0`) — kept 1:1. */
+    #[allow(clippy::if_same_then_else)]
+    while eql < EQLMAX {
         lc_org = org.get(*pos_org, sft);
-        *pos_org += 1;
-        lc_new = new.get(*pos_new, sft);
-        *pos_new += 1;
-        len -= 1;
-
+        if lc_org < 0 {
+            break;
+        }
+        lc_new = newf.get(*pos_new, sft);
+        if lc_new < 0 {
+            break;
+        }
         if lc_org == lc_new {
+            *pos_org += 1;
+            *pos_new += 1;
             eql += 1;
-        } else if lc_org < 0 || lc_new < 0 {
-            ret = 1;
+        } else if eql >= EQLSZE {
+            break;
+        } else if len <= 0 {
+            break;
         } else {
+            *pos_new += 1;
+            if gld != 0 {
+                *pos_org -= i64::from(eql); // glide: rewind to the anchor
+            } else {
+                *pos_org += 1;
+            }
             eql = 0;
         }
-    }
-
-    // Compare last 24 bytes: a mismatch fails (JMatchTable.cpp:417-428).
-    while len > 0 && ret == 0 && eql < SMPSZE - 8 {
-        lc_org = org.get(*pos_org, sft);
-        *pos_org += 1;
-        lc_new = new.get(*pos_new, sft);
-        *pos_new += 1;
         len -= 1;
-
-        if lc_org == lc_new {
-            eql += 1;
-        } else if lc_org < 0 || lc_new < 0 {
-            ret = 1;
-        } else {
-            ret = 2;
-        }
     }
 
-    /* Debug: compare result, before the return-value switch like the C++
-     * (JMatchTable.cpp:430-437): the state word is the RAW ret (0/1/2), the
-     * positions are rewound to the equal run's start, and both bytes print
-     * as (%c)%3o with the printable-ASCII filter. */
+    /* Debug: compare result (:857-864) */
     #[cfg(feature = "debug")]
     if dbg(DBGCMP) {
         dbg_print(format_args!(
-            "{} {} {:2} {} ({}){:3o} == ({}){:3o}\n",
+            "{} {} {:2} {} ({}){:02x} == ({}){:02x}\n",
             p8(*pos_org - i64::from(eql)),
             p8(*pos_new - i64::from(eql)),
             eql,
-            match ret {
-                0 => "OK!",
-                1 => "EOF",
-                _ => "NOK",
+            if eql >= EQLMIN {
+                "OK!"
+            } else if lc_org == EOB || lc_new == EOB {
+                "EOB"
+            } else {
+                "NOK"
             },
             c_chr(lc_org),
-            lc_org as u32,
+            lc_org as u8,
             c_chr(lc_new),
-            lc_new as u32,
+            lc_new as u8,
         ));
     }
 
-    match ret {
-        0 => {
-            // Equality found: rewind both positions to the start of the
-            // equal run (JMatchTable.cpp:439-443).
-            *pos_org -= i64::from(eql);
-            *pos_new -= i64::from(eql);
-        }
-        1 => {
-            if lc_org == EOF || lc_new == EOF {
-                // Surely different (hard eof reached) (JMatchTable.cpp:445-447).
-                ret = 2;
-            } else {
-                // May be different (soft eof reached): skip the rest of the
-                // window (JMatchTable.cpp:448-452).
-                *pos_org += i64::from(len);
-                *pos_new += i64::from(len);
-            }
-        }
-        _ => {} // 2: surely different (JMatchTable.cpp:455-457)
+    if eql > EQLMIN {
+        *pos_org -= i64::from(eql);
+        *pos_new -= i64::from(eql);
+        eql
+    } else if lc_org == EOB || lc_new == EOB {
+        // EOB reached
+        CMPEOB
+    } else {
+        // No equal bytes found
+        0
     }
-    ret
-}
+} /* check() */
 
 #[cfg(test)]
 mod tests {
@@ -611,414 +1355,374 @@ mod tests {
     use crate::jfile::{JFileAhead, JFileMem};
     use std::io::Cursor;
 
-    /// Deterministic pseudo-random filler byte stream (LCG, bits 8..=15).
-    fn lcg_bytes(seed: u32, n: usize) -> Vec<u8> {
-        let mut s = seed;
-        (0..n)
-            .map(|_| {
-                s = s.wrapping_mul(1664525).wrapping_add(1013904223);
-                (s >> 8) as u8
-            })
-            .collect()
+    /// Both files all-zero: every compare succeeds, so `check` runs to the
+    /// EQLMAX cap and verified matches classify as Best.
+    fn zeros(n: usize) -> JFileMem {
+        JFileMem::new(vec![0u8; n])
     }
 
-    /// Serializes the HSH_RPR-sensitive tests: [`HSH_RPR`] is a process
-    /// global, and cargo runs tests on parallel threads by default.
-    /// `get_selects_nearest_verified` asserts the counter's delta between two
-    /// loads, while `get_soft_eof_recovers_positions` increments it (node B's
-    /// cmp-7 repair); without the lock a sibling repair could land inside the
-    /// asserted window. Delegates to the crate-wide lock (see
-    /// `crate::test_util`): per-module guards left the jdiff and jmatchtable
-    /// tests racing on the same counter.
-    fn hsh_rpr_guard() -> std::sync::MutexGuard<'static, ()> {
-        crate::test_util::hsh_rpr_guard()
-    }
-
-    /// Brief step-1 test: return values of `add`, the C trunc-mod bucket math
-    /// (−1 and 128 share bucket 1 with 60 in bucket 60), node filling and
-    /// free-list exhaustion (256 nodes → last successful add returns 0, the
-    /// next add returns 0 without adding).
+    /// Brief step-1 test: two-table bucket math (spec §18.E). The collision
+    /// table hashes `|delta| % pme` (`JMatchTable.cpp:197`), the gliding
+    /// table `org % pme` (`:215`); pme = get_lower_prime(2*sze) = 127 for a
+    /// 64-element table. The C `abs` macro shares one bucket between a delta
+    /// and its negation (−960 and +960 both land in bucket 71).
     #[test]
-    fn add_returns_and_bucket_math() {
-        let mut m = JMatchTable::new();
+    fn two_table_bucket_math() {
+        // 2 * 64 = 128 -> get_lower_prime = 127.
+        let mut m = JMatchTable::new(64, true, 1024);
+        assert_eq!(m.mch_pme, 127);
+        let mut org = zeros(4096);
+        let mut new = zeros(4096);
 
-        // delta 60 → bucket 60; node filled; gliding primed.
-        assert_eq!(m.add(100, 40, 0, 0), 1); // space left
-        let n0 = m.buckets[60].unwrap();
-        assert_eq!(m.nodes[n0].delta, 60);
+        // delta 960 -> col bucket 960 % 127 = 71; org 1000 -> gld bucket 111.
+        assert_eq!(m.add(1000, 40, 50, &mut org, &mut new), MchRet::Best);
+        let n0 = m.col_tbl[71].unwrap();
+        assert_eq!(m.gld_tbl[111], Some(n0));
+        assert_eq!(m.nodes[n0].dlt, 960);
         assert_eq!(m.nodes[n0].cnt, 1);
-        assert_eq!(m.nodes[n0].typ, 0);
         assert_eq!(m.nodes[n0].beg, 40);
         assert_eq!(m.nodes[n0].r#new, 40);
-        assert_eq!(m.nodes[n0].org, 100);
-        assert_eq!(m.gld, Some(n0));
-        assert_eq!(m.gld_delta, 59); // delta - 1
+        assert_eq!(m.nodes[n0].org, 1000);
 
-        // delta -1 → bucket |-1| = 1 (C trunc-mod, then negate)
-        assert_eq!(m.add(39, 40, 0, 0), 1);
-        let n1 = m.buckets[1].unwrap();
-        assert_eq!(m.nodes[n1].delta, -1);
-        assert_eq!(m.nodes[n1].beg, 40);
+        // delta -960: the C `abs` macro maps it to the same bucket 71; a new
+        // node is prepended (960 != -960), gliding bucket on org 40 (org 40
+        // is below pme 127, so bucket = 40).
+        assert_eq!(m.add(40, 1000, 1050, &mut org, &mut new), MchRet::Best);
+        let n1 = m.col_tbl[71].unwrap();
+        assert_ne!(n1, n0);
+        assert_eq!(m.nodes[n1].col, Some(n0));
+        assert_eq!(m.nodes[n1].dlt, -960);
+        assert_eq!(m.gld_tbl[40], Some(n1));
+    }
 
-        // delta 128 → 128 % 127 = 1 → same bucket as -1: chain of 2, new
-        // node prepended.
-        assert_eq!(m.add(168, 40, 0, 0), 1);
-        let n2 = m.buckets[1].unwrap();
-        assert_eq!(m.nodes[n2].delta, 128);
-        assert_eq!(m.nodes[n2].next, Some(n1));
+    /// Brief step-1 test: gliding joins (0.8.5 style) happen on an equal ORG
+    /// position (`JMatchTable.cpp:216-236`), not — as in 0.8.1 — on a
+    /// decrementing delta. The first join removes the node from the collision
+    /// table (cnt was 1, `:219-220`) and sets the gliding recurrence
+    /// (`:227-232`): `fnd_new - beg` when within beg + SMPSZE, else SMPSZE.
+    #[test]
+    fn gliding_join_sets_recurrence() {
+        let mut m = JMatchTable::new(64, true, 1024);
+        let mut org = zeros(8192);
+        let mut new = zeros(8192);
 
-        // Fill the remaining 253 free nodes with distinct deltas; the final
-        // add pops the last free node and reports the table as full (0).
-        let mut last = 1;
-        for d in 200..=452 {
-            last = m.add(d, 0, 0, 0);
-        }
-        assert_eq!(last, 0); // added, but table is now full
-        assert!(m.free.is_none());
+        // Fresh match org 1000 / new 500 (delta 500).
+        assert_eq!(m.add(1000, 500, 600, &mut org, &mut new), MchRet::Best);
+        let n0 = m.gld_tbl[1000 % 127].unwrap();
+        assert_eq!(m.col_tbl[500 % 127], Some(n0));
 
-        // No free node: not added.
-        assert_eq!(m.add(999, 0, 0, 0), 0);
-        let mut total = 0;
-        for &head in m.buckets.iter() {
-            let mut cur = head;
-            while let Some(ci) = cur {
-                total += 1;
-                cur = m.nodes[ci].next;
+        // Same org again: gliding join, cnt 2, recurrence capped at SMPSZE.
+        assert_eq!(m.add(1000, 700, 800, &mut org, &mut new), MchRet::Enlarged);
+        assert_eq!(m.nodes[n0].cnt, 2);
+        assert_eq!(m.nodes[n0].gldcnt, SMPSZE); // 700 > 500 + 32 -> SMPSZE
+        assert_eq!(m.nodes[n0].r#new, 700);
+        assert_eq!(m.nodes[n0].beg, 500); // unchanged
+        // Removed from the collision table at the join (cnt was 1).
+        assert_eq!(m.col_tbl[500 % 127], None);
+        assert_eq!(m.gld_tbl[1000 % 127], Some(n0));
+
+        // Second glide join: cnt 3, recurrence untouched (already set).
+        assert_eq!(m.add(1000, 750, 800, &mut org, &mut new), MchRet::Enlarged);
+        assert_eq!(m.nodes[n0].cnt, 3);
+        assert_eq!(m.nodes[n0].gldcnt, SMPSZE);
+
+        // A fresh gliding pair within beg + SMPSZE records the small offset.
+        assert_eq!(m.add(2000, 3000, 3100, &mut org, &mut new), MchRet::Best);
+        let n1 = m.gld_tbl[2000 % 127].unwrap();
+        assert_eq!(m.add(2000, 3020, 3100, &mut org, &mut new), MchRet::Enlarged);
+        assert_eq!(m.nodes[n1].gldcnt, 20); // 3020 - 3000
+    }
+
+    /// Brief step-1 test: the table is never "full" while old elements exist —
+    /// they are reactivated (`isOld2Reuse`, `JMatchTable.cpp:755-768`), not an
+    /// error. 13 adds exhaust the free counter; `cleanup` moves them onto the
+    /// aging list (all marked CMPINV by EOF-refuted compares, hence always
+    /// reusable); a 14th add reuses the aging head instead of failing.
+    #[test]
+    fn aging_list_reuse_when_full() {
+        let mut m = JMatchTable::new(13, true, 1024); // pme = get_lower_prime(26) = 23
+        assert_eq!(m.mch_pme, 23);
+        let mut org = zeros(4096);
+        let mut new = zeros(4096);
+
+        // 13 distinct deltas 0..=12 with matches behind red_new = 5000 (past
+        // EOF): every compare refutes -> CMPINV marks -> always reusable.
+        for i in 0..13i64 {
+            let ret = m.add(200 + i * 100 + i, 200 + i * 100, 5000, &mut org, &mut new);
+            if i < 12 {
+                assert_eq!(ret, MchRet::Invalid);
+            } else {
+                // The 13th add consumed the last free element: Full.
+                assert_eq!(ret, MchRet::Full);
             }
         }
-        assert_eq!(total, 256); // the rejected add did not grow the table
+        assert_eq!(m.mch_fre, 0);
+        assert!(m.mp_old.is_none());
+
+        // cleanup: CMPINV elements are reusable, so the aging head survives
+        // (nextold breaks) and the best pointer stays null -> Invalid.
+        assert_eq!(m.cleanup(0, 5000, 48, &mut org, &mut new), MchRet::Invalid);
+        assert!(m.mp_old.is_some());
+
+        // The 14th add reuses the aging head (node 0, the last allocated):
+        // delta 100 -> col bucket |100| % 23 = 8, org 6100 -> gld bucket 5.
+        assert_eq!(m.add(6100, 6000, 5000, &mut org, &mut new), MchRet::Invalid);
+        assert_eq!(m.mch_fre, 0); // still no fresh element: reused instead
+        assert_eq!(m.nodes[0].dlt, 100);
+        assert_eq!(m.nodes[0].org, 6100);
+        assert_eq!(m.nodes[0].r#new, 6000);
+        // The reused node left its old collision bucket (12) and now heads
+        // bucket 8 ahead of the delta-8 node (node 4, add i=8).
+        assert_eq!(m.col_tbl[12], None);
+        assert_eq!(m.col_tbl[8], Some(0));
+        assert_eq!(m.nodes[0].col, Some(4));
+        assert_eq!(m.nodes[4].dlt, 8);
     }
 
-    /// Brief step-1 test: a delta equal to `gld_delta` continues the gliding
-    /// match (typ −1, cnt++, new updated, gld_delta decremented); a different
-    /// delta or a colliding add ends the glide.
+    /// Brief step-1 test, `-x 5` (spec §21.15, ruling 3): with the ctor value
+    /// below 13, `miMchSze` is clamped to 13 (`JMatchTable.cpp:85`) while the
+    /// bucket prime is derived from the UNCLAMPED value (`miMchPme =
+    /// getLowerPrime(aiMchSze * 2)`, `:97` — get_lower_prime(10) = 7).
+    ///
+    /// Note: the written spec/ruling describe the quirk as "miMchFre from the
+    /// unclamped x". The C++ initializer `miMchFre(miMchSze)` reads the
+    /// already-initialized (clamped) member — member initializers run in
+    /// declaration order — verified with g++ against the real ctor shape:
+    /// for x = 5, miMchFre is 13, not 5. C++ wins over prose (task
+    /// directive), so this test pins the C++-true values; the unclamped
+    /// value's observable effect is the bucket prime below.
     #[test]
-    fn gliding_match_decrements() {
-        let mut m = JMatchTable::new();
-        assert_eq!(m.add(100, 50, 0, 0), 1); // delta 50, gld_delta 49
-        let n0 = m.buckets[50].unwrap();
+    fn mch_quirks_at_x5() {
+        let mut m = JMatchTable::new(5, true, 1024);
+        assert_eq!(m.mch_sze, 13); // max(13, 5)
+        assert_eq!(m.mch_fre, 13); // miMchFre(miMchSze): clamped, per the C++
+        assert_eq!(m.mch_pme, 7); // get_lower_prime(5 * 2): the unclamped quirk
 
-        // delta 49 == gld_delta 49 → gliding continuation.
-        assert_eq!(m.add(101, 52, 0, 0), 2);
-        assert_eq!(m.nodes[n0].typ, -1);
-        assert_eq!(m.nodes[n0].cnt, 2);
-        assert_eq!(m.nodes[n0].r#new, 52);
-        assert_eq!(m.nodes[n0].org, 100); // gliding does not touch org
-        assert_eq!(m.nodes[n0].beg, 50); // ... nor beg
-        assert_eq!(m.gld_delta, 48); // decremented
-
-        // delta 48 == gld_delta 48 → glides again.
-        assert_eq!(m.add(102, 54, 0, 0), 2);
-        assert_eq!(m.nodes[n0].cnt, 3);
-        assert_eq!(m.nodes[n0].r#new, 54);
-        assert_eq!(m.gld_delta, 47);
-
-        // delta 48 ≠ 47: the glide ends; 48 is not in bucket 48 → new node.
-        assert_eq!(m.add(103, 55, 0, 0), 1);
-        let n1 = m.buckets[48].unwrap();
-        assert_eq!(m.nodes[n1].delta, 48);
-        assert_eq!(m.gld, Some(n1));
-        assert_eq!(m.gld_delta, 47);
-
-        // A colliding add clears the gliding pointer.
-        assert_eq!(m.add(300, 250, 0, 0), 2); // delta 50 → node0 enlarged
-        assert!(m.gld.is_none());
-        assert_eq!(m.nodes[n0].typ, 1);
-        assert_eq!(m.nodes[n0].cnt, 4);
-        assert_eq!(m.nodes[n1].typ, 0); // n1 untouched by the collision
+        // Behavioral pin: 13 fresh elements are consumed before reuse — the
+        // free count really started at 13, not at 5 (with 5, the 6th add
+        // would already return Full).
+        let mut org = zeros(16384);
+        let mut new = zeros(16384);
+        for i in 0..12i64 {
+            let ret = m.add(2000 + i * 50 + i, 2000 + i * 50, 1000, &mut org, &mut new);
+            assert_eq!(ret, MchRet::Best, "add {i}");
+        }
+        assert_eq!(m.add(2650, 2600, 1000, &mut org, &mut new), MchRet::Full);
+        assert_eq!(m.mch_fre, 0);
     }
 
-    /// Brief step-1 test: adding a second, non-adjacent match with the same
-    /// delta enlarges the colliding node (cnt++, typ=1, last org/new updated,
-    /// beg unchanged) and keeps a single chain node.
+    /// Brief step-1 test: incremental best-tracking (`isBest` during
+    /// add/cleanup, `JMatchTable.cpp:543-656`) — `getbest` returns the
+    /// tracked best without rescanning. Two verified candidates tie on the
+    /// test position (red_new) and length (EQLMAX), so the hash-confirmation
+    /// counter decides (`:603-610`).
     #[test]
-    fn colliding_match_enlarges() {
-        let mut m = JMatchTable::new();
-        assert_eq!(m.add(100, 40, 0, 0), 1); // delta 60
-        let n0 = m.buckets[60].unwrap();
+    fn best_tracking_via_getbest() {
+        let mut org = zeros(8192);
+        let mut new = zeros(8192);
 
-        assert_eq!(m.add(200, 140, 0, 0), 2); // same delta 60 → colliding
-        assert_eq!(m.nodes[n0].cnt, 2);
-        assert_eq!(m.nodes[n0].typ, 1);
-        assert_eq!(m.nodes[n0].org, 200); // last found org
-        assert_eq!(m.nodes[n0].r#new, 140); // last found new
-        assert_eq!(m.nodes[n0].beg, 40); // beg unchanged
-        assert_eq!(m.nodes[n0].delta, 60);
+        // Scenario 1: counters tied at 1 — the first-elected candidate (A,
+        // delta 0) keeps the best; B (delta 2000) would answer (4500, 2500).
+        let mut m = JMatchTable::new(64, true, 1024);
+        assert_eq!(m.add(2000, 2000, 2500, &mut org, &mut new), MchRet::Best); // A
+        assert_eq!(m.add(3500, 1500, 2500, &mut org, &mut new), MchRet::Best); // B
+        assert_eq!(m.cleanup(0, 2500, 48, &mut org, &mut new), MchRet::Best);
+        assert_eq!(m.getbest(0, 2500), Some((2500, 2500)));
 
-        assert_eq!(m.add(300, 240, 0, 0), 2);
-        assert_eq!(m.nodes[n0].cnt, 3);
+        // Scenario 2: B is confirmed twice (cnt 2) and wins the tiebreak.
+        let mut m = JMatchTable::new(64, true, 1024);
+        assert_eq!(m.add(2000, 2000, 2500, &mut org, &mut new), MchRet::Best); // A
+        assert_eq!(m.add(3500, 1500, 2500, &mut org, &mut new), MchRet::Best); // B
+        assert_eq!(m.add(3500, 1500, 2500, &mut org, &mut new), MchRet::Enlarged);
+        assert_eq!(m.cleanup(0, 2500, 48, &mut org, &mut new), MchRet::Best);
+        assert_eq!(m.getbest(0, 2500), Some((4500, 2500)));
 
-        // Still a single node in the bucket.
-        assert_eq!(m.nodes[n0].next, None);
-        assert_eq!(m.buckets[60], Some(n0));
+        // No candidates at all: no solution.
+        let mut m = JMatchTable::new(64, true, 1024);
+        assert_eq!(m.cleanup(0, 2500, 48, &mut org, &mut new), MchRet::Invalid);
+        assert_eq!(m.getbest(0, 2500), None);
     }
 
-    /// Brief step-1 test: cleanup removes empty (cnt == 0) and old
-    /// (new < base_new) nodes onto the free list, relinking the chains; it
-    /// reports whether the free list is non-empty afterwards (false when the
-    /// table is full and nothing was freed).
+    /// Brief step-1 test: the cleanup return taxonomy (`JMatchTable.cpp:425-437`):
+    /// Invalid (no best), Valid (best shorter than EQLSZE or away from the
+    /// read position), Good (>= EQLSZE), Best (>= EQLMAX).
     #[test]
-    fn cleanup_frees_old_and_empty() {
-        let mut m = JMatchTable::new();
-        // Fill the table: 256 distinct deltas, fnd_new = 0 for all.
-        let mut last = 1;
-        for d in 0..256 {
-            last = m.add(d, 0, 0, 0);
-        }
-        assert_eq!(last, 0); // table full
-        assert!(m.free.is_none());
+    fn cleanup_return_taxonomy() {
+        // Invalid: nothing in the table, room left.
+        let mut m = JMatchTable::new(64, true, 1024);
+        let mut org = zeros(4096);
+        let mut new = zeros(4096);
+        assert_eq!(m.cleanup(0, 1000, 48, &mut org, &mut new), MchRet::Invalid);
 
-        // Nothing to clean: new (0) < base_new (0) is false and all cnt are 1.
-        assert!(!m.cleanup(0));
-        assert!(m.free.is_none());
+        // Best: a fully verified 256-byte run at the read position.
+        assert_eq!(m.add(1500, 1000, 1000, &mut org, &mut new), MchRet::Best);
+        assert_eq!(m.cleanup(0, 1000, 48, &mut org, &mut new), MchRet::Best);
 
-        // An empty node (cnt == 0) is removed even when not old. Bucket 10
-        // holds deltas 10 and 137; empty the delta-137 node.
-        let mut n137 = m.buckets[10].unwrap();
-        while m.nodes[n137].delta != 137 {
-            n137 = m.nodes[n137].next.unwrap();
-        }
-        m.nodes[n137].cnt = 0;
-        assert!(m.cleanup(0));
-        // The chain lost exactly the delta-137 node.
-        let mut seen = Vec::new();
-        let mut cur = m.buckets[10];
-        while let Some(ci) = cur {
-            seen.push(m.nodes[ci].delta);
-            cur = m.nodes[ci].next;
-        }
-        assert_eq!(seen, vec![10]);
+        // Good: the run stops at 100 bytes (EQLSZE <= cmp < EQLMAX). A fresh
+        // table: the delta-500 match of the Best case above would otherwise
+        // swallow this add as a colliding Enlarged join.
+        let mut m = JMatchTable::new(64, true, 1024);
+        let mut org = {
+            let mut d = vec![1u8; 4096];
+            d[1500..1600].fill(7);
+            JFileMem::new(d)
+        };
+        let mut new = {
+            let mut d = vec![2u8; 4096];
+            d[1000..1100].fill(7);
+            JFileMem::new(d)
+        };
+        assert_eq!(m.add(1500, 1000, 1000, &mut org, &mut new), MchRet::Good);
+        assert_eq!(m.cleanup(0, 1000, 48, &mut org, &mut new), MchRet::Good);
 
-        // Old nodes (new = 0 < 1) all go: every bucket empties, the free
-        // list holds all 256 nodes again, and a subsequent add works.
-        assert!(m.cleanup(1));
-        assert!(m.buckets.iter().all(|&h| h.is_none()));
-        let mut free_cnt = 0;
-        let mut cur = m.free;
-        while let Some(ci) = cur {
-            free_cnt += 1;
-            cur = m.nodes[ci].next;
-        }
-        assert_eq!(free_cnt, 256);
-        assert_eq!(m.add(5000, 0, 0, 0), 1);
+        // Valid: a 6-byte run (EQLMIN < cmp < EQLSZE) ending at EOF.
+        let mut org = JFileMem::new(vec![5u8; 6]);
+        let mut new = JFileMem::new(vec![5u8; 6]);
+        assert_eq!(m.add(0, 0, 0, &mut org, &mut new), MchRet::Valid);
+        assert_eq!(m.cleanup(0, 0, 48, &mut org, &mut new), MchRet::Valid);
     }
 
-    /// Brief step-1 test: check finds the run of 24 equal bytes and rewinds
-    /// both positions to the run anchor (pos − eql), exactly as the C++.
+    /// Brief step-1 test: Full taxonomy — with the whole table parked on
+    /// non-reusable EOB elements, `cleanup` reports Full and a further `add`
+    /// answers Error ("should not occur", `JMatchTable.cpp:286`). The EOB
+    /// marks need soft-ahead reads past the look-ahead window
+    /// (`get_frombuffer` answers EOB beyond `pos_bse + buf_sze - blk_sze`).
     #[test]
-    fn check_finds_run_and_rewinds() {
-        // 40 equal bytes (0x11) at offset 10; the first 10 bytes differ.
-        let mut org_d = vec![0x55u8; 64];
-        let mut new_d = vec![0xAAu8; 64];
-        for b in &mut org_d[10..50] {
-            *b = 0x11;
-        }
-        for b in &mut new_d[10..50] {
-            *b = 0x11;
-        }
-        let mut org = JFileMem::new(org_d);
-        let mut new = JFileMem::new(new_d);
-
-        let (mut po, mut pn) = (10i64, 10i64);
-        assert_eq!(check(&mut org, &mut new, &mut po, &mut pn, 48, false), 0);
-        assert_eq!((po, pn), (10, 10)); // read up to 34, rewound by eql 24
-
-        // A leading mismatch does not fail (phase 1); the anchor is the start
-        // of the 24-equal-run.
-        let mut org_d = vec![0x55u8; 64];
-        let mut new_d = vec![0x55u8; 64];
-        org_d[0] = 0x01;
-        new_d[0] = 0x02;
-        let mut org = JFileMem::new(org_d);
-        let mut new = JFileMem::new(new_d);
-
-        let (mut po, mut pn) = (0i64, 0i64);
-        assert_eq!(check(&mut org, &mut new, &mut po, &mut pn, 48, false), 0);
-        assert_eq!((po, pn), (1, 1)); // rewound from 25 by eql 24
-    }
-
-    /// Brief step-1 test: a mismatch inside the last 24 bytes (phase 2)
-    /// fails with 2; the positions are left just past the failing byte.
-    #[test]
-    fn check_phase2_mismatch_fails() {
-        // Mismatch at the first phase-2 byte (position 24): byte 0 differs,
-        // bytes 1..24 are equal (eql 23 at the phase boundary).
-        let mut org_d = vec![0x22u8; 48];
-        let mut new_d = vec![0x22u8; 48];
-        org_d[0] = 0x01;
-        new_d[0] = 0x02;
-        for b in &mut org_d[24..] {
-            *b = 0x33;
-        }
-        for b in &mut new_d[24..] {
-            *b = 0x44;
-        }
-        let mut org = JFileMem::new(org_d);
-        let mut new = JFileMem::new(new_d);
-        let (mut po, mut pn) = (0i64, 0i64);
-        assert_eq!(check(&mut org, &mut new, &mut po, &mut pn, 48, false), 2);
-        assert_eq!((po, pn), (25, 25));
-
-        // Mismatch deeper inside the last 24 bytes (position 30): bytes
-        // 0..7 differ, 7..30 are equal (eql 23 again at pos 30).
-        let mut org_d = vec![0x01u8; 48];
-        let mut new_d = vec![0x02u8; 48];
-        for b in &mut org_d[7..30] {
-            *b = 0x22;
-        }
-        for b in &mut new_d[7..30] {
-            *b = 0x22;
-        }
-        let mut org = JFileMem::new(org_d);
-        let mut new = JFileMem::new(new_d);
-        let (mut po, mut pn) = (0i64, 0i64);
-        assert_eq!(check(&mut org, &mut new, &mut po, &mut pn, 48, false), 2);
-        assert_eq!((po, pn), (31, 31));
-    }
-
-    /// Brief step-1 test: a soft-ahead read beyond the look-ahead buffer
-    /// returns EOB (not EOF) → check returns 1 and advances both positions by
-    /// the remaining length; a hard read at the real end of file returns EOF,
-    /// which upgrades the result to 2.
-    #[test]
-    fn check_soft_eob_returns_1() {
-        // Soft: new-file position 1000 is far beyond the fresh 16-byte block
-        // window, so the very first read EOBs.
-        let mut org = JFileMem::new(vec![0x55u8; 128]);
-        let mut new = JFileAhead::new(Cursor::new(vec![0xAAu8; 4096]), "Tst", 1024, 16);
-        let (mut po, mut pn) = (0i64, 1000i64);
-        assert_eq!(check(&mut org, &mut new, &mut po, &mut pn, 48, true), 1);
-        assert_eq!((po, pn), (48, 1048)); // 1 read + 47 remaining
-
-        // Hard: the new file ends at 10, so reading position 10 hits EOF.
-        let mut org = JFileMem::new(vec![0x55u8; 128]);
-        let mut new = JFileAhead::new(Cursor::new(vec![0x55u8; 10]), "Tst", 1024, 16);
-        let (mut po, mut pn) = (0i64, 0i64);
-        assert_eq!(check(&mut org, &mut new, &mut po, &mut pn, 48, false), 2);
-        assert_eq!((po, pn), (11, 11));
-    }
-
-    /// Brief step-1 test: `get` verifies candidates by comparing the files
-    /// and selects the verified match pointing at the block start; a
-    /// refuted false hit is repaired (cnt−−, HSH_RPR++) and a farther verified
-    /// hit loses to the accepted best.
-    #[test]
-    fn get_selects_nearest_verified() {
-        // Hold the HSH_RPR lock across the asserted delta window; see
-        // `hsh_rpr_guard`.
-        let _rpr = hsh_rpr_guard();
-
-        // org: filler + 64-byte block B at 1000 and 3000.
-        // new: filler + block B at 2000 and 2500.
-        let block: Vec<u8> = (0..64).map(|i| 0xC0u8 + i as u8).collect();
-        let mut org_d = lcg_bytes(12345, 8192);
-        org_d[1000..1064].copy_from_slice(&block);
-        org_d[3000..3064].copy_from_slice(&block);
-        let mut new_d = lcg_bytes(98765, 4096);
-        new_d[2000..2064].copy_from_slice(&block);
-        new_d[2500..2564].copy_from_slice(&block);
-
-        let mut org = JFileMem::new(org_d);
-        let mut new = JFileMem::new(new_d);
-        let hsh = JHashPos::new(251); // reliability 48 → rlb = max(48, 1024)
-
-        let mut m = JMatchTable::new();
-        // C: false hit, delta 2900 → bucket 106 (evaluated first).
-        assert_eq!(m.add(4900, 2000, 0, 0), 1);
-        // A: true hit at the block start, delta -1000 → bucket 111.
-        assert_eq!(m.add(1000, 2000, 0, 0), 1);
-        // B: second true hit, delta 500 → bucket 119 (farther).
-        assert_eq!(m.add(3000, 2500, 0, 0), 1);
-
-        let before = HSH_RPR.load(Ordering::Relaxed);
-        assert_eq!(
-            m.get(1000, 2000, &hsh, &mut org, &mut new, true),
-            Some((1000, 2000))
-        );
-        assert_eq!(HSH_RPR.load(Ordering::Relaxed) - before, 1); // C repaired
-
-        // The refuted candidate lost its count; the accepted one kept it.
-        let nc = m.buckets[106].unwrap();
-        assert_eq!(m.nodes[nc].cnt, 0);
-        let na = m.buckets[111].unwrap();
-        assert_eq!(m.nodes[na].cnt, 1);
-    }
-
-    /// Extra test (soft-EOF recovery of `get`, spec §8.2): when check stops
-    /// at the end-of-buffer (cmp == 1), a node with cnt < 2 is judged "most
-    /// probably unequal" (cmp 7 → repair), while a node with cnt ≥ 2 has its
-    /// find position estimated from beg/new and can still win.
-    #[test]
-    fn get_soft_eof_recovers_positions() {
-        // This test increments the process-global HSH_RPR (node B's repair);
-        // take the lock so it cannot land inside the sibling test's asserted
-        // delta window (see `hsh_rpr_guard`).
-        let _rpr = hsh_rpr_guard();
-
-        // org as a fresh look-ahead file: every soft read beyond the 16-byte
-        // block window EOBs, so all three candidates stop with cmp == 1.
+    fn cleanup_full_when_nothing_reusable() {
+        // cmp_all = false: the compares read SOFT ahead, which is what EOBs
+        // at the window bound (with cmp_all the hard reads would sail past
+        // the window and verify 256-byte runs instead).
+        let mut m = JMatchTable::new(13, false, 1024);
         let mut org = JFileAhead::new(Cursor::new(vec![0u8; 8192]), "Tst", 1024, 16);
-        let mut new = JFileMem::new(vec![0u8; 4096]);
-        let hsh = JHashPos::new(251);
+        let mut new = JFileAhead::new(Cursor::new(vec![0u8; 8192]), "Tst", 1024, 16);
 
-        let mut m = JMatchTable::new();
-        // C: delta 2000 → bucket 95; twice → cnt 2, typ 1, beg 3000.
-        assert_eq!(m.add(5000, 3000, 0, 0), 1);
-        assert_eq!(m.add(5100, 3100, 0, 0), 2);
-        // B: delta 1500 → bucket 103; cnt 1.
-        assert_eq!(m.add(3000, 1500, 0, 0), 1);
-        // A: delta 1000 → bucket 111; twice → cnt 2, typ 1, beg 1000.
-        assert_eq!(m.add(2000, 1000, 0, 0), 1);
-        assert_eq!(m.add(2600, 1600, 0, 0), 2);
+        // 13 matches ahead of red_new = 2000: soft reads at 2000+ exceed the
+        // fresh window (0 + 1024 - 16) and EOB, so every candidate is stored
+        // with the CMPEOB mark and estimated length 1 (cnt 1).
+        for i in 0..13i64 {
+            let ret = m.add(2100 + i * 100 + i, 2100 + i * 100, 2000, &mut org, &mut new);
+            if i < 12 {
+                assert_eq!(ret, MchRet::Valid, "add {i}");
+            } else {
+                assert_eq!(ret, MchRet::Full, "add {i}");
+            }
+        }
+        assert_eq!(m.mch_fre, 0);
+        // All 13 kept the CMPEOB mark (-3): the EOB estimate of a cnt-1
+        // candidate is 1, which is not stored back (> 3 required).
+        assert!(m.nodes[..13].iter().all(|n| n.cmp == CMPEOB));
 
-        // red_new = 1100; rlb = 1024.
-        assert_eq!(
-            m.get(1000, 1100, &hsh, &mut org, &mut new, false),
-            Some((2100, 1100))
-        );
+        // cleanup: every element is either the elected best (never reusable)
+        // or younger than mzOld = red_new (never reusable) -> the aging list
+        // drains completely -> Full.
+        assert_eq!(m.cleanup(0, 2000, 48, &mut org, &mut new), MchRet::Full);
+        assert!(m.mp_old.is_none());
 
-        // B was repaired (cnt 1 < 2 → cmp 7 → cnt−−); C (beg ≥ red_new →
-        // tst_new = beg) and A (new ≥ red_new → tst_new = red_new) were not.
-        let nb = m.buckets[103].unwrap();
-        assert_eq!(m.nodes[nb].cnt, 0);
-        let nc = m.buckets[95].unwrap();
-        assert_eq!(m.nodes[nc].cnt, 2);
-        let na = m.buckets[111].unwrap();
-        assert_eq!(m.nodes[na].cnt, 2);
+        // A further add has neither a free element nor an old one: Error.
+        assert_eq!(m.add(4100, 4000, 2000, &mut org, &mut new), MchRet::Error);
     }
 
-    /// Extra test (gliding branch of `get`, spec §8.2): a gliding node
-    /// (typ −1) counts as 0 (`cnt_now = 0`) and, when the test position is
-    /// within the glide (`tst_new >= beg`), is verified at the last found org
-    /// position.
+    /// Brief step-1 test: the repair counter lives on the instance
+    /// (`miHshRpr`, `JMatchTable.cpp:319`; getter `:930-932`) — the 0.8.1
+    /// global static is retired. Every compare-refuted match whose test
+    /// reached its last-found position increments the counter.
     #[test]
-    fn get_gliding_uses_last_org() {
-        // org: filler + 64-byte block at 2000; new: filler + block at 1100.
-        let block: Vec<u8> = (0..64).map(|i| 0xC0u8 + i as u8).collect();
-        let mut org_d = lcg_bytes(24680, 4096);
-        org_d[2000..2064].copy_from_slice(&block);
-        let mut new_d = lcg_bytes(13579, 4096);
-        new_d[1100..1164].copy_from_slice(&block);
+    fn repairs_counter_on_instance() {
+        let mut org = zeros(64);
+        let mut new = zeros(64);
 
-        let mut m = JMatchTable::new();
-        assert_eq!(m.add(2000, 1000, 0, 0), 1); // delta 1000 → bucket 111
-        assert_eq!(m.add(2010, 1011, 0, 0), 2); // delta 999 == gld 999
-        assert_eq!(m.add(2100, 1102, 0, 0), 2); // delta 998 == gld 998
-        let na = m.buckets[111].unwrap();
-        assert_eq!(m.nodes[na].typ, -1);
-        assert_eq!(m.nodes[na].cnt, 3);
-        assert_eq!(m.nodes[na].org, 2000); // gliding never updates org
-        assert_eq!(m.nodes[na].r#new, 1102);
+        // red_new 50 > last-found 10: the EOF-refuted compare marks the
+        // element CMPINV and repairs the hash hit.
+        let mut a = JMatchTable::new(64, true, 1024);
+        assert_eq!(a.get_hsh_rpr(), 0);
+        assert_eq!(a.add(100, 10, 50, &mut org, &mut new), MchRet::Invalid);
+        assert_eq!(a.get_hsh_rpr(), 1);
 
-        let mut org = JFileMem::new(org_d);
-        let mut new = JFileMem::new(new_d);
-        let hsh = JHashPos::new(251);
-        // tst_new = 1100 ≥ beg 1000 → within the glide: tst_org = org (2000);
-        // the files match there for 64 bytes → verified and rewound.
+        // A second instance is untouched — no process-global state.
+        let b = JMatchTable::new(64, true, 1024);
+        assert_eq!(b.get_hsh_rpr(), 0);
+    }
+
+    /// Brief step-1 test: glide realignment in `check` (`JMatchTable.cpp:843-854`)
+    /// — on a mismatch before EQLSZE, a gliding compare rewinds the original
+    /// position to its anchor (`azPosOrg -= liEql`) and lets only the new
+    /// position slide, while a non-gliding compare advances both.
+    #[test]
+    fn check_glide_realignment() {
+        // org: 1 2 3 4 4 4 4 4 9 9   new: 0 1 2 3 5 4 4 4 4 4 9 9
+        // The 3-byte run 1 2 3 misaligns at new[4] = 5.
+        let mut org = JFileMem::new(vec![1, 2, 3, 4, 4, 4, 4, 4, 9, 9]);
+        let mut new = JFileMem::new(vec![0, 1, 2, 3, 5, 4, 4, 4, 4, 4, 9, 9]);
+
+        // Gliding: after the mismatch the org anchor stays at 0 and slides
+        // never resync (org[0] = 1 never reappears) — the new position walks
+        // to the very end, the compare answers 0.
+        let (mut po, mut pn) = (0i64, 1i64);
         assert_eq!(
-            m.get(1000, 1100, &hsh, &mut org, &mut new, true),
-            Some((2000, 1100))
+            check(&mut org, &mut new, &mut po, &mut pn, 64, 1, ReadType::HardAhead),
+            0
         );
-        assert_eq!(m.nodes[na].cnt, 3); // verified, not repaired
+        assert_eq!((po, pn), (0, 12));
+
+        // Non-gliding: both positions advance on the mismatch; the compare
+        // resyncs onto the 4-run and walks to org's EOF with eql 1 (< EQLMIN).
+        let (mut po, mut pn) = (0i64, 1i64);
+        assert_eq!(
+            check(&mut org, &mut new, &mut po, &mut pn, 64, 0, ReadType::HardAhead),
+            0
+        );
+        assert_eq!((po, pn), (10, 11));
+    }
+
+    /// Brief step-1 test (rewritten from the 0.8.1 24-byte pin): the equal-run
+    /// cap is EQLMAX 256 (`JMatchTable.cpp:833`) and a found run rewinds both
+    /// positions to the run anchor (`:866-869`).
+    #[test]
+    fn check_caps_at_eqlmax() {
+        let mut org = zeros(4096);
+        let mut new = zeros(4096);
+
+        let (mut po, mut pn) = (0i64, 0i64);
+        assert_eq!(
+            check(&mut org, &mut new, &mut po, &mut pn, 4096, 0, ReadType::HardAhead),
+            256
+        );
+        assert_eq!((po, pn), (0, 0)); // advanced 256, rewound 256
+
+        // Exactly EQLMIN equal bytes are NOT a solution (liEql > EQLMIN
+        // required): 5 equals then EOF answer 5; 4 answer 0.
+        let mut org = JFileMem::new(vec![7u8; 5]);
+        let mut new = JFileMem::new(vec![7u8; 5]);
+        let (mut po, mut pn) = (0i64, 0i64);
+        assert_eq!(check(&mut org, &mut new, &mut po, &mut pn, 64, 0, ReadType::HardAhead), 5);
+        assert_eq!((po, pn), (0, 0));
+
+        let mut org = JFileMem::new(vec![7u8; 4]);
+        let mut new = JFileMem::new(vec![7u8; 4]);
+        let (mut po, mut pn) = (0i64, 0i64);
+        assert_eq!(check(&mut org, &mut new, &mut po, &mut pn, 64, 0, ReadType::HardAhead), 0);
+        assert_eq!((po, pn), (4, 4)); // no rewind: not a solution
+    }
+
+    /// Brief step-1 test (rewritten from the 0.8.1 pin): a soft read beyond
+    /// the look-ahead window answers EOB, which `check` reports as CMPEOB
+    /// ("maybe, buffer ended") with the positions untouched; a hard read at
+    /// the real end of file answers EOF, which is 0 ("surely unequal").
+    #[test]
+    fn check_cmpeob_on_soft_eob() {
+        let mut org = JFileAhead::new(Cursor::new(vec![0u8; 8192]), "Tst", 1024, 16);
+        let mut new = JFileAhead::new(Cursor::new(vec![0u8; 8192]), "Tst", 1024, 16);
+        let (mut po, mut pn) = (2000i64, 2000i64);
+        assert_eq!(
+            check(&mut org, &mut new, &mut po, &mut pn, 64, 0, ReadType::SoftAhead),
+            CMPEOB
+        );
+        assert_eq!((po, pn), (2000, 2000));
+
+        let mut org = zeros(10);
+        let mut new = zeros(10);
+        let (mut po, mut pn) = (10i64, 10i64);
+        assert_eq!(check(&mut org, &mut new, &mut po, &mut pn, 64, 0, ReadType::HardAhead), 0);
+        assert_eq!((po, pn), (10, 10));
     }
 }

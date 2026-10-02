@@ -46,7 +46,7 @@ use crate::jdebug::dbg_print;
 use crate::jdebug::{DBGAHD, DBGAHH, DBGDST, DBGMCH, DBGPRG, dbg};
 use crate::jfile::JFile;
 use crate::jhashpos::JHashPos;
-use crate::jmatchtable::JMatchTable;
+use crate::jmatchtable::{JMatchTable, MchRet};
 use crate::jout::{JOut, OutStats};
 
 /// JDiff engine (`JDiff.h:153`): owns the two file readers, the output sink,
@@ -75,6 +75,9 @@ pub struct JDiff<'a> {
     /// CLI-facing constructor parameter is `i64` per the port interface).
     ahd_max: i64,
     /// Compare all matches, even if data not in buffer? (`mbCmpAll`).
+    /// Only the debug-only malfunction check reads it until Task 17 rewires
+    /// search() (the matching table holds its own copy since 0.8.5).
+    #[cfg_attr(not(feature = "debug"), allow(dead_code))]
     cmp_all: bool,
     /// Prescan original file: 0=no, 1=yes, 2=done (`miSrcScn`).
     src_scn: i32,
@@ -127,7 +130,14 @@ impl<'a> JDiff<'a> {
             r#new,
             out,
             hsh: JHashPos::new(hsh_sze),
-            mch: JMatchTable::new(),
+            // 0.8.5: the matching table receives the -x value, the compare-all
+            // flag and the raw lookahead max (JDiff.cpp:120). ahd_max narrows
+            // like the C++ int ctor parameter would.
+            mch: JMatchTable::new(
+                mch_max,
+                cmp_all,
+                i32::try_from(ahd_max).unwrap_or(i32::MAX),
+            ),
             verbose,
             src_bkt,
             mch_max,
@@ -157,6 +167,14 @@ impl<'a> JDiff<'a> {
     /// release build, like the C++.
     pub fn hsh_err(&self) -> i32 {
         self.hsh_err
+    }
+
+    /// Number of repaired hash hits (`getHshRpr`, `JMatchTable.h:100` /
+    /// `JMatchTable.cpp:930-932`): matches repaired by comparing. Instance
+    /// counter since 0.8.5 — the 0.8.1 global static is retired (spec
+    /// §18.E); the verbose statistics read it through here.
+    pub fn hsh_rpr(&self) -> i32 {
+        self.mch.get_hsh_rpr()
     }
 
     /// Output statistics snapshot (`lpOut->gzOutByt*`): the C++ `main` reads
@@ -408,7 +426,6 @@ impl<'a> JDiff<'a> {
             mch_max,
             mch_min,
             ahd_max,
-            cmp_all,
             src_scn,
             az_org: mz_ahd_org,
             az_new: mz_ahd_new,
@@ -515,11 +532,35 @@ impl<'a> JDiff<'a> {
         }
 
         /*
-         * Build the table of matches (JDiff.cpp:372-437)
+         * Cleanup the old matches and check for room (JDiff.cpp:452-469).
+         *
+         * 0.8.5's cleanup returns the eMatchReturn taxonomy: Full means the
+         * table has no reusable element (the 0.8.1 bool), Good/Best mean a
+         * good match is already available and shorten the lookahead. The
+         * reliability value feeds the table's miRlb (mechanically passed —
+         * the C++ reads gpHsh itself); the first argument lzBseOrg is unused
+         * by the 0.8.5 body, like the 0.8.1 base position was.
+         * TODO(T17): the full search() rewire moves the Good/Best reduction
+         * ahead of the hash re-initialization and derives lzBseOrg from
+         * getBufPos() when backtracking is disabled.
          */
-        if mch.cleanup(red_new - i64::from(hsh.reliability())) {
-            /* Do not backtrace before lzBseOrg (JDiff.cpp:374-375) */
-            let lz_bse_org: i64 = if *src_bkt { 0 } else { red_org };
+        let lz_bse_org: i64 = if *src_bkt { 0 } else { red_org };
+        let mch_ret = mch.cleanup(
+            lz_bse_org,
+            red_new,
+            hsh.reliability(),
+            &mut **org,
+            &mut **r#new,
+        );
+        if !matches!(mch_ret, MchRet::Error | MchRet::Full) {
+            /* Good/Best: a good match is already available, reduce search
+             * (JDiff.cpp:455-461, "but not to zero"). */
+            if matches!(mch_ret, MchRet::Good | MchRet::Best) {
+                let li_rlb2 = hsh.reliability() * 2;
+                if li_max > li_rlb2 {
+                    li_max = li_rlb2;
+                }
+            }
 
             /* Do not read from original file if it has been prescanned
              * (JDiff.cpp:377-378) */
@@ -563,23 +604,32 @@ impl<'a> JDiff<'a> {
                     if hsh.get(*ml_hsh_new, &mut lz_fnd_org) {
                         /* add found position into table of matches */
                         if lz_fnd_org > lz_bse_org {
-                            /* add solution to the table of matches; the C++
-                             * switch falls through from case 0 into case 1
-                             * when the cleanup made room (JDiff.cpp:406-428)
-                             */
+                            /* add solution to the table of matches; the 0.8.5
+                             * taxonomy switch (JDiff.cpp:553-585): Error falls
+                             * through into Full ("no break"), Good/Best reduce
+                             * the lookahead and fall through into Valid, which
+                             * counts the match. The 0.8.1 retry-cleanup
+                             * fallback is gone — the aging lists make room.
+                             * TODO(T17): full search() rewire. */
                             let fallthrough_to_1 =
-                                match mch.add(lz_fnd_org, *mz_ahd_new, red_new, *mi_eql_new) {
-                                    /* table is full but cleanup made room */
-                                    0 if li_bck > 0 && mch.cleanup(red_new) => true,
-                                    /* table is full: stop lookahead */
-                                    0 => {
+                                match mch.add(lz_fnd_org, *mz_ahd_new, red_new, &mut **org, &mut **r#new)
+                                {
+                                    /* table is full (Error falls through): stop lookahead */
+                                    MchRet::Error | MchRet::Full => {
                                         li_max = 0;
                                         continue;
                                     }
-                                    /* alternative added */
-                                    1 => true,
-                                    /* 2: alternative collided; -1: compare failed */
-                                    _ => false,
+                                    /* alternative collided / invalid */
+                                    MchRet::Enlarged | MchRet::Invalid => false,
+                                    /* very good solution: reduce lookahead, count it */
+                                    MchRet::Good | MchRet::Best => {
+                                        if li_max > hsh.reliability() {
+                                            li_max = hsh.reliability();
+                                        }
+                                        true
+                                    }
+                                    /* solution added */
+                                    MchRet::Valid => true,
                                 };
                             if fallthrough_to_1 && *mz_ahd_new > red_new {
                                 li_fnd += 1;
@@ -614,9 +664,12 @@ impl<'a> JDiff<'a> {
         }
 
         /*
-         * Get the best match and calculate the offsets (JDiff.cpp:448-487)
+         * Get the best match and calculate the offsets (JDiff.cpp:655-716).
+         * 0.8.5: the table tracked the best incrementally during add/cleanup;
+         * getbest only re-evaluates enlarged EOB elements (when !cmpAll) and
+         * returns it — no files, no hashtable, no rescanning.
          */
-        match mch.get(red_org, red_new, hsh, &mut **org, &mut **r#new, *cmp_all) {
+        match mch.getbest(red_org, red_new) {
             None => {
                 *skp_org = 0;
                 *skp_new = 0;
@@ -820,12 +873,9 @@ mod tests {
     use super::*;
     use crate::defs::{EXI_RED, EXI_SEK};
     use crate::jfile::JFileMem;
-    use crate::jmatchtable::HSH_RPR;
     use crate::jout::{JOutBin, OutStats};
     use std::cell::RefCell;
     use std::rc::Rc;
-    use std::sync::MutexGuard;
-    use std::sync::atomic::Ordering;
 
     /// `hash_key` (`JDiff::hash`, `JDiff.cpp:361-371`): the equal-run counter
     /// is added into the hash value, so the key diverges from the 0.8.1 pure
@@ -1002,14 +1052,6 @@ mod tests {
             256 * 1024,
             true,
         )
-    }
-
-    /// Serializes the HSH_RPR-sensitive test: [`HSH_RPR`] is a process global
-    /// and cargo runs tests on parallel threads by default. Delegates to the
-    /// crate-wide lock (see `crate::test_util`): per-module guards left the
-    /// jdiff and jmatchtable tests racing on the same counter.
-    fn hsh_rpr_guard() -> MutexGuard<'static, ()> {
-        crate::test_util::hsh_rpr_guard()
     }
 
     /// Drives the engine over the given file pair and returns (ret, ops).
@@ -1275,22 +1317,25 @@ mod tests {
     }
 
     /// Statistics and false-hit repairs: for the zero-block fixture the
-    /// hashtable answers 115 lookups with a key hit, 2 of which are false
-    /// (all-zero 32-byte windows share hash key 0) and get compare-repaired —
-    /// exactly the C++ oracle's `HITS 115 RPR 2` (built with the 32-bit
-    /// `hkey` of the oracle build, spec §2). `hsh_err` stays 0 in the
-    /// release build, like the C++.
+    /// hashtable answers 115 lookups with a key hit — exactly the C++
+    /// oracle's `HITS 115` (built with the 32-bit `hkey` of the oracle
+    /// build, spec §2). `hsh_err` stays 0 in the release build, like the
+    /// C++. The repairs statistic is read from the engine's matching table
+    /// through `hsh_rpr` (0.8.5 instance counter `getHshRpr`,
+    /// `JMatchTable.cpp:930-932`; the 0.8.1 global static is retired, spec
+    /// §18.E). The 0.8.1 pin `RPR 2` (compare-refuted false hits) does not
+    /// carry over: 0.8.5 counts `miHshRpr` only on the CMPINV-marking path
+    /// of `add` (`JMatchTable.cpp:319`), under which these two false hits
+    /// resolve differently — deterministic 0 here. TODO(T17/T22): re-pin
+    /// against the 0.8.5 oracle once the engine is fully rewired.
     #[test]
     fn stats_and_hash_repairs() {
-        let _rpr = hsh_rpr_guard();
-
         // org: 400 LCG bytes with a 100-byte zero block at [200..300);
         // new: the zero block moved 50 bytes to the right (50 bytes taken
         // from org[300..350] inserted before it).
         let org = zero_block_fixture();
         let new = zero_block_moved_fixture(&org);
 
-        let before = HSH_RPR.load(Ordering::Relaxed);
         let ops = Ops::default();
         let rec = RecordingOut::new(ops.clone());
         let mut jd = engine(
@@ -1301,7 +1346,7 @@ mod tests {
         assert_eq!(jd.jdiff(), 0);
         assert_eq!(jd.hash().hash_hits(), 115);
         assert_eq!(jd.hsh_err(), 0);
-        assert_eq!(HSH_RPR.load(Ordering::Relaxed) - before, 2);
+        assert_eq!(jd.hsh_rpr(), 0);
     }
 
     /// 400 LCG bytes with a 100-byte zero block at [200..300).

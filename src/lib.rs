@@ -23,13 +23,17 @@ pub(crate) mod test_util {
     use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
     /// Serializes all tests that touch the shared process-global test state —
-    /// the [`HSH_RPR`] repair counter (`jmatchtable`) and the debug `GB_DBG`
-    /// flags (`jdebug`): cargo runs tests on parallel threads, and guarding
-    /// such tests with per-module mutexes still leaves two modules racing on
-    /// the same global (found in Task 11, where the added `jdebug` tests'
-    /// scheduling perturbation made `jdiff::stats_and_hash_repairs` and the
-    /// `jmatchtable` counter tests collide deterministically).
-    pub fn hsh_rpr_guard() -> MutexGuard<'static, ()> {
+    /// since Task 16 (0.8.5 re-target) only the debug `GB_DBG` flags
+    /// (`jdebug`): the 0.8.1 `HSH_RPR` repair counter this lock used to
+    /// guard retired into a `JMatchTable` instance counter (`miHshRpr`,
+    /// spec §18.E). Cargo runs tests on parallel threads, and the `-d*`
+    /// flag tests mutate the process-global flag array that engine tests
+    /// read behind `dbg(..)`; see the Task 11 finding this lock originated
+    /// from.
+    /// Only the `-d*` flag tests call it (a `debug`-feature test module), so
+    /// non-debug test builds would see it as dead.
+    #[cfg_attr(not(feature = "debug"), allow(dead_code))]
+    pub fn gb_dbg_guard() -> MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
