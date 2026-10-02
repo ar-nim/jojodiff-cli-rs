@@ -1,5 +1,12 @@
 # JojoDiff → Rust (`jojodiff-cli-rs`) 1:1 Port Implementation Plan
 
+> **STATUS (2026-10-02): Tasks 1–12 (0.8.1) are COMPLETE, reviewed and shipped as package
+> version 0.8.1 (merged to main, CI green). The port is RE-TARGETED to JojoDiff 0.8.5
+> (upstream commit 66a2806, vendored at `reference/jojodiff-0.8.5/`): spec PART II
+> (`docs/superpowers/specs/2026-10-01-jojodiff-1to1-port-spec.md` §17–§22) is normative.
+> Tasks 13–22 below upgrade the existing implementation to 0.8.5 parity. Tasks 1–12 are
+> retained unchanged as the historical record of the 0.8.1 port.**
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A byte-compatible Rust port of the `jdiff` and `jptch` binaries (and a reusable library) from https://github.com/vibhorkalley/jojodiff, building and tested on Windows, Linux and macOS — published as **`jojodiff-cli-rs`** (repo and package; verified free on crates.io 2026-10-01). The name encodes all three distinguishing facts — `jojodiff` (brand), `-cli` (standalone tools, unlike the library-only `jojodiff` crate), `-rs` (Rust port, unlike the C++ original) — with no name conflict against `francisdb/jojodiff-rs` in any namespace.
@@ -8,18 +15,18 @@
 
 **Tech Stack:** Rust edition 2024 (MSRV 1.85, declared via `rust-version`), std-only (zero runtime dependencies). Dev-dependencies: `jojodiff` v0.1.2 (francisdb crate, cross-validation only), `pretty_assertions`. CI: GitHub Actions matrix ubuntu/windows/macos; oracle-compare job on ubuntu only.
 
-**Spec:** `docs/superpowers/specs/2026-10-01-jojodiff-1to1-port-spec.md` (functional inventory — every §number cited below is a section of that spec). The C++ tree is vendored pristine at `reference/jojodiff-cpp/` (Task 1); all `file:line` references point into it.
+**Spec:** `docs/superpowers/specs/2026-10-01-jojodiff-1to1-port-spec.md` (functional inventory — every §number cited below is a section of that spec). The C++ tree is vendored pristine at `reference/jojodiff-cpp/` (Task 1); all `file:line` references point into it. **For Tasks 13–22:** spec PART II (§17–§22) is normative; the 0.8.5 tree is vendored at `reference/jojodiff-0.8.5/` and its `file:line` references point there; the verified change analysis is `docs/superpowers/research/2026-10-02-jojodiff-0.8.5-analysis.md`.
 
 ## Global Constraints
 
 - License: **GPL-3.0** (the C++ original is GPLv3; the port is a derivative).
 - Runtime dependencies: **none** (std only, no `unsafe`).
 - Toolchain: edition **2024**, `rust-version = "1.85"`. The planned code uses no edition-2024-affected features (no `unsafe`, no `static mut`, no FFI, no RPITs), so the edition is a defaults/future-proofing choice only; dropping to 2021 later would be a one-line change with zero code impact. Edition 2024 defaults Cargo to `resolver = "3"` (MSRV-aware dependency resolution, needs Rust 1.84+) — with a std-only runtime this only affects dev-dependency selection, which is desirable. [Cargo Book, verified via Context7]
-- Package/repo name: **`jojodiff-cli-rs`** (verified free on crates.io 2026-10-01; the bare `jojodiff` is taken by the francisdb library and `jojodiff-rs` collides with that project's GitHub repo — both rejected deliberately). Library target name: `jojodiff_cli_rs` (avoids lib-name collision with the `jojodiff` cross-validation dev-dependency). Binary names: `jdiff`, `jptch`. **Non-affiliation must be stated explicitly** in the crates.io description, the repo About box, and a README "Relationship to other projects" section (see Task 12 Step 5): independent port of Joris Heirbaut's original JojoDiff; not affiliated with or derived from the `jojodiff` crate / `francisdb/jojodiff-rs` (used only as an optional cross-validation consumer in tests). Version string in help output is fixed: `0.8.1 (beta) December 2011`.
-- Byte-exact compatibility targets: patch files, `-l`/`-lr` listings, greeting/help/verbose/error text, exit codes 0/1/2/3/4/5/6/7/8/9/10/20 (spec §2–§5).
-- Formatting convention: `P8zd` = `format!("{:>12}", v)` in release (default) builds; `{:>10}` when the `debug` feature is on (spec §14).
-- Integer quirks are part of the contract: `-m`/`-a` compute `atoi(v)/2*1024` (integer division first); `-s` divides by 1024 while `> 1024`; `-min`/`-max` clamp to 256; hash ops wrap on `u32` (spec §2, §4.1).
-- Deviations from C++ are only the seven documented in spec §15 (Linux fork bug, OpenMP, `-m 0` NUL fix, jptch stdin buffering, MinGW ifdefs collapsed, Ahead-impl unification, francisdb non-authoritative).
+- Package/repo name: **`jojodiff-cli-rs`** (verified free on crates.io 2026-10-01; the bare `jojodiff` is taken by the francisdb library and `jojodiff-rs` collides with that project's GitHub repo — both rejected deliberately). Library target name: `jojodiff_cli_rs` (avoids lib-name collision with the `jojodiff` cross-validation dev-dependency). Binary names: `jdiff`, `jptch`. **Non-affiliation must be stated explicitly** in the crates.io description, the repo About box, and a README "Relationship to other projects" section (see Task 12 Step 5): independent port of Joris Heirbaut's original JojoDiff; not affiliated with or derived from the `jojodiff` crate / `francisdb/jojodiff-rs` (used only as an optional cross-validation consumer in tests). Version string in help output is fixed: `0.8.1 (beta) December 2011` (**0.8.5 re-target:** `0.8.5 (beta) 2020`, copyright `Copyright (C) 2002-2020 Joris Heirbaut`, package version 0.8.5 — spec §18.A).
+- Byte-exact compatibility targets: patch files, `-l`/`-lr` listings, greeting/help/verbose/error text, exit codes 0/1/2/3/4/5/6/7/8/9/10/20 (spec §2–§5). **0.8.5 re-target (Tasks 13–22):** patch files per spec §18.C (implicit MOD, MINEQL=2 — breaking vs 0.8.1), `-l` hex + `-r` listings (§18.F), all new greeting/help/stats text (§18.A/D/F), exit codes with **0/1 swapped** (identical→0, differences→1; §18.D).
+- Formatting convention: `P8zd` = `format!("{:>12}", v)` in release (default) builds; `{:>10}` when the `debug` feature is on (spec §14). (Unchanged at 0.8.5, now on `%zd`-style values — spec §18.A.)
+- Integer quirks are part of the contract: `-m`/`-a` compute `atoi(v)/2*1024` (integer division first); `-s` divides by 1024 while `> 1024`; `-min`/`-max` clamp to 256; hash ops wrap on `u32` (spec §2, §4.1). **0.8.5 re-target:** the option set changes wholesale (spec §18.D table is normative — `-a`×1024, `-i` MB floor 1, `-k` floor 4096, `-m` MB-total split, `-n` floor 0, `-x` floor 1024, multiplicative presets, `c_atoi` still C-semantics).
+- Deviations from C++ are only the seven documented in spec §15 (Linux fork bug, OpenMP, `-m 0` NUL fix, jptch stdin buffering, MinGW ifdefs collapsed, Ahead-impl unification, francisdb non-authoritative). **0.8.5 re-target:** deviations are the fifteen rulings of spec §21 (which also closes §15.1/2/3/10/11 as fixed upstream); §20 maps every 0.8.1 quirk's fate.
 
 ## File Structure (final state)
 
@@ -31,9 +38,12 @@ jojodiff-cli-rs/
 ├── .gitignore                  # /target
 ├── .github/workflows/ci.yml    # 3-OS matrix + ubuntu oracle job
 ├── reference/
-│   └── jojodiff-cpp/           # pristine vendored C++ tree (GPLv3)
+│   ├── PROVENANCE.md           # where each vendored tree came from
+│   ├── jojodiff-cpp/           # pristine vendored 0.8.1 C++ tree (GPLv3)
+│   └── jojodiff-0.8.5/         # pristine vendored 0.8.5 tree (upstream 66a2806)
 ├── scripts/
 │   ├── build-oracle.sh         # applies 2-line fix, make, → target/oracle/{jdiff,jptch}
+│   │                           #   (T13: builds the 0.8.5 oracle w/ hkey+LARGEFILE patches)
 │   ├── gen-golden.sh           # regenerates tests/fixtures/golden/** from oracle
 │   └── runtest.sh              # port of Makefile runtest + run.sh
 ├── src/
@@ -49,20 +59,29 @@ jojodiff-cli-rs/
 │   ├── jout/bin.rs             # binary patch writer (T6)
 │   ├── jout/asc.rs             # -l listing (T7)
 │   ├── jout/rgn.rs             # -lr regions (T7)
-│   ├── jdiff.rs                # diff engine (T8)
+│   ├── jdiff.rs                # diff engine (T8, reworked T17)
+│   ├── jpatcht.rs              # JPatcht patch applier (T19, 0.8.5)
+│   ├── jfileout.rs             # JFileOut patch-phase writer (T19, 0.8.5)
 │   └── bin/
-│       ├── jdiff.rs            # jdiff CLI (T9)
-│       └── jptch.rs            # jptch CLI + decoder (T10)
+│       ├── jdiff.rs            # jdiff CLI (T9, rewritten T20: getopt_long, -u, argv[0])
+│       └── jptch.rs            # jptch CLI ≡ jdiff forced-Patch (T10, re-pointed T20)
 └── tests/
     ├── fixtures/
     │   ├── bkocomu.0000.fil / bkocomu.0009.fil / test2.001.txt / test2.002.txt
-    │   └── golden/<option-set>/...  # oracle patches + listings (T12)
-    ├── roundtrip.rs            # T9/T10/T12
+    │   ├── golden/                 # 0.8.1 goldens (kept for cross-version gate)
+    │   └── golden85/<option-set>/...  # 0.8.5 oracle patches + listings (T22)
+    ├── roundtrip.rs            # T9/T10/T12, extended T20/T22
+    ├── crossver.rs             # 0.8.1 patch → 0.8.5 jptch compatibility (T22)
     └── oracle.rs               # T12 (skips unless JOJODIFF_ORACLE set / target/oracle exists)
 ```
 
 Tasks 1–8 build the library bottom-up; 9–10 the CLIs; 11 the debug feature; 12 the oracle
 harness, goldens, CI and docs. Every task compiles and tests green before its commit.
+**Tasks 13–22 (spec Part II) re-target the completed 0.8.1 implementation to 0.8.5** —
+reference/jojodiff-0.8.5/ is vendored pristine (see `reference/PROVENANCE.md`), and
+`src/jfile/stdio.rs` (T14 note: the C++ stdio/istream adapters collapse into the single
+Rust `JFileAhead` over seekable-or-sequential I/O, spec §21.11 — no new file unless the
+implementer chooses one for the `JIo` abstraction).
 
 ---
 
@@ -736,6 +755,289 @@ source of the algorithm, wire format, and test data.
 
 ---
 
+# PART II — Tasks 13–22: the 0.8.5 re-target (spec Part II)
+
+**Transition rules (bind every task below):**
+
+- The authority is `reference/jojodiff-0.8.5/src/*` (cited `file:line`); spec Part II
+  (§17–§22) is the map; `docs/superpowers/research/2026-10-02-jojodiff-0.8.5-analysis.md`
+  is background evidence (never authoritative over the C++).
+- Each task keeps `cargo test` (with and without `--features debug`) green at its commit.
+  When a task intentionally changes bytes/behavior, it updates the tests that asserted
+  the old 0.8.1 expectations **in the same task** (RED first: change the expectation,
+  watch it fail, then implement). The full oracle regen and the 0.8.1→0.8.5
+  cross-version suite land in Task 22; until then, live-oracle comparisons that 0.8.5
+  invalidates are expected to fail and are skipped with a `// TODO(T22)` marker — never
+  deleted silently.
+- The historical 0.8.1 goldens under `tests/fixtures/golden/` are NEVER regenerated or
+  deleted (they become Task 22's cross-version corpus).
+
+### Task 13: 0.8.5 `defs` delta + 0.8.5 oracle build
+
+**Files:**
+- Modify: `src/defs.rs`, `Cargo.toml`, `scripts/build-oracle.sh`
+- Test: `src/defs.rs` inline
+
+**Interfaces:** version/copyright strings `"0.8.5 (beta) 2020"` /
+`"Copyright (C) 2002-2020 Joris Heirbaut"`; `EXI_OK=0, EXI_DIF=1, EXI_EQL=2, EXI_ARG=-2,
+EXI_FRT=-3, EXI_SCD=-4, EXI_OUT=-5, EXI_SEK=-6, EXI_LRG=-7, EXI_RED=-8, EXI_WRI=-9,
+EXI_MEM=-10, EXI_ERR=-20` (spec §18.D); `MINEQL=2`; drop `GIPME`, add
+`pub fn is_prime(n: i32) -> bool` and `pub fn get_lower_prime(n: i32) -> i32` — port
+`JDefs.cpp:37-67` **including the exact switch cases** (1024→1021, 32M→33554393,
+16M→16777213, 8M→8388593, 128M→134217689, 512M→536870909; else downward isPrime search).
+Package version → `0.8.5`.
+
+- [ ] **Step 1: Failing tests:** `get_lower_prime(2097152)==2097143` (the 32 MB default),
+  each switch case, `is_prime` edges (0,1,2,even,odd prime/composite),
+  `EXI_EQL==2 && EXI_ARG==-2 && EXI_OK==0`, `MINEQL==2`, version strings.
+- [ ] **Step 2: Implement; update everything that referenced `EXI_*`/`GIPME`** (compile
+  errors surface the list). Note: process exit codes stay 2/3/4/5/6/7/8/9/10/20 — the
+  sign flip is internal (`-EXI_*`), CLI mapping lands in Task 20.
+- [ ] **Step 3: `scripts/build-oracle.sh` → 0.8.5 oracle:** copy `reference/jojodiff-0.8.5`
+  to `target/oracle-src85/`, patch `typedef unsigned long int hkey` → `typedef unsigned
+  int hkey` (spec §21.7/§15.12) and build with `-D_FILE_OFFSET_BITS=64` (JDIFF_LARGEFILE
+  live) and `make clean` between variants (§21.8); sanity-check: `./jdiff -v` prints
+  `0.8.5 (beta) 2020` and `samples are 32 bytes`. Old 0.8.1 oracle script path stays for
+  reference (`build-oracle-081.sh` rename is fine).
+- [ ] **Step 4: Green both feature modes. Commit** `feat: 0.8.5 defs (version, EXI renumbering, primes) and 0.8.5 oracle build`
+
+### Task 14: `JFile`/`JFileAhead` rework — Append/Reset/Scrollback + sequential streams
+
+**Files:**
+- Modify: `src/jfile/mod.rs`, `src/jfile/ahead.rs` (rewrite); `src/jfile/mem.rs` unchanged (pub API, no longer CLI-wired — spec §21.9 note)
+- Test: inline in `src/jfile/ahead.rs` (new tests; adapt the T3 tests that encoded 0.8.1 quirks)
+
+**Interfaces (spec §18.E):** JFile trait gains `is_sequential()` and a `getbuf` fast-path
+hook; `JFileAhead` rewritten as the port of `JFileAhead.cpp:64-431` over an I/O handle
+that may be **non-seekable** (sequential): buffer state `mpInp/miBufUsd/mzPosInp/mzPosBse`
++ read cursor `mzPosRed/miRedSze/mpRed`; `getbuf(pos,&len,eAhead)` public; decision tree
+`get_fromfile` (`:269-307`): before-buffer → SoftAhead EOB / sequential HardAhead EOB /
+sequential Read SeekError / else Scrollback-vs-Reset (`pos + mlBufSze - miBlkSze >
+mzPosInp - miBufUsd`); beyond-buffer → SoftAhead EOB else Reset; else Append with
+SoftAhead bounded by `mzPosBse + mlBufSze - miBlkSze`. Reset realigns to block boundary
+(sequential variant keeps the tail, `:311-317`); Scrollback (`:341-382`) block-aligned
+back, make-room, refil, **seek forward again** (2 seeks), mid-scrollback EOF → ReadError;
+`readblocks` (`:392-431`) block-chunked, `miBufUsd` clamped, short read sets EOF. **No
+`exit(6)` bounds abort** (0.8.1 §15.8/§10 quirk gone — remove the dead mode-2 arm and the
+collapse note). `chkSeq()` seek-EOF probe auto-detect (`JFile.cpp:37-46`). Debug-feature
+invariant asserts per `JFileAhead.cpp:240-251` (gated by the feature, spec §18.G).
+
+- [ ] **Step 1: Failing tests** (RED before rewrite; keep a `Cursor` fixture harness):
+  sequential stream (a `Read`-only pipe-like mock) serves forward reads with no seek;
+  before-buffer Read on sequential → `-EXI_SEK` sentinel; SoftAhead beyond
+  `mzPosBse+buf-blk` → EOB without I/O; Scrollback reachable now: read forward 64KB
+  (buf 16KB, blk 4KB), then `get(pos_just_before_buffer, Read)` returns correct data and
+  seekcount advanced by 2; Reset block-aligns (`mzPosInp % blkSze == 0` observed via
+  getBufPos); short-read EOF latching; **T3's `Buffer out of bounds` exit test removed**
+  (behavior gone) — replace with clamp/wrap correctness on tiny buffers.
+- [ ] **Step 2: Implement** statement-by-statement from the vendored source.
+- [ ] **Step 3: Green. Commit** `feat: JFileAhead 0.8.5 rewrite (Append/Reset/Scrollback, sequential streams)`
+
+### Task 15: `JHashPos` 0.8.5 + `hash` with equal-run term
+
+**Files:**
+- Modify: `src/jhashpos.rs`; add the hash fn (used by T17) e.g. `src/jdiff.rs` stub or `src/jhashpos.rs` — place per C++ ownership in `JDiff::hash`; keep it a pure function `pub fn hash_key(cur: u32, old: i32, new: i32, eql: &mut i32) -> u32`
+- Test: inline (replace T4's 0.8.1 number tests)
+
+**Interfaces (spec §18.E):** `JHashPos::new(mb: i32)` — elements `mb*1024*1024/16` →
+`get_lower_prime`; counters count **down** (colMax start 4, store at `<=0`, reset to
+colMax; load counts down from prime, rollover `colMax+=4; rlb+=4`); reliability seed
+`SMPSZE + SMPSZE/2` = 48; quality gate `eql_cnt <= SMPSZE*2 → COLLISION_HIGH else
+COLLISION_LOW` (LOW dead — port as written, spec §21.13); **table zero-initialized**
+(spec §21.5 deviation, documented in module doc); `reset()` present, never called;
+`print()` unchanged format; `dist()` per `JHashPos.cpp:192-238` (`Overload =
+colMax/4 − 1`, guarded Avg/Min/Max/Load). Hash: `if old==new {eql = min(eql+1, SMPSZE)}
+else {old=new; eql=0}; (cur*2).wrapping_add(new).wrapping_add(eql)` (`JDiff.cpp:361-371`).
+
+- [ ] **Step 1: Failing tests:** `new(32).hash_prime()==2097143`; switch-case primes;
+  down-counter store cadence (first high-quality add stores immediately, resets to
+  colMax); load rollover at `prime` adds bumps colMax/rlb by 4; seed 48; hash-vs-0.8.1
+  divergence vector (same byte stream, different key once eql enters); hash eql cap at
+  SMPSZE.
+- [ ] **Step 2: Implement; delete `GIPME`-based tests.** Note `HSH_RPR` global is
+  unaffected here (its fate is Task 16).
+- [ ] **Step 3: Green. Commit** `feat: JHashPos 0.8.5 (MB sizing, lower primes, down-counters) and eql-aware hash`
+
+### Task 16: `JMatchTable` dynamic rework
+
+**Files:**
+- Modify: `src/jmatchtable.rs` (rewrite); `src/jdebug.rs`/`src/test_util.rs` (HSH_RPR global retires)
+- Test: inline (adapt T5 tests)
+
+**Interfaces (spec §18.E):** size from `-x` (`miMchSze = max(13, x)`; **`miMchFre`
+initialized from the UNCLAMPED x** — spec §21.15); two bucket tables sized
+`get_lower_prime(2*sze)`: col on `|delta| % pme`, gld on `org % pme`; node fields
+`nxt/col/gld/cnt/gld/beg/new/org/dlt/tst/cmp` with `CMPINV=-1, CMPSKP=-2, CMPEOB=-3`;
+new/old aging lists, reuse via `isOld2Reuse` (MAXDST-bounded, `JMatchTable.cpp:733-768`);
+incremental best-tracking `isBest()` during `add`/`cleanup`; `getbest()` returns tracked
+best + EOB re-evaluation when `!cmpAll`; `cleanup(bseOrg, redNew)` → Full/Invalid/Valid/
+Good/Best; instance `mi_hsh_rpr` + `get_hsh_rpr()` replaces the global static (delete
+`HSH_RPR` + `hsh_rpr_guard`; update jdebug flag-test lock note — the shared lock may
+still serialize GB_DBG, keep it if still needed). Constants `EQLSZE 8, EQLMIN 4, EQLMAX
+256, MAXDST 2*1024*1024, MINDST 1024, MAXGLD 128 (dead), FZY 0`. `check()` single-loop
+with glide realignment (`azPosOrg -= liEql` on mismatch when gliding) + EQLMAX cap
+(`:843-854`).
+
+- [ ] **Step 1: Failing tests:** two-table bucket math (col/gld indices); aging-list
+  reuse when table "full" (old element reactivated, not an error); `-x 5` free-count
+  quirk (spec §21.15) — deterministic behavior asserted; best-tracking: after adds,
+  `getbest` returns the best without a full scan; cleanup return taxonomy; repairs
+  counter increments on the instance; glide realignment on mismatched-but-gliding
+  compare.
+- [ ] **Step 2: Implement from the vendored source; retire `HSH_RPR`/guard.**
+- [ ] **Step 3: Green. Commit** `feat: JMatchTable 0.8.5 dynamic table (dual hashing, aging lists, incremental best)`
+
+### Task 17: `JDiff` engine 0.8.5
+
+**Files:**
+- Modify: `src/jdiff.rs` (major rework)
+- Test: inline (recording-JOut tests; adapt T8)
+
+**Interfaces (spec §18.E):** `int liFnd` live error check (`:277-279`); `search()`
+(`:389-718`) replacing `uf_fnd_ahd` — lookahead budget `miAhdMax - (mzAhdNew -
+azRedNew)` floored at cached `miRlb`; look-back `miRlb + 2*SMPSZE - 1`; early-terminating
+hash re-init (`miEqlNew != liIdx`, `:546-573`); add driven by JMatchTable's return enum
+(Full stops; Best/Good shorten to `miRlb`; Valid counts toward mchMin/mchMax with
+soft-read switching); miss recovery budget `reliability/2` with `mi_hsh_err` counted in
+release too (**wrapping i32**, spec §21.6) and verbose>2
+`"\nInaccurate solution at positions %zd/%zd!\n"`; backtrack clamped against
+`getBufPos()` when `!src_bkt`; `mz_ahd_org` not reset on backtrack; incremental
+source indexing when `src_scn==0` (in-loop + equal-run fast loops `:185-224` + SoftAhead
+prescan `:419-447`); `build_full_index` (`:726-793`) with 32 MiB progress marks
+(`PGSMRK/PGSMSK`) and verbose>2 `dist(pos,10)`; constructor per `:103-125` (`hsh_sze` in
+MB, `mch_min = min(mch_min, mch_max-1)`, `ahd_max = max(ahd_max, 1024)`).
+
+- [ ] **Step 1: Failing tests:** error propagation from search (FailingJFile now
+  surfaces via liFnd — no more bool collapse); equal-run indexing path exercised with
+  `src_scn=0` on a shifted-block fixture; verbose>2 inaccurate-solution line on a
+  crafted repetitive fixture; `mch_min > mch_max-1` clamp; MB-sized hash wiring
+  (`hsh_sze=32` behaves like old 32MB).
+- [ ] **Step 2: Implement.** Engine-level byte vectors change here only via match
+  decisions — **do not** touch JOutBin (Task 18); recording-JOut tests stay op-level.
+- [ ] **Step 3: Green. Commit** `feat: JDiff 0.8.5 engine (search, incremental scan, live error paths)`
+
+### Task 18: `JOutBin` implicit-MOD + `MINEQL`; `JOutAsc` hex; `JOutRgn` stats
+
+**Files:**
+- Modify: `src/jout/bin.rs`, `src/jout/asc.rs`, `src/jout/rgn.rs`
+- Test: inline (update T6/T7 vectors)
+
+**Interfaces (spec §18.C/§18.F):** `JOutBin`: ctor seeds `opr_cur=MOD`; `put_opr`
+emits `ESC opr` only when `opr != MOD || opr_cur == INS`; flush condition
+`eql_cnt > MINEQL || (opr_cur != MOD && opr != MOD)`; `eql_buf[MINEQL]`. `JOutAsc`:
+`%02x` hex (three sites). `JOutRgn`: EQL split on MINEQL; dead `if opr_cur == INS`
+inside `case MOD` (ported as written); DEL/BKT `2+put_len` with put_len 1/2/3/4/8
+(spec §21.14).
+
+- [ ] **Step 1: Failing tests (the spec §18.C vectors):** hand-pair patch now
+  `a7 a3 18 "MODIFIED" a7 a3 0a "XYZ..."` (no `ESC MOD` pairs; 0.8.1 vector minus the
+  two `a7 a6`); ≥3-equal run → EQL; 2-equal run inside MOD → MOD data; INS→MOD still
+  emits `ESC MOD`; ASC hex line `EQL 48 48 H-H`; RGN ctl accounting per new rules.
+- [ ] **Step 2: Implement. Update the golden-bytes tests that encoded 0.8.1 patch
+  output** (same-task RED→GREEN per transition rules).
+- [ ] **Step 3: Green. Commit** `feat: 0.8.5 output layer (implicit MOD, MINEQL=2, hex listing, region stats)`
+
+### Task 19: `JPatcht` + `JFileOut`
+
+**Files:**
+- Create: `src/jpatcht.rs`, `src/jfileout.rs`; Modify: `src/lib.rs`
+- Test: inline + `tests/roundtrip.rs` (library-level apply tests)
+
+**Interfaces (spec §18.B/§18.C):** `JPatcht::new(org: &mut dyn JFile, patch: &mut dyn
+JFile, out: JFileOut, verbose) -> jpatch() -> i32` — port `JPatcht.cpp` whole: default
+operator MOD at sequence start and after `ESC <unknown>` (`:246-254`); `ESC <same-opr>`
+inside a run handled as data (`:176-185`); `uf_get_int` tiers incl. live 8-byte form
+(non-LARGEFILE reject branch ported as dead code); trailing-byte warning to **stderr**
+(`:243`); DEL/EQL/BKT position arithmetic via the JFile readers (EQL copies through
+`JFileOut::copyfrom` with its stray-discard fallback byte-loop — spec §21.14); verbose
+per-op traces (`:101-107,156-158,166-169,179-182,265-335`). Reads 0.8.1-style explicit
+patches (compatibility — spec §22.3 vectors from `tests/fixtures/golden/`).
+
+- [ ] **Step 1: Failing tests:** applies a 0.8.5-style implicit-MOD patch (bytes from
+  Task 18's writer); applies a 0.8.1 golden patch and restores exactly; `ESC ESC` /
+  `ESC <unknown>` at sequence start → MOD data; truncated-length EOF semantics; warning
+  line on trailing byte; verbose traces byte-exact.
+- [ ] **Step 2: Implement.** `jptch`/`jdiff -u` wiring is Task 20 — this task is the
+  library.
+- [ ] **Step 3: Green. Commit** `feat: JPatcht patch applier and JFileOut (port of JPatcht.cpp/JFileOut.cpp)`
+
+### Task 20: CLI rewrite — getopt_long surface, `-u`, argv[0], sequential/stdin, exits
+
+**Files:**
+- Rewrite: `src/bin/jdiff.rs`; re-point: `src/bin/jptch.rs`; Create: `src/cli/opts.rs` (std-only getopt_long-equivalent: short string `a:bcd:fhi:jk:lm:n:pqrst::uvx:y`, long table from `main.cpp:238-261`, GNU permutation, `--`, `?`→help-and-continue, missing-arg `-d`→exit 2)
+- Modify: `Cargo.toml` if adding the module path
+- Test: `tests/roundtrip.rs` (major update)
+
+**Interfaces (spec §18.A/§18.D):** argv[0] dispatch (`jpatch*` → Patch; `jdedup`/
+`jtst` routes not ported — spec §21.2); `-j`/`-u`/`-t`/`-y` function options; full
+option table of §18.D incl. multiplicative presets in parse order; defaults
+(mchMax 128, mchMin 2, hshMbt 32 MB, buf 1MB+1MB, blk 32K) and buffer normalization +
+sequential defaults 32/16 MB (`main.cpp:617-620`); `-` = stdin/stdout, both-`-` → exit 2;
+sequential auto-detect with the two warnings (`main.cpp:781-795`); greeting/usage blocks
+verbatim from `main.cpp:480-602` (stale texts kept — spec §21.10) incl. `-hh` notes;
+pre-run echo + post-run stats blocks per §18.F; **exit swap** (identical→0,
+differences→1 via `out.dta > 0`) and `exit(-EXI_*)` error paths with exact messages;
+`-t` faithful (release: JPatcht fed the destination after diff — corrupt mixed output,
+exit per stats; debug feature: getbuf assert → exit 6 — spec §21.3); `-y` → exit 20
+(spec §21.4). `jptch` = same parser, function pre-forced to Patch (packaging extra).
+
+- [ ] **Step 1: Failing tests (rewrite roundtrip CLI tests to spec §22.1 matrix):** exit
+  swap both ways; `-Z a b c` prints help then diffs (exit 1); `-h a b c` help + diff;
+  `- a b` (stdin org) and both-`-` (exit 2); pipe flows (source pipe → `-p` warning +
+  round-trip; dest pipe → `-q` warning; `cat p | jdiff -u org -`); argv[0] `jpatch`
+  symlink applies patches; `-m 0`/`-m 7`/`-m 2048` echo lines; `-i 1`, `-k 0` clamp;
+  `-x 5` runs; `-vv` stats block byte-exact vs the 0.8.5 oracle capture; `-t` release
+  output shape; `-y` exit 20; usage text contains `disbale` and `(in KB)` verbatim.
+- [ ] **Step 2: Implement.** Copy all literal strings from the vendored `main.cpp` —
+  never from memory.
+- [ ] **Step 3: Green. Commit** `feat: 0.8.5 CLI (getopt_long surface, -u patch mode, argv[0] dispatch, swapped exits)`
+
+### Task 21: debug feature — `-d <name>` syntax + 0.8.5 site census
+
+**Files:**
+- Modify: `src/jdebug.rs`, `src/cli/opts.rs` (flag-name table), engine modules' print sites
+- Test: `tests/debug.rs` rewrite
+
+**Interfaces (spec §18.G):** `-d <name>` with names `hsh ahd cmp prg buf hsk ahh bkt
+red mch dst` (unknown silently ignored); same 11 flag indices; `hsk/bkt/dst` accepted
+with **zero** sites; implement the 0.8.5 site census (JDiff 6 sites, JMatchTable 10,
+JFileAhead 2 + always-on invariant asserts, JHashPos 2 — exact format strings from the
+vendored lines listed in §18.G); remove 0.8.1-only sites (e.g. JHashPos::hash DBGHSK);
+`-vvv` Hash Dist block; `-c` replaces `-do` everywhere (Task 20 parser already routes
+it; this task is the print sites + flag plumbing).
+
+- [ ] **Step 1: Failing feature tests:** `-d mch` on a tiny pair emits the new formats
+  (`Match Failure at ...`, `Add [ ... ] bse=...`); `-d buf` emits
+  `ufFabOpn(Org):(buf=...` with 1 MB size; `-d hsk`/`-d bkt`/`-d dst` produce nothing;
+  `-vvv` prints Hash Dist; debug-feature build of `-t` aborts exit 6 with the getbuf
+  assert line.
+- [ ] **Step 2: Implement sites (pointer `%p` values documented as shape-only).**
+- [ ] **Step 3: `cargo test` both modes green. Commit** `feat: 0.8.5 debug surface (-d <name> flags, new site census, invariant asserts)`
+
+### Task 22: 0.8.5 goldens, cross-version suite, CI, docs, release notes
+
+**Files:**
+- Create: `tests/crossver.rs`, `tests/fixtures/golden85/**`; Modify: `tests/oracle.rs`, `scripts/gen-golden.sh`, `.github/workflows/ci.yml`, `README.md`, `Cargo.toml` (description mentions 0.8.5)
+
+**Interfaces (spec §22):** `gen-golden.sh` regenerates from the 0.8.5 oracle into
+`golden85/` (never overwrites `golden/`); `oracle.rs` byte-compares against `golden85`
+across the full §22.1 matrix (live-oracle path identical); `crossver.rs` applies every
+`golden/` (0.8.1) patch with the new `jptch` and `jdiff -u` and asserts exact restore;
+CI oracle job builds the 0.8.5 oracle (Task 13 script); README: 0.8.5 usage/option
+table, **breaking wire-format note** (patches from ≥0.8.5 unreadable by 0.8.1-era
+patchers; 0.8.1 patches still apply), `-u`/argv[0] patch modes, `-t` upstream-broken
+note, updated deviations (spec §20/§21), version-history section (0.8.1 → 0.8.5
+re-target with upstream changelog summary).
+
+- [ ] **Step 1: Failing:** crossver test (old goldens must apply — they will only after
+  Tasks 18–20; this task pins them); oracle byte-gate against `golden85` (generate
+  first, then assert).
+- [ ] **Step 2: Full local gate:** `scripts/build-oracle.sh && JOJODIFF_ORACLE=target/oracle
+  cargo test --all-features` — all green; manual pipe/argv[0] smoke per §22.1.
+- [ ] **Step 3: Docs/CI/README. Commit** `test: 0.8.5 goldens, cross-version compatibility suite, CI and docs (re-target release)`
+
+---
+
 ## Coverage checklist (functionality → task)
 
 | Functionality | C++ source | Task |
@@ -756,8 +1058,24 @@ source of the algorithm, wire format, and test data.
 | Debug-build parity (`-dhsh`…`-ddst`, print sites) | all `#if debug` sites | 11 |
 | GPLv3 licensing, tests corpus, oracle equality, 3-OS CI, docs, runtest/gentest scripts | Makefile, run.sh, generate_testFile.sh, tests/ | 1, 12 |
 
+**0.8.5 re-target (spec Part II; source `reference/jojodiff-0.8.5/src/`):**
+
+| Functionality | 0.8.5 C++ source | Task |
+|---|---|---|
+| Version/EXI/MINEQL constants, isPrime/getLowerPrime, 0.8.5 oracle build | JDefs.h/.cpp, Makefile | 13 |
+| Buffer engine rewrite (Append/Reset/Scrollback, readblocks, sequential/chkSeq, asserts) | JFile.* JFileAhead.* JFileAheadStdio/IStream.* | 14 |
+| JHashPos 0.8.5 (MB sizing, down-counters, seed, dist) + eql-aware hash | JHashPos.cpp, JDiff.cpp:361-371 | 15 |
+| Dynamic match table (dual hash, aging lists, incremental best, EQLSZE family) | JMatchTable.cpp | 16 |
+| Engine 0.8.5 (search, buildFullIndex, incremental scan, live liFnd, miRlb) | JDiff.cpp | 17 |
+| Output layer 0.8.5 (implicit MOD, MINEQL, hex `-l`, `-r` stats quirks) | JOutBin/JOutAsc/JOutRgn.cpp | 18 |
+| Patch applier + patch-phase writer (default-MOD reader, compat, copyfrom) | JPatcht.cpp, JFileOut.cpp | 19 |
+| CLI 0.8.5 (getopt_long surface, -u/-j/-t/-y, argv[0], stdin/sequential, exit swap, texts) | main.cpp | 20 |
+| Debug 0.8.5 (`-d <name>`, site census, dead flags, invariant asserts, Hash Dist) | all `#if debug` sites | 21 |
+| Goldens/cross-version/CI/README/release notes | Makefile, tst/*.sh | 22 |
+
 No C++ file, CLI option, output byte, exit code, or documented behavior is left unassigned;
-the only behavioral deltas are the seven spec-§15 deviations, each deliberate and documented.
+the only behavioral deltas are the seven spec-§15 deviations (0.8.1) and the fifteen
+spec-§21 rulings (0.8.5), each deliberate and documented.
 
 ## Context7 documentation audit (2026-10-01)
 
@@ -786,7 +1104,10 @@ exempt (their exact sources are vendored/read).
 
 ## Execution Handoff
 
-**Plan complete and saved to `docs/superpowers/plans/2026-10-01-jojodiff-rs-port.md` (spec: `docs/superpowers/specs/2026-10-01-jojodiff-1to1-port-spec.md`). Two execution options:**
+**Plan complete and saved to `docs/superpowers/plans/2026-10-01-jojodiff-rs-port.md` (spec: `docs/superpowers/specs/2026-10-01-jojodiff-1to1-port-spec.md`).**
+
+- **Tasks 1–12 (0.8.1): COMPLETE** — executed 2026-10-01 via subagent-driven development, merged to main, CI green; shipped as package version 0.8.1.
+- **Tasks 13–22 (0.8.5 re-target): PENDING** — execute with the same process; the same two options apply:
 
 **1. Subagent-Driven (recommended)** — fresh subagent per task, review between tasks, fast iteration.
 

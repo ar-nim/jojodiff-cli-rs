@@ -1,6 +1,16 @@
 # JojoDiff → Rust 1:1 Port — Functional Specification
 
-**Source of truth:** https://github.com/vibhorkalley/jojodiff (C++ rewrite of JojoDiff v0.8.1 by
+> **STATUS (2026-10-02): re-targeted to JojoDiff 0.8.5.** Part I (§1–§16 below) is the original
+> 0.8.1 specification — it remains true for the shipped package version 0.8.1 (implemented and
+> verified by plan Tasks 1–12) and is kept unchanged as the historical baseline.
+> **Part II (§17+) is the 0.8.5 re-target and is NORMATIVE wherever it conflicts with Part I.**
+> The 0.8.5 source of truth is the author's upstream tree at commit 66a2806 (2020-10-29, the
+> SourceForge 0.8.5 release state), vendored pristine at `reference/jojodiff-0.8.5/` (see
+> `reference/PROVENANCE.md`). The verified change analysis behind Part II is
+> `docs/superpowers/research/2026-10-02-jojodiff-0.8.5-analysis.md` (cited below as
+> "analysis §X"). The C++ source always wins over prose in either part.
+
+**Source of truth (Part I, v0.8.1):** https://github.com/vibhorkalley/jojodiff (C++ rewrite of JojoDiff v0.8.1 by
 Joris Heirbaut). Every `headers/*.h` and `src/*.cpp` file was read in full while writing this
 spec. C++ references below use `path:line` into that tree; the port vendors the tree at
 `reference/jojodiff-cpp/` so line numbers stay valid.
@@ -663,3 +673,421 @@ the debug-only `Hash miss!` / `liErr` logic in `jdiff()` (`JDiff.cpp:137-209`).
    `jojodiff` crate v0.1.2 (dev-dependency) on NUL-free fixtures — guards against accidental
    format drift beyond the C++ oracle.
 5. **Cross-platform:** CI green on ubuntu/windows/macos (§12).
+
+---
+
+# PART II — 0.8.5 RE-TARGET (normative; 2026-10-02)
+
+## 17. Re-target statement
+
+The port's target moves from JojoDiff **0.8.1** (Part I; shipped as package version 0.8.1)
+to JojoDiff **0.8.5** — the author's 2020 release, upstream git commit `66a2806`
+(2020-10-29), vendored pristine at `reference/jojodiff-0.8.5/`. All Part II `file:line`
+references point into that tree (`reference/jojodiff-0.8.5/src/...`).
+
+Headline verdicts (all verified against the C++ source and live builds; details in §18):
+
+1. **The patch wire format changed, deliberately and breaking** (upstream v083p
+   "Reduce control bytes to patch file (default ops)", `main.cpp:129`). 0.8.5 patches are
+   NOT readable by 0.8.1 patchers; the 0.8.5 reader reads all 0.8.1 patches (one-way
+   backward compatible). See §18.C.
+2. **`jpatch.cpp` is gone.** Patching is a mode of the single `jdiff` binary
+   (`jdiff -u`), an argv[0] alias (basename starting `jpatch`), and a library class
+   (`JPatcht`). See §18.B.
+3. **Exit codes 0/1 swapped** (diff(1)-style: differences→1, identical→0); error codes
+   unchanged (2/3/4/5/6/7/8/9/10/20) via `exit(-EXI_*)`. See §18.D.
+4. **The CLI was rewritten on `getopt_long`** — new options, GNU permutation (options may
+   follow filenames), long options, `-d <name>` debug syntax, multiplicative presets,
+   new defaults. See §18.D.
+5. **The engine was reworked**: dynamic matching table, hash key includes the equal-run
+   counter, hash table sized in MB with `getLowerPrime`, rewritten buffer engine with
+   sequential (non-seekable) input support, incremental scanning. Patch bytes differ from
+   0.8.1 for the same inputs even where the format did not. See §18.E.
+6. **Of Part I §15.1–§15.12: 5 FIXED, 4 CHANGED, 2 OBSOLETE, 1 UNCHANGED** (§20), and
+   0.8.5 introduces its own quirks — rulings in §21.
+
+## 18. Change inventory (0.8.1 → 0.8.5)
+
+### 18.A Identity & version
+
+* `JDIFF_VERSION` = `"0.8.5 (beta) 2020"`, `JDIFF_COPYRIGHT` = `"Copyright (C) 2002-2020
+  Joris Heirbaut"` (`JDefs.h:41-42`). Package version: **0.8.5**. Banner:
+  `"JDIFF - binary diff version 0.8.5 (beta) 2020"` (0.8.1 said `"JDIFF - Jojo's binary
+  diff version ..."` — word-for-word new string; copy from `main.cpp:481`).
+* Greeting block prints when `verbose>0 || liHlp>0 || nargs<3` (`main.cpp:480-509`):
+  version line, copyright, 10-line GPL block (wording changed; final line
+  `"along with this program. If not, see www.gnu.org/licenses/gpl-3.0\n\n"`), then
+  `"File adressing is %d bit for files up to %d%s, samples are %d bytes.\n"` computed as
+  `MAX_OFF_T>>30` (no 0.8.1 `+1`) — the port prints 32-bit-sample/64-bit-offset values:
+  `File adressing is 64 bit for files up to 8388607TB, samples are 32 bytes.`
+* Usage block (`main.cpp:511-602`) prints when `nargs<3 || liHlp>0 || verbose>2`;
+  `-hh` adds "Notes:"/"Additional explications:" (`main.cpp:559-593`). `"Error: Not
+  enough arguments have been specified !\n"` → exit 2 only when `nargs<3 && liHlp==0`
+  (`main.cpp:594-599`). Usage text is replicated **verbatim including its stale bits**
+  (see §21.10). Copy the 58 lines from the vendored `main.cpp` — do not retype.
+* Unknown option (getopt `?`) sets `liHlp=1` and **continues** execution if ≥3 operands
+  remain (`main.cpp:473-475`): `-Z a b c` prints help, then diffs, exit 1. Ported as-is.
+* Progress/output strings: `"\nUse -h for additional help and usage description.\n"`
+  (verbose>0, usage not shown, `main.cpp:600-601`); `"Comparing : ...           "`;
+  `"\rComparing : %12" PRIzd "Mb"`; lookahead `"+%-12" PRIzd "\b..."`;
+  `"\nIndexing  : ...           "` with `"%12zdMb"` every 32 MiB (`PGSMRK=0x100000`,
+  `PGSMSK=0x1ffffff`, `JDiff.cpp:95-96`). Sequential warnings
+  `"\nWarning: Source file is a sequential file, assuming -p.\n"` / `"...Destination...
+  assuming -q.\n"` (`main.cpp:787,794`). Open errors unchanged: first/second/output →
+  3/4/5 with the Part I §4.3 messages (`main.cpp:745,750,771`).
+
+### 18.B Build, binaries, fate of `jptch`
+
+* New files: `JDefs.cpp` (isPrime/getLowerPrime), `JFile.cpp/.h` (abstract addressed
+  input base with `getbuf` fast path and `chkSeq()`), `JFileOut.cpp/.h` (patch-phase
+  output: `putc`, `copyfrom(JFile&,pos,len)`), `JFileAheadStdio.*` (stdio adapter),
+  `JFileAheadIStream.*` (istream adapter; replaces 0.8.1's `JFileIStreamAhead` which was
+  a full algorithm clone — the algorithm now lives once in the `JFileAhead` base),
+  `JPatcht.cpp/.h` (patch applier class). Removed: `jpatch.cpp` (upstream commit
+  a1e87f4). `JFileIStream` survives rewritten but is **never instantiated** (dead code).
+* One binary. Function selection: argv[0] basename starting `jpatch` → Patch, `jdedup`
+  → Dedup, `jtst` → Test (`main.cpp:303-315`, case-insensitive) — else `-j`/`-u`/`-t`/`-y`
+  options (`main.cpp:366-399`). Patch execution: `JFileOut` + `JPatcht(...).jpatch()`
+  (`main.cpp:871-876`).
+* Upstream `Makefile`: targets `linux` (`-s` strip) / `native` (`-march=native`) /
+  `debug` (`-g -D_DEBUG`); **no** `-D_FILE_OFFSET_BITS=64` (so `JDIFF_LARGEFILE` is OFF
+  in shipped builds — see §21.7), no pthread/OpenMP. Dead targets `jpatch`/`jpatcd`
+  reference the deleted `jpatch.cpp`. Changing `DBG` without `make clean` silently mixes
+  objects (§21.8).
+* **Port ruling (R2):** keep both Rust binaries. `jdiff` implements the full 0.8.5 CLI
+  including `-u`/`--undiff` and the argv[0]=`jpatch` alias. `jptch` remains as a packaging
+  extra: it behaves exactly like `jdiff` invoked with argv[0]=`jpatch` (same option
+  parser, function pre-forced to Patch, same exits). `jdedup`/`jtst` argv[0] routes are
+  NOT ported (§21.3/§21.4).
+
+### 18.C Wire format (supersedes Part I §3)
+
+Unchanged: opcode values (`ESC 0xA7, MOD 0xA6, INS 0xA5, DEL 0xA4, EQL 0xA3, BKT 0xA2`),
+all length tiers (1..=252 / 253..=508 / 509..=65535 / 32-bit / 64-bit, big-endian,
+`JOutBin.cpp:65-104`), ESC data-escaping (pending-ESC + next byte in `BKT..=ESC` → extra
+ESC, `JOutBin.cpp:136-160`), `ESC ESC` pending-escape flush.
+
+Changed (both `JOutBin.cpp` vs 0.8.1):
+
+1. **Implicit MOD.** `ufPutOpr` emits `ESC <opr>` only when `aiOpr != MOD ||
+   miOprCur == INS` (`JOutBin.cpp:121-128`), and the constructor seeds
+   `miOprCur(MOD)` (`JOutBin.cpp:27`; 0.8.1 seeded `ESC`). Net: a MOD run at patch start
+   or following EQL/DEL/BKT is emitted **without** the `ESC MOD` prefix; `ESC MOD` is
+   still emitted when switching INS→MOD. The reader defaults the operator to MOD
+   (`JPatcht.cpp:252-254` — and `ESC <unknown>` at sequence start also resolves to MOD,
+   `JPatcht.cpp:246-250`).
+2. **Short-EQL threshold 4 → `MINEQL` = 2** (`JOutBin.h:28`). Pending-equal flush
+   condition `mzEqlCnt > MINEQL || (miOprCur != MOD && aiOpr != MOD)`
+   (`JOutBin.cpp:175`); EQL buffering `miEqlBuf[MINEQL]` (`JOutBin.cpp:221-223`). Net:
+   runs of ≥3 equal bytes become `ESC EQL len`; 0.8.1 needed ≥5.
+
+**Compatibility matrix (verified live):** 0.8.5 patches ≠ 0.8.1 patches in content and
+size (smaller on all test pairs); 0.8.1 jptch silently corrupts on 0.8.5 patches
+(drops implicit-MOD data bytes); the 0.8.5 reader applies all 0.8.1 patches (explicit
+opcodes are a subset of the grammar; `ESC <same-opr>` inside a run is handled as data,
+`JPatcht.cpp:176-185` — note this inverts Part I §15.7's francisdb flag: that behavior
+is now upstream). Acceptance gate §22.3 pins the 0.8.1→0.8.5 direction.
+
+### 18.D CLI surface & exit codes (supersedes Part I §4/§5)
+
+Parsing: `getopt_long` with short string `"a:bcd:fhi:jk:lm:n:pqrst::uvx:y"` and a long-
+option table (`main.cpp:236-261`; names include `--verbose`, `--lazy`, `--better`,
+`--undiff`, `--test`, `--dedup`, `--help`, `--console` — read the table from the vendored
+source). GNU permutation: options may appear **after** filenames; `--` ends options.
+`-d` requires an argument (no-arg `-d` → getopt error → exit 2). The Rust port
+reimplements these observable semantics std-only (no libc `getopt`).
+
+Defaults (`main.cpp:276-293`): outTyp=0, verbose=0, srcBkt=true, cmpAll=true, srcScn=1,
+**mchMax=128, mchMin=2, hshMbt=32 (MB), bufOrg=bufNew=0 → 1 MB each**, blkSze=32*1024,
+ahdMax=0 (→ `llBufNew - liBlkSze`, floored 4096, `main.cpp:639-645`), stdio=false,
+liFun=Diff. Buffer normalization (`main.cpp:617-620`): `bufOrg = bufOrg>0 ? bufOrg :
+(seqOrg ? 32 : 1); bufNew = bufNew>0 ? bufNew : (seqNew ? 16 : bufOrg)` (MB), then ×1M;
+`blkSze` floored 4096 at use (`main.cpp:621`).
+
+| Option | Semantics (code wins; citations) |
+|---|---|
+| `-j` / `-u` | force function Diff / Patch (`main.cpp:366-368, 385-387`) |
+| `-t [n]` / `--test[=n]` | Test mode — **broken upstream**; port ruling §21.3. `n` parsed, never used (`main.cpp:290,378-384`) |
+| `-y` / `--dedup` | Dedup — not compiled upstream (`JDIFF_DEDUP` off); port ruling §21.4 (`main.cpp:391-399`) |
+| `-v/-vv/-vvv` | verbose 1/2/3; `-vvv` also prints usage + Hash Dist (`main.cpp:325-327,388-390`) |
+| `-h` / `-hh` | help level 1/2 (`main.cpp:363-365`) |
+| `-l` | JOutAsc listing (`main.cpp:369-371`) |
+| `-r` | JOutRgn regions — **was `-lr`** (`main.cpp:372-374`) |
+| `-c` | stddbg = stdout — **was `-do`** (`main.cpp:360-362`) |
+| `-s` | use stdio backend — **was `-s size`** (hash size is now `-i`) (`main.cpp:375-377`) |
+| `-b` | preset (multiplicative): cmpAll=true, srcBkt=true, srcScn=1, `mchMin*=2`, `mchMax*=4`, `hshMbt*=4`, `bufOrg=(<=0?1:..)*4`; `-bb` compounds (`main.cpp:320-330`) |
+| `-f` | first `-f`: if cmpAll {cmpAll=false, srcBkt=true, srcScn=1, `mchMin*=2`, `mchMax/=2`, `bufOrg=(<=0?1:..)*16`} else {srcScn=0, `mchMin/=2`, `mchMax/=2`}; always `hshMbt/=2` (`main.cpp:331-348`) |
+| `-p` | sequential source: seqOrg=true, cmpAll=false, srcBkt=false, srcScn=0 (`main.cpp:349-354`) |
+| `-q` | sequential dest: seqNew=true, `mchMin=0` (`main.cpp:355-358`) |
+| `-a <KB>` | `ahdMax = atoi*1024` (`main.cpp:401-406`) |
+| `-i <MB>` | `hshMbt = atoi` MB, floored 1 (`main.cpp:408-414`) — **was `-s size`** |
+| `-k <B>` | `blkSze = atoi`, floored 4096 at use (`main.cpp:415-421`) — **was `-bs`** |
+| `-m <size>` | buffers in **MB total, split evenly**: 1st `-m`: `new=arg/2, org=arg/2`; 2nd: `org*=2; new=arg`; 3rd+ ignored; `-m 0` → defaults (no unbuffered mode anymore) (`main.cpp:422-434,617-620`) — usage text still says "KB" (§21.10) |
+| `-n <cnt>` | `mchMin = atoi`, floored 0 (`main.cpp:435-439`) — **was `-min`** |
+| `-x <cnt>` | `mchMax = atoi`, floored 1024 (`main.cpp:440-444`) — **was `-max`**; `-x <13` quirk §21.15 |
+| `-d <flag>` | debug flag by **name**: `hsh ahd cmp prg buf hsk ahh bkt red mch dst`; unknown names silently ignored (`main.cpp:446-472`) |
+
+Removed 0.8.1 tokens: `-do -bs -min -max -lr -s <size> -m 0`-mode, and the 0.8.1
+"options must precede filenames" rule.
+
+**Exit codes** (verified live): identical files → **0**; differences → **1** (0.8.5
+swapped 0.8.1's mapping; `main.cpp:919-928`, `case EXI_EQL: exit(EXI_OK)` /
+`case EXI_DIF: exit(EXI_DIF)`); `exit(-EXI_*)` keeps process codes 2 (args, incl. both
+inputs = `-`), 3/4/5 (open failures), 6 (seek), 7 (64-bit number), 8 (read), 9 (write),
+10 (malloc), 20 (spurious); patch success → 0. `EXI_*` macros renumbered/negated with
+new `EXI_OK` (`JDefs.h:146-158`): `EXI_OK 0, EXI_DIF 1, EXI_EQL 2, EXI_ARG -2, EXI_FRT
+-3, EXI_SCD -4, EXI_OUT -5, EXI_SEK -6, EXI_LRG -7, EXI_RED -8, EXI_WRI -9, EXI_MEM
+-10, EXI_ERR -20`. Equal/differ decision: `out.dta > 0 → DIF else EQL`
+(`main.cpp:840-845`).
+
+**stdin/stdout/sequential** (`main.cpp:612-615,758-759` + `JFile.cpp:37-46`): `-` is
+stdin for either input and stdout for output; both inputs `-` → exit 2 with
+`"Error: Original and destination files cannot both be from standard input !\n"`. Each
+input self-detects non-seekability (`chkSeq()` seek-EOF probe → `mbSeq`) and main then
+force-applies `-p`/`-q` with the §18.A warnings (`main.cpp:781-795`). Verified pipe
+flows: `cat new | jdiff org - > p`; `cat org | jdiff -p - new`; `cat p | jdiff -u org -`.
+
+### 18.E Engine & file layer (supersedes Part I §6–§10)
+
+* **`JDiff::hash`** (`JDiff.cpp:361-371`, replaces `JHashPos::hash`):
+  `if (old==new) {if (eql<SMPSZE) eql++} else {old=new; if (eql!=0) eql=0}`; returns
+  `(cur_hash*2) + new + eql` — the equal-run counter is **added into the hash value**.
+  This alone changes match decisions (and thus patch bytes) vs 0.8.1.
+* **`JHashPos`** (`JHashPos.cpp`): ctor takes **MB** → elements `mb*1024*1024/16` →
+  `getLowerPrime` (`JDefs.cpp:53-67`: switch returns 1021/33554393/16777213/8388593/
+  134217689/536870909 for exact 1024/32M/16M/8M/128M/512M, else downward `isPrime`
+  search — default 32 MB → 2097152 elements → prime **2097143**). Collision counter
+  counts **down** from `miHshColMax` (start 4), stores at `<=0`, resets to colMax; load
+  counter counts down from prime, rollover does `colMax+=4; rlb+=4` (`:99-138`).
+  Reliability seed `SMPSZE + SMPSZE/2` (= **48** at the port's SMPSZE=32; `:50`).
+  Quality gate `aiEqlCnt <= SMPSZE*2 → COLLISION_HIGH(4) else COLLISION_LOW(1)`
+  (`:116-119`) — the LOW branch is dead because hash() caps `eql` at SMPSZE (ported as
+  written, §21.13). `print()` format unchanged (`"Hash Pnt %12d ..."`); `dist()`
+  formulas re-derived (`Overload = colMax/4 − 1`; guarded Avg/Min/Max/Load, `:192-238`).
+  `reset()` exists, never called. Port deviation §21.5: table zero-initialized.
+* **`JMatchTable`** — dynamic (`JMatchTable.cpp:78-105`): size = `-x` value
+  (`miMchSze = max(13, aiMchSze)`), **two** bucket tables of `getLowerPrime(2×sze)`:
+  `mpCol` on `|delta| % pme` (`:197`) and `mpGld` on `izOrg % pme` (`:215`) — gliding
+  detection is hash-based now. Node `rMch` (`:106-119`): `ipNxt` aging list, `ipCol`,
+  `ipGld`, `iiCnt`, `iiGld`, `izBeg/izNew/izOrg/izDlt/izTst`, `iiCmp ∈ {CMPINV -1,
+  CMPSKP -2, CMPEOB -3}`. Elements are never freed — they live on `mpNew`/`mpOld` aging
+  lists and are reused (`isOld2Reuse`, `:755-768`); "full" = no reusable old element.
+  Best-match tracked incrementally in `isBest()` during add/cleanup (`:543-656`);
+  `getbest()` returns it (plus an EOB re-evaluation pass when `!cmpAll`, `:124-145`).
+  `cleanup(bseOrg,redNew)` (`:373-438`) returns Full/Invalid/Valid/Good/Best which
+  `JDiff::search` uses to shorten the lookahead. The 0.8.1 global static `siHshRpr` is
+  now instance counter `miHshRpr` (`getHshRpr()`, `:930-932`). Constants (`:36-46`):
+  `EQLSZE 8, EQLMIN 4, EQLMAX 256, MAXDST 2*1024*1024, MINDST 1024, MAXGLD 128 (dead),
+  FZY 0`. The 085ac tuning commit cached reliability into `JDiff::miRlb` and switched
+  aging thresholds to MAXDST bounds — no `#define` value changes. `check()` is now a
+  single loop with glide-aware realignment (`azPosOrg -= liEql` on mismatch when
+  gliding, `:843-854`) and EQLMAX cap.
+* **`JFileAhead`** — rewritten (`JFileAhead.cpp`): buffer state `mpBuf/mpMax/mpInp`,
+  `miBufUsd`, `mzPosInp`, `mzPosBse`; base-class read cursor `mzPosRed/miRedSze/mpRed`.
+  `getbuf(pos,&len,eAhead)` (`:210-254`) is the public fast path; `get_fromfile`
+  decides `eBufOpr liSek ∈ {Append, Reset, Scrollback}` (`:114, 269-307`) — **the 0.8.1
+  bool-collapse (Part I §15.8) is FIXED**: Scrollback is implemented and reachable
+  (`:341-382`, block-aligned back-position, make-room, refil, then seek forward again —
+  2 seeks; mid-scrollback EOF → ReadError). Before-buffer reads: SoftAhead → EOB;
+  sequential HardAhead → EOB; sequential Read → SeekError (`:277-292`). SoftAhead append
+  bounded by `mzPosBse + mlBufSze - miBlkSze` (`:303-304`). `readblocks` (`:392-431`)
+  fills in block chunks, clamps `miBufUsd`, sets `mzPosEof` on short read. **No more
+  `Buffer out of bounds ... exit(6)`** — clamps and wraps instead. Debug builds carry
+  always-on invariant asserts (§18.G). The eAhead enum `{Read, HardAhead, SoftAhead}`
+  replaces raw ints (`JFile.h:62`).
+* **`JDiff.cpp` engine**: `int liFnd` — the 0.8.1 dead `bool lbFnd` check (Part I §15.9)
+  is FIXED and live (`:277-279`). `search()` (`:389-718`): lookahead budget
+  `miAhdMax - (mzAhdNew - azRedNew)` floored at cached `miRlb` (`:464-470`); look-back
+  cap `miRlb + 2*SMPSZE - 1` (`:481-487`); hash re-init can terminate early on
+  `miEqlNew != liIdx` (`:546-573`); add driven by JMatchTable return enum; miss recovery
+  budget `reliability/2` (0.8.1: flat SMPSZE) with `miHshErr++` counted in **release**
+  builds too (`:247-261` — verbose>2 `"\nInaccurate solution at positions %zd/%zd!\n"`;
+  counter is wrapping i32, §21.6). Incremental scanning: with `srcScn==0` (`-ff`/`-p`)
+  the source index builds during the compare loop and inside equal-run fast loops
+  (`:185-224`) plus a SoftAhead prescan bounded by `miAhdMax`/`mzAhdOrg` (`:419-447`).
+  `buildFullIndex` (`:726-793`, replaces prescan): no OpenMP, 32 MiB progress marks,
+  verbose>2 prints `gpHsh->dist(pos,10)`. Backtrack clamp uses `getBufPos()` when
+  `!mbSrcBkt` (`:491,704-712`); `mzAhdOrg` no longer reset on backtrack. Constructor
+  (`:103-125`): `aiHshSze` in MB; `miMchMin = min(aiMchMin, aiMchMax-1)`;
+  `miAhdMax = max(aiAhdMax, 1024)`.
+* **`JFileOut`** (`JFileOut.cpp:28-84`): patch-phase writer — `putc`, buffered
+  `copyfrom(JFile&,pos,len)` via `getbuf` with a byte-loop fallback whose stray discard
+  read is ported as-is (§21.14).
+
+### 18.F Output layer & stats (supersedes Part I §11/§4.4)
+
+* `JOutBin`: implicit-MOD + `MINEQL=2` (§18.C); everything else as Part I §11.1.
+* `JOutAsc` (`-l`): byte format **octal → hex** — `%02x` at `JOutAsc.cpp:51,64,92`
+  (0.8.1 `%3o`). Labels/positions otherwise unchanged.
+* `JOutRgn` (`-r`): line formats unchanged; EQL accounting splits on `MINEQL`
+  (`szOprCnt <= MINEQL → dta else ctl += 2+putLen; eql += cnt`, `:79-85`); MOD ctl+2
+  guarded by a dead `if (siOprCur == INS)` inside `case (MOD)` (`:50-57` — dead, ported
+  as written); DEL/BKT add `2+ufPutLen` where ufPutLen returns 1/2/3/**4**/**8**
+  (`:120-139`, inconsistent with 5/9 elsewhere — ported as written; §21.14).
+* Pre-run echo, verbose>1 (`main.cpp:823-836`) — verbatim incl. typos/stale letters:
+  `Index table size (default: 64Mb) (-s): %dMb (%d samples)` / `Search size
+  (0 = buffersize) (-a): %dkb` / `Buffer size       (default  2Mb) (-m): %ldMb` /
+  `Block  size       (default 32kb) (-b): %dkb` / `Min number of matches to search
+  (-n): %d` / `Max number of matches to search  (-x): %d` / `Compare out-of-buffer
+  (-f to disable): yes|no` / `Full indexing scan   (-ff to disbale): yes|no` /
+  `Backtrace allowed     (-p to disable): yes|no`.
+* Post-run, verbose>1 (`main.cpp:848-861`): `Index table hits / Index table repairs
+  (getHshRpr) / Index table overloading (= colmax/4 − 1) / Reliability distance /
+  Inaccurate  solutions (getHshErr, release-counted) / Source      seeks /
+  Destination seeks / Delete      bytes / Backtrack   bytes / Escape      bytes /
+  Control     bytes` (note `" = "` and shorter padding vs 0.8.1). Verbose>0 tail:
+  `Equal       bytes / Data        bytes / Control-Esc bytes (was Overhead) /
+  Total       bytes (NEW = ctl+esc+dta)`. Removed: 0.8.1 `Hashtable size/prime` lines.
+  Final verdict lines verbose>1: `"Found all data within source file."` /
+  `"Not all data has been found in source file."`.
+
+### 18.G Debug surface (supersedes Part I §14)
+
+Same 11 flags, indices 0-10 (`JDebug.h` is byte-identical to 0.8.1). CLI syntax is now
+**`-d <name>`** with names `hsh ahd cmp prg buf hsk ahh bkt red mch dst`; `-c` replaces
+`-do`. `hsk`, `bkt`, `dst` have **zero print sites** (accepted, silent — §21.13).
+Site census at 0.8.5 (formats from the vendored source): `JDiff.cpp:179` DBGPRG,
+`:271` DBGMCH (ESC flush — new), `:281` DBGAHD, `:284` DBGPRG, `:681` DBGAHD
+(`"\nForcing skip of SMPSZE bytes\n"` — new), `:759` DBGAHH; `JMatchTable.cpp:154,278,
+350,391,414,502,633,704` DBGMCH (all new formats: `Match Failure/Suboptimal Match/
+Optimal Match/Del [...]/Add [...]/Reusing.../Mch Cln.../Mch Nxt.../Mch Old.../Mch Chk...`),
+`:826,858` DBGCMP (`"Cmp Gld|Col (...)"` — was `"Fnd (...)"`); `JFileAhead.cpp:80`
+DBGBUF (`ufFabOpn(%s):(buf=%p,max=%p,sze=%ld)`), `:151` DBGRED (double-verify block —
+new); `JHashPos.cpp:71` DBGHSH (`%2d`→`%2ld`), `:128` DBGHSH. 0.8.1's DBGHSK site is
+gone (hash moved to JDiff, no print). Debug builds add **always-on** invariant asserts
+in `JFileAhead::getbuf` (`:240-251`, `exit(-EXI_SEK)` on violation — this is what fires
+in `-t` Test mode). `-vvv` prints the `Hash Dist` block.
+
+### 18.H Tests & docs
+
+0.8.5 ships no fixtures; `tst/` is a shell harness (`jtst.sh` runs option matrices over
+consecutive file pairs and round-trips `zcat patch | jpatch org - | cmp -s new`;
+`jtstall.sh`, `jlog.sh`, `jdst.sh`, `jgrep.sh`, `jtail.sh`, `jcut.sh`, `jvd.sh`). The
+upstream option matrix informs §22's test matrix. The de-facto changelog is the
+`main.cpp:117-149` header comment (v0.8.2 … v085bm-ca; vendored verbatim).
+
+## 19. Section-by-section delta map (Part I → 0.8.5)
+
+| Part I § | 0.8.5 status | Where |
+|---|---|---|
+| §1 Inventory | CHANGED: new files JDefs.cpp, JFile.*, JFileOut.*, JFileAheadStdio.*, JFileAheadIStream.*, JPatcht.*; removed jpatch.cpp, JFileIStreamAhead.*; flat src/ | §18.B |
+| §2 Constants | CHANGED: version strings; EXI_* renumbered/negated + EXI_OK; `jchar` new; PRIzd `"zd"`; MCH_PME/MCH_MAX → dynamic; MINEQL=2 new; GIPME table → getLowerPrime; hkey/SMPSZE stance unchanged | §18.A/C/E |
+| §3 Wire format | CHANGED (breaking): implicit MOD; MINEQL 4→2; tiers/escaping unchanged | §18.C |
+| §4 jdiff CLI | CHANGED (rewrite): getopt_long, permutation, new/removed options, presets, defaults, greeting/usage/stats, exit swap, stdin/sequential | §18.D/F |
+| §5 jptch CLI | SUPERSEDED: patching = `jdiff -u` / argv[0] / JPatcht; decoder semantics per §18.C + JPatcht (default-MOD, ESC-same-opr data, trailing-byte warning `"Warning: unexpected trailing byte at end of file, patch file may be corrupted.\n"` to stderr, `JPatcht.cpp:243`; 64-bit-length reject only in non-LARGEFILE builds) | §18.B/C |
+| §6 JDiff engine | CHANGED: hash+eql, live liFnd, search()/buildFullIndex/incremental scan, reliability/2 recovery, miRlb cache | §18.E |
+| §7 JHashPos | CHANGED: MB sizing + getLowerPrime, down-counters, seed SMPSZE+SMPSZE/2, zero-init deviation, dist formulas | §18.E |
+| §8 JMatchTable | CHANGED (architecture): dynamic two-table, aging lists, incremental best, new constants, instance repairs counter | §18.E |
+| §9 In-memory JFile | OBSOLETE: `-m 0` = defaults now; JFileIStream dead code; JFileMem stays as a (pub) library type, not CLI-wired | §18.D/E |
+| §10 JFileAhead | CHANGED (rewrite): Append/Reset/Scrollback machine, readblocks, sequential mode, chkSeq, getbuf fast path, no exit(6) | §18.E |
+| §11 Output layer | CHANGED: JOutBin implicit-MOD/MINEQL; JOutAsc hex; JOutRgn `-r` + stats quirks; stats labels/values all-new | §18.F |
+| §12 Cross-platform | CHANGED mildly: `-` for any file incl. piped patch; MinGW → JDIFF_STDIO_ONLY auto; Rust collapses stdio/istream adapters (§21.11) | §18.D, §21.11 |
+| §13 Test corpus | CHANGED: 0.8.1 fixtures still used; matrix extended (presets, -p/-q/-s, pipes, -i/-k/-n/-x edges, cross-version) | §22 |
+| §14 Debug | CHANGED: `-d <name>` syntax; site list rewritten; dead flags; debug asserts | §18.G |
+| §15 Deviations | 5 FIXED / 4 CHANGED / 2 OBSOLETE / 1 UNCHANGED + 15 new rulings | §20/§21 |
+| §16 Gates | CHANGED: 0.8.5 oracle; byte-gate vs 0.8.5; cross-version 0.8.1→0.8.5; pipe/`-u` round-trips; swapped exits | §22 |
+
+## 20. Quirk fate map (Part I §15.1–§15.12 at 0.8.5)
+
+| Part I § | 0.8.1 quirk | Fate at 0.8.5 | Evidence |
+|---|---|---|---|
+| §15.1 | Linux fillBuffer pthread pre-read bug | **FIXED/REMOVED** (plain `ifstream::open` + `is_open` checks) — deviation entry closes | `main.cpp:701-742` |
+| §15.2 | OpenMP pragma (racy, unused target) | **REMOVED** (no omp anywhere) — closes | grep; `JDiff.cpp` |
+| §15.3 | `-m 0` istringstream NUL truncation/overread | **OBSOLETE** (mode removed; `-m 0` → defaults) — closes | `main.cpp:422-434` |
+| §15.4 | jptch stdin seek on pipe; ftello(-1) positions | **FIXED** (JPatcht reads via buffered JFile; pipe patch input verified; internal position counters) | `JPatcht.cpp`; analysis Part 2.4 |
+| §15.5 | MinGW ifdefs / `-m 0 → buf=blk` special case | **CHANGED** (JDIFF_STDIO_ONLY auto on `__MINGW32__`; no buffer special case) | `JDefs.h:71-76` |
+| §15.6 | JFileIStreamAhead/JFileAhead algorithm twins | **CHANGED (unified upstream)** — one base + thin adapters; Rust keeps a single impl (now over seekable **and** sequential streams, §21.11) | §18.B/E |
+| §15.7 | francisdb divergences non-authoritative | **PARTLY INVERTED** — 0.8.5 upstream now treats bare leading bytes as MOD data and `ESC <same-opr>` as data; the port follows upstream (as before) | `JPatcht.cpp:247-254,176-185` |
+| §15.8 | `bool liSek` collapse kills scrollback | **FIXED** — `eBufOpr {Append,Reset,Scrollback}`; Scrollback live | `JFileAhead.h:114`, `.cpp:273-292,341-382` |
+| §15.9 | dead `bool lbFnd < 0` check | **FIXED** — `int liFnd`, check live | `JDiff.cpp:161,277-279` |
+| §15.10 | JFileIStream stale-failbit defect | **OBSOLETE** (class rewritten correct + unused) — closes | `JFileIStream.cpp:86-105` |
+| §15.11 | stock abort on unopenable inputs | **FIXED upstream** — open checks with exact messages, exits 3/4/5; deviation entry closes | `main.cpp:744-773` |
+| §15.12 | hkey LP64 width | **UNCHANGED** — `typedef unsigned long int hkey` still (`JDefs.h:135-141`); port keeps the 32-bit-sample variant (u32/SMPSZE=32) and the oracle build patches the typedef, exactly as before. Coherence bonus: 0.8.5's reliability seed `SMPSZE+SMPSZE/2` = 48 at SMPSZE=32, same number 0.8.1 hardcoded | `JDefs.h:135-143`; `JHashPos.cpp:50` |
+
+## 21. New 0.8.5 deviations and port rulings (exhaustive — everything else is 1:1)
+
+1. **Wire format break adopted (R1).** Implicit-MOD and MINEQL=2 are ported exactly
+   (§18.C). The decoder accepts both 0.8.1-style explicit and 0.8.5 implicit patches
+   (one-way compatibility, verified). Release notes must flag: patches produced by this
+   port ≥0.8.5 are NOT applicable by 0.8.1-era patchers.
+2. **`jptch` binary retained; `jdiff -u` + argv[0]=`jpatch` added (R2).** Upstream ships
+   one binary; keeping `jptch` is this project's packaging choice (Part I §5's `jptch`
+   CLI is superseded: `jptch` now parses the full 0.8.5 option grammar with the function
+   pre-forced to Patch). The `jdedup` and `jtst` argv[0] routes are not ported.
+3. **`-t`/`--test` ported faithfully although broken upstream.** Release semantics:
+   after diffing, JPatcht is fed the **destination** file as the patch, appending
+   misparsed data to the already-written patch output (observed: 283-byte corrupt output,
+   exit 0). Under the `debug` feature the `JFileAhead::getbuf` invariant assert fires →
+   exit 6 (`JFileAhead::getbuf(New,-1,1,0)-> ... failed !`). `liTst` is parsed and never
+   used — replicate. Documented in README as upstream-broken.
+4. **Dedup not ported (R4).** `-y`/`--dedup` and argv[0]=`jdedup` map to a function that
+   is compiled out upstream (`JDIFF_DEDUP` undefined in the shipped Makefile) where the
+   real binary segfaults. The port's parser accepts `-y` (grammar parity) but exits
+   **20** (`EXI_ERR`, `"Error occurred !"` message path) instead of crashing.
+5. **JHashPos table zero-initialized (deviation).** 0.8.5 `malloc`s without `memset`
+   (`JHashPos.cpp:65-67`); reading uninitialized keys is C++ UB, and for the multi-MB
+   tables Linux serves zero pages, so zero-init matches observable oracle behavior.
+   Determinism requires it in Rust.
+6. **`Inaccurate solutions` counter is wrapping i32.** Counted in release builds;
+   explodes on repetitive data (880,902,192 on the 1.8 MB pair); C++ int overflow wraps
+   in practice — Rust uses `wrapping_add` to match.
+7. **Oracle = 0.8.5 + `typedef unsigned int hkey` + `-D_FILE_OFFSET_BITS=64`.** The
+   shipped upstream Makefile omits the LARGEFILE define, so stock 0.8.5 truncates
+   >4GiB lengths to the 5-byte form and JPatcht rejects the 255 form with exit 7; the
+   port (like Part I §3) keeps the 64-bit tier live and the oracle build enables it.
+   `scripts/build-oracle.sh` builds the 0.8.5 oracle with both patches.
+8. **Oracle build hygiene.** The 0.8.5 Makefile does not rebuild objects when `$(DBG)`
+   changes — `build-oracle.sh` must `make clean` between release/debug variants (its
+   stale `jpatch`/`jpatcd` targets and `clean` entries reference deleted files; ignore).
+9. **SMPSZE stance unchanged (32-bit samples).** All SMPSZE-derived 0.8.5 values
+   evaluated at SMPSZE=32: reliability seed 48; hash eql cap 32; quality gate bound 64.
+   `EQLSZE 8 / EQLMIN 4 / EQLMAX 256 / MAXDST / MINDST` are fixed constants (not
+   SMPSZE-derived). Banner prints `samples are 32 bytes`.
+10. **Stale user-visible text replicated verbatim.** Usage says `-i` default 64 (actual
+    32), `-k` default 8192 (actual 32768), `-m` "(in KB)" (actual MB), "0=no buffering"
+    (no such mode); verbose echo says `(-s)` for index size and `(-b)` for block size
+    and contains the `disbale` typo; main.cpp's exit-code comment block documents the
+    old 0/1 mapping. Behavior follows the **code**; all printed text follows the
+    **text**, byte for byte. (The comment block is not behavior and is not replicated.)
+11. **One JFileAhead over seekable and sequential streams.** C++ splits
+    `JFileAheadStdio`/`JFileAheadIStream` (stdio vs istream); Rust has one buffered
+    engine (`Part I §15.6` stance extended) over an I/O abstraction that may lack Seek:
+    sequential inputs (pipes) are first-class (`-p`/`-q`/auto-detect; seek failure →
+    sequential semantics per §18.E). `-s` is accepted and recorded (it influences
+    nothing observable in Rust; stats do not expose it).
+12. **`-m` semantics per code.** MB total, split evenly, accumulation rules per
+    §18.D; `-m 0` → defaults. Part I §4.1's `-m` row and in-memory mode are void.
+13. **Dead code ported as dead code.** COLLISION_LOW quality branch (unreachable),
+    `MAXGLD`, `-d hsk/bkt/dst` (accepted, zero sites), `JFileIStream` (compiled, never
+    instantiated), `JPatcht`'s non-LARGEFILE 64-bit-reject branch (unreachable in the
+    port), `reset()` never called — all kept in matching dead form for parity.
+14. **Stats-only quirks ported as written.** JOutRgn's dead INS-check inside
+    `case (MOD)`; its DEL/BKT `ufPutLen` returning 4/8 (vs 5/9 elsewhere);
+    `JFileOut::copyfrom`'s stray discard read in the byte-loop fallback (observable:
+    advances the sequential read cursor — replicate).
+15. **`miMchFre` initialized from the unclamped `-x` value** (`JMatchTable.cpp:85`):
+    with `-x < 13` the free count is smaller than the table size — deterministic,
+    ported exactly (0.8.1's §15-style quirk preservation).
+
+## 22. Acceptance gates (0.8.5 — supersede Part I §16)
+
+1. **Round-trip:** for every fixture pair × every option set in the matrix below:
+   `jdiff OPTS A B p && jptch A p out && cmp B out` (and the `-u`/argv[0] equivalents).
+   Exit codes per §18.D (identical→0 with 3-byte `ESC EQL len` patch; empty/empty→0
+   byte-empty patch; trailing-org-data→0; differences→1). Matrix: default, `-b`, `-bb`,
+   `-f`, `-ff`, `-p`, `-q`, `-p -q`, `-s`, `-i 1`, `-i 8`, `-i 512`, `-k 0`, `-k 1`,
+   `-k 65565`, `-n 1 -x 2`, `-x 5` (miMchFre quirk), `-m 0`, `-m 7`, `-m 2048`, `-a 0`,
+   `-a 1`, `-l`, `-r`, and pipe variants (`cat new | jdiff org -`, `cat org | jdiff -p -
+   new`, `cat p | jptch org -`, `cat p | jdiff -u org -`, argv[0]=`jpatch` symlink).
+2. **Oracle byte-equality:** Rust output == 0.8.5-oracle output (patch bytes, `-l`/`-r`
+   text, verbose/stats/greeting/usage streams) across the matrix; the oracle is built by
+   `scripts/build-oracle.sh` per §21.7. Regenerate all goldens from the 0.8.5 oracle
+   (superseding the 0.8.1 goldens; regenerate, don't mix).
+3. **Cross-version compatibility:** every 0.8.1 golden patch applies with the new
+   `jptch`/`jdiff -u` and restores exactly (one-way gate, §18.C). The reverse is
+   expected to fail and is asserted **not** to corrupt silently in the Rust 0.8.1
+   jptch (historical binary) — no gate on C++ 0.8.1 patchers.
+4. **Exit codes & messages:** every EXI path per §18.D incl. both-inputs-`-` (exit 2),
+   unknown-option-continues, `-d` missing arg (exit 2), sequential warnings, JPatcht
+   trailing-byte warning.
+5. **Cross-platform CI:** as Part I §16.5, oracle job on the 0.8.5 build.

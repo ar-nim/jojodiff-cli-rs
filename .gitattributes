@@ -7,3 +7,6 @@ tests/fixtures/** -text
 # Vendored C++ reference must stay byte-exact (pristine oracle material,
 # jpatch.cpp has mixed CRLF/LF and tests/ holds golden outputs):
 reference/jojodiff-cpp/** -text
+
+# Vendored 0.8.5 tree: pristine upstream bytes (CRLF sources), same rule as jojodiff-cpp:
+reference/jojodiff-0.8.5/** -text

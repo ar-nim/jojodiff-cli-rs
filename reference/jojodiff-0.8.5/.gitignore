@@ -1,0 +1,19 @@
+#/Debug
+# Ignore everything
+*
+
+# But not these files...
+!.gitignore
+!*.c
+!*.cpp
+!*.h
+!*.sh
+!README
+!Makefile
+
+# re-igore following
+config.h
+
+# ...even if they are in subdirectories
+!*/
+
