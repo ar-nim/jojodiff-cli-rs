@@ -1080,9 +1080,14 @@ upstream option matrix informs §22's test matrix. The de-facto changelog is the
     `case (MOD)`; its DEL/BKT `ufPutLen` returning 4/8 (vs 5/9 elsewhere);
     `JFileOut::copyfrom`'s stray discard read in the byte-loop fallback (observable:
     advances the sequential read cursor — replicate).
-15. **`miMchFre` initialized from the unclamped `-x` value** (`JMatchTable.cpp:85`):
-    with `-x < 13` the free count is smaller than the table size — deterministic,
-    ported exactly (0.8.1's §15-style quirk preservation).
+15. **`miMchPme` sized from the unclamped `-x` value** (`JMatchTable.cpp:103`
+    `getLowerPrime(aiMchSze * 2)` — with `-x < 13` the bucket prime is tiny (e.g.
+    `-x 5` → `getLowerPrime(10)` = 7) while the table itself is clamped
+    (`miMchSze = max(13, x)`, `miMchFre = miMchSze` — the clamped member, since it is
+    declared before `miMchFre` at `JMatchTable.h:125-126`). Deterministic, ported
+    exactly. [Corrected 2026-10-02 during Task 16: an earlier revision of this ruling
+    claimed `miMchFre` initialized from the unclamped value — wrong; C++ member
+    declaration order decides, and the C++ source is the binding authority.]
 16. **`--compat-081` flag (port-only extension).** Not an upstream option. Long-only
     (upstream's single-letter option space is fully allocated), meaningful on the diff
     side; accepted and ignored when patching. Effect: `JOutBin` reverts to the exact
