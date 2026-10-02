@@ -72,16 +72,6 @@ pub const JDIFF_COPYRIGHT: &str = "Copyright (C) 2002-2020 Joris Heirbaut";
 /// Largest positive offset, `off_t` maximum on the 64-bit build (`JDefs.h`).
 pub const MAX_OFF_T: i64 = i64::MAX;
 
-/// Primes we select from when size is specified on the commandline
-/// (`giPme`, 0.8.1 `JHashPos.cpp:38-43`). 0.8.5 replaced the table with
-/// `getLowerPrime` (`JDefs.cpp`), but its only consumer here
-/// ([`crate::jhashpos`]) is reworked in plan Task 15, which removes the
-/// table together with that consumer; until then it stays.
-pub const GIPME: [i32; 20] = [
-    134217689, 67108859, 33554393, 16777213, 8388593, 4194301, 2097143, 1048573, 524287, 262139,
-    131071, 65521, 32749, 16381, 8191, 4093, 2039, 1021, 509, 251,
-];
-
 /// Check if number is a prime number (`isPrime`, `JDefs.cpp:37-45`).
 pub fn is_prime(number: i32) -> bool {
     if number < 2 {
@@ -200,8 +190,6 @@ mod tests {
             (ESC, MOD, INS, DEL, EQL, BKT),
             (0xA7, 0xA6, 0xA5, 0xA4, 0xA3, 0xA2)
         );
-        assert_eq!(GIPME.len(), 20);
-        assert_eq!(GIPME[19], 251);
     }
 
     /// Exit codes, byte-exact with 0.8.5 (`JDefs.h:146-158`): a positive

@@ -104,13 +104,25 @@ fn option_sets_for(pair: &str) -> Vec<(&'static str, &'static [&'static str], &'
 /// a full buffer at 0.8.5 (`JFileAhead.cpp:303-304`) instead of one block at
 /// 0.8.1, so the 0.8.1 engine lands on different match decisions — the
 /// shipped 0.8.5 oracle itself no longer reproduces the 0.8.1 `f` golden.
-/// TODO(T17/T22): byte parity for `-f` returns with the 0.8.5 engine port
-/// and the 0.8.5-oracle re-pinned goldens.
+///
+/// Task 15's 0.8.5 hashtable semantics (spec §18.E) legitimately shift the
+/// engine's match decisions further: the MB ctor maps the CLI's 8 MB default
+/// to 524288 elements → prime 524287 (0.8.1 GIPME: 8388593) and the quality
+/// gate is `eql <= SMPSZE*2` (0.8.1: `<= SMPSZE-4`), so samples with 29..32
+/// equal bytes now store at high quality. The 1.8 MB repetitive bkocomu pair
+/// diverges under every option set; the text pair only where the prime
+/// actually differs (`s1`: 65521 vs 0.8.1's 1048573). TODO(T17/T22): byte
+/// parity returns with the 0.8.5 engine port and the 0.8.5-oracle re-pinned
+/// goldens.
 fn committed_golden_sets(pair: &str) -> Vec<(&'static str, &'static [&'static str], &'static str)> {
     option_sets_for(pair)
         .into_iter()
-        .filter(|&(name, _, _)| !(pair == "bkocomu" && name == "l"))
         .filter(|&(name, _, _)| name != "f")
+        // Task 15: every bkocomu set diverges (the already-excluded `l`
+        // included), so the whole pair drops out of the layer until T22.
+        .filter(|&(name, _, _)| !(pair == "bkocomu" && name == "l"))
+        .filter(|&(name, _, _)| pair != "bkocomu")
+        .filter(|&(name, _, _)| !(pair == "test2" && name == "s1"))
         .collect()
 }
 

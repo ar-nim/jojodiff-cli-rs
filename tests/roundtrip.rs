@@ -329,6 +329,9 @@ fn greeting_matches_reference() {
 /// values).
 // TODO(T20): byte-exact 0.8.1 greeting; Task 13 re-pointed JDIFF_VERSION/
 // JDIFF_COPYRIGHT to the 0.8.5 strings and Task 20 rewrites the banner text.
+// The hashtable lines below are pinned to the 0.8.5 MB sizing (Task 15,
+// spec §18.E) under the current CLI default of 8 MB (Task 20 changes the
+// default to 32 MB → 2097152 elements → prime 2097143 → 24576 kb).
 #[ignore]
 #[test]
 fn stats_lines_match_reference() {
@@ -339,11 +342,11 @@ fn stats_lines_match_reference() {
 
     let expected = GREETING.to_string()
         + "Lookahead buffers: 512 kb. (256 kb. per file).\n"
-        + "Hastable size    : 98304 kb. (8388593 samples).\n"
+        + "Hastable size    : 6144 kb. (524287 samples).\n"
         + "Prescanning:\n"
         + ".\n"
-        + "Hashtable size          = 100663116 samples, 98304 KB, 96 MB\n"
-        + "Hashtable prime         = 8388593\n"
+        + "Hashtable size          = 6291444 samples, 6144 KB, 6 MB\n"
+        + "Hashtable prime         = 524287\n"
         + "Hashtable hits          = 0\n"
         + "Hashtable errors        = 0\n"
         + "Hashtable repairs       = 0\n"
@@ -414,7 +417,11 @@ fn option_quirks() {
     );
     fs::remove_file(dir.join("-l")).unwrap();
 
-    // -s 2048 → while >1024 divide → hashtable 2097143 samples / 24576 kb.
+    // -s 2048 → while >1024 divide → hashtable 131071 samples / 1536 kb.
+    // (0.8.5 MB sizing, spec §18.E: the normalized -s value 2 goes to
+    // JHashPos::new as MB → 2*1024*1024/16 = 131072 elements →
+    // get_lower_prime = 131071; bytes = 131071*12 → (1572852+512)/1024
+    // = 1536 kb. Task 20 rewires -s to the 0.8.5 -i semantics.)
     let out = run(&[
         os("-s"),
         os("2048"),
@@ -425,7 +432,7 @@ fn option_quirks() {
     ]);
     assert_eq!(out.status.code(), Some(0), "-s 2048 run");
     assert!(
-        stderr_str(&out).contains("Hastable size    : 24576 kb. (2097143 samples).\n"),
+        stderr_str(&out).contains("Hastable size    : 1536 kb. (131071 samples).\n"),
         "-s 2048 hashtable line: {:?}",
         stderr_str(&out)
     );

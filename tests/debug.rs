@@ -259,8 +259,14 @@ fn hsk_hash_key_lines_tiny() {
 }
 
 /// DBGHSH (`-dhsh`): the constructor's "Hash Ini" line (pointers shape-only)
-/// and the per-store "Hash Add" lines (`JHashPos.cpp:124-130`), where the
+/// and the per-store "Hash Add" lines (`JHashPos.cpp:127-132`), where the
 /// final `%c` is `.` for an empty bucket and `!` for an override.
+///
+/// 0.8.5 MB sizing (spec §18.E): the CLI default of 8 MB (Task 20 changes it
+/// to 32) gives 8*1024*1024/16 = 524288 elements → prime 524287, and the
+/// size in bytes is prime*12 = 6291444. The first store's index is the
+/// window key c8d9b3a9 mod 524287 = 117956 (the engine keys are unchanged
+/// until Task 17 rewires the hash shim).
 #[test]
 fn hsh_ini_and_add_lines_big() {
     let dir = temp_dir("hsh-big");
@@ -271,12 +277,12 @@ fn hsh_ini_and_add_lines_big() {
     assert_eq!(lines.len(), 970, "Ini + 969 stores: {stdout:?}");
     assert!(
         lines[0]
-            .starts_with("Hash Ini sizeof= 4+ 8=12, 8388593 samples, 100663116 bytes, address=0x")
+            .starts_with("Hash Ini sizeof= 4+ 8=12, 524287 samples, 6291444 bytes, address=0x")
             && lines[0].ends_with("."),
         "Ini line: {stdout:?}"
     );
     assert_eq!(
-        lines[1], "Hash Add  5884712         31 c8d9b3a9 .",
+        lines[1], "Hash Add   117956         31 c8d9b3a9 .",
         "first store line"
     );
     fs::remove_dir_all(&dir).unwrap();
@@ -318,30 +324,49 @@ fn cmp_check_line_big() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
-/// DBGDST (`-ddst`, `JDiff.cpp:574-577`): the hashtable distribution over 128
-/// buckets after the prescan. Header, sample buckets and the two summary
-/// lines are oracle-pinned (positions are `liIdx * 100000/128`).
+/// DBGDST (`-ddst`, `JDiff.cpp:574-577` 0.8.1 wiring, kept until Task 17
+/// moves the 0.8.5 site to verbose>2 with 10 buckets): the hashtable
+/// distribution after the prescan, over 128 buckets.
+///
+/// 0.8.5 formulas (spec §18.E, `JHashPos.cpp:192-238`): `Overload =
+/// colMax/4 - 1` (0 while colMax is 4), and the guarded summary lines with a
+/// trailing `%`: `Avg/Min/Max/% = liMax > 0 ? 100 - (liMin/(liMax/100)) : -1`
+/// and `Load = liCnt / (miHshPme/100)`. The fixture moved from the 1000-byte
+/// pair to 100000 bytes because the 0.8.5 Avg/Min/Max guard does not cover
+/// `liMax < 100` (inner `liMax/100` = 0 → C++ SIGFPE, port panics): at 1000
+/// bytes `liMax` is 7, at 100000 bytes it is 781.
+///
+/// Values are derived by exact simulation of the ported algorithm (default
+/// 8 MB table: prime 524287; all 99969 prescan adds store, no load rollover;
+/// the *2+byte keys mod 524287 clump, keeping 61424 bucket positions ≤ max):
+/// 128 buckets of width 100000/128 = 781, buckets 0..2 empty, bucket 127
+/// full, Avg/Min/Max 479/0/781 → 100 - (0/7) = 100, Load 61424/5242 = 11.
+// TODO(T17): the 0.8.5 call sites pass 10 buckets under -vvv
+// (`JDiff.cpp:324-327,784-787`); re-pin then (the oracle then reproduces
+// this output directly).
 #[test]
 fn dst_distribution_lines_big() {
     let dir = temp_dir("dst-big");
-    let (org, new) = big_pair();
+    let mut org = lcg(1, 100_000);
+    let mut new = org.clone();
+    new[250] ^= 0xFF;
     let (stdout, out) = run_dbg(&dir, &org, &new, &["-ddst"], "dstB");
     assert_eq!(out.status.code(), Some(0));
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 2 + 128 + 2, "2 + 128 buckets + 2 summaries");
-    // Bucket width = 1000/128 = 7 positions ("Pos=" bounds are idx*7).
-    assert_eq!(lines[0], "Hash Dist Overload    = 1");
+    // Bucket width = 100000/128 = 781 positions ("Pos=" bounds are idx*781).
+    assert_eq!(lines[0], "Hash Dist Overload    = 0");
     assert_eq!(lines[1], "Hash Dist Reliability = 48");
     assert_eq!(
         lines[2],
-        "Hash Dist        0 Pos=         0:         7 Cnt=       0 Rlb=-1"
+        "Hash Dist        0 Pos=         0:       781 Cnt=       0 Rlb=-1"
     );
     assert_eq!(
-        lines[126],
-        "Hash Dist      124 Pos=       868:       875 Cnt=       7 Rlb=1"
+        lines[129],
+        "Hash Dist      127 Pos=     99187:     99968 Cnt=     781 Rlb=1"
     );
-    assert_eq!(lines[130], "Hash Dist Avg/Min/Max/% = 6/0/7/100");
-    assert_eq!(lines[131], "Hash Dist Load           = 865/8388593=0");
+    assert_eq!(lines[130], "Hash Dist Avg/Min/Max/% = 479/0/781/100%");
+    assert_eq!(lines[131], "Hash Dist Load          = 61424/524287=11%");
     fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -429,9 +454,12 @@ fn dmch_leaves_patch_bytes_unchanged() {
 }
 
 /// Every one of the 11 flags is accepted as an option (not a filename) in
-/// debug builds, exercised on the 1000-byte pair. (`-ddst` on a file smaller
-/// than the 128 buckets divides by zero in the C++ too — SIGFPE, verified on
-/// the oracle — so the tiny fixture would crash both implementations.)
+/// debug builds, exercised on the 1000-byte pair — except `-ddst`, which
+/// needs the 100000-byte pair: the 0.8.5 `dist()` Avg/Min/Max guard does not
+/// cover `liMax < 100` (inner `liMax/100` = 0 → C++ SIGFPE, port panics on
+/// the same division), and the 1000-byte pair tops out at `liMax` 7 over 128
+/// buckets. (`-ddst` on a file smaller than the 128 buckets divides by zero
+/// in the fill loop in the C++ too — SIGFPE, verified on the 0.8.1 oracle.)
 #[test]
 fn all_eleven_flags_accepted() {
     let dir = temp_dir("flags");
@@ -441,7 +469,6 @@ fn all_eleven_flags_accepted() {
     let p = dir.join("p.bin");
     for flag in [
         "-dhsh", "-dahd", "-dcmp", "-dprg", "-dbuf", "-dhsk", "-dahh", "-dbkt", "-dred", "-dmch",
-        "-ddst",
     ] {
         let out = Command::new(env!("CARGO_BIN_EXE_jdiff"))
             .args([
@@ -460,5 +487,27 @@ fn all_eleven_flags_accepted() {
             String::from_utf8_lossy(&out.stderr)
         );
     }
+    // -ddst on the 100000-byte pair (liMax 781 >= 100: no SIGFPE path).
+    let mut org = lcg(1, 100_000);
+    let mut new = org.clone();
+    new[250] ^= 0xFF;
+    let a = write_file(&dir.join("a-big.bin"), &org);
+    let b = write_file(&dir.join("b-big.bin"), &new);
+    let out = Command::new(env!("CARGO_BIN_EXE_jdiff"))
+        .args([
+            "-ddst",
+            "-do",
+            a.as_os_str().to_str().unwrap(),
+            b.as_os_str().to_str().unwrap(),
+            p.as_os_str().to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn jdiff");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "-ddst must be an option, not a filename: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     fs::remove_dir_all(&dir).unwrap();
 }

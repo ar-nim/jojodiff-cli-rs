@@ -101,8 +101,10 @@ pub struct JDiff<'a> {
 }
 
 impl<'a> JDiff<'a> {
-    /// Create JDiff for working on the specified files (`JDiff.cpp:83-99`).
+    /// Create JDiff for working on the specified files (`JDiff.cpp:83-124`).
     ///
+    /// `hsh_sze` is the hashtable size in **MB** (0.8.5 `aiHshSze`, passed
+    /// straight to [`JHashPos::new`], which converts MB to elements).
     /// `ahd_max` is raised to at least 1024 (`miAhdMax(aiAhdMax<1024?1024:
     /// aiAhdMax)`); `src_scn` becomes the C++ `miSrcScn` int (false = 0,
     /// true = 1) and is set to 2 by [`JDiff::uf_fnd_ahd`] after the prescan.
@@ -774,6 +776,45 @@ fn uf_fnd_ahd_get(file: &mut dyn JFile, pos: i64, val: &mut i32, eql: &mut i32, 
     }
 }
 
+/// The hash function (`JDiff::hash`, `JDiff.cpp:361-371`): generate a new
+/// hash value by adding a new byte. Old bytes are shifted out from the hash
+/// value in such a way that the new value corresponds to a sample of 32 bytes
+/// (the lowest bit of the 32'th byte still influences the highest bit of the
+/// hash value).
+///
+/// 0.8.5 moved this function from `JHashPos` into `JDiff` and added the
+/// equal-run counter into the value — this alone changes match decisions (and
+/// thus patch bytes) vs 0.8.1 (spec §18.E):
+///
+/// * `old == new`: `eql` increments while it is below `SMPSZE` (capped at 32);
+/// * otherwise the caller's `old` tracker becomes `new` (`acOld = acNew`,
+///   `JDiff.cpp:367` — caller-side state, owned by the Task 17 call sites)
+///   and `eql` resets to 0;
+/// * the result is `(cur*2) + new + eql` ("multiplication by 2 is faster
+///   than `<< 2`", C++ comment).
+///
+/// The engine call sites still use the 0.8.1 `JHashPos::hash` shim until
+/// Task 17 rewires them (controller ruling, option B), so the hash values
+/// feeding the engine are still the pure `*2 + byte` ones; engine outputs
+/// shift in this task only through the 0.8.5 table sizing and quality gate.
+/// This pure function is tested directly.
+pub fn hash_key(cur: u32, old: i32, r#new: i32, eql: &mut i32) -> u32 {
+    if old == r#new {
+        if *eql < SMPSZE {
+            *eql += 1;
+        }
+    } else {
+        // acOld = acNew (JDiff.cpp:367) is caller-side state.
+        if *eql != 0 {
+            // improves performance
+            *eql = 0;
+        }
+    }
+    cur.wrapping_mul(2)
+        .wrapping_add(r#new as u32)
+        .wrapping_add(*eql as u32) // multiplication by 2 is faster than << 2
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -785,6 +826,66 @@ mod tests {
     use std::rc::Rc;
     use std::sync::MutexGuard;
     use std::sync::atomic::Ordering;
+
+    /// `hash_key` (`JDiff::hash`, `JDiff.cpp:361-371`): the equal-run counter
+    /// is added into the hash value, so the key diverges from the 0.8.1 pure
+    /// `*2 + byte` as soon as a second equal byte enters the run (spec
+    /// §18.E). The stream "aaaa" from key 0: the first byte differs from the
+    /// initial `old` (-1) and contributes no eql term; from the second byte
+    /// on, eql counts up and is added.
+    #[test]
+    fn hash_key_adds_eql_term() {
+        let mut eql = 0i32;
+        let mut old = -1i32; // no byte equals -1: the first byte differs
+        let mut k = 0u32;
+        let mut keys = Vec::new();
+        for _ in 0..4 {
+            k = hash_key(k, old, b'a' as i32, &mut eql);
+            old = b'a' as i32; // caller-side `acOld = acNew` (JDiff.cpp:367)
+            keys.push(k);
+        }
+        assert_eq!(keys, vec![97, 292, 683, 1466]);
+        assert_eq!(eql, 3);
+        // The 0.8.1 key of the same stream would be 291 at index 1 — the eql
+        // term is the 0.8.5 divergence vector.
+        assert_ne!(keys[1], 97u32.wrapping_mul(2).wrapping_add(97));
+    }
+
+    /// `hash_key` resets eql to 0 on a differing byte (`JDiff.cpp:368-369`).
+    #[test]
+    fn hash_key_resets_eql_on_differ() {
+        let mut eql = 0i32;
+        let mut old = -1i32;
+        let mut k = 0u32;
+        let mut keys = Vec::new();
+        for b in b"aaxa" {
+            k = hash_key(k, old, i32::from(*b), &mut eql);
+            old = i32::from(*b);
+            keys.push(k);
+        }
+        // 'aa' builds eql 1 (key 292), 'x' resets it: 292*2 + 120 + 0, then
+        // 'a' differs from 'x': 704*2 + 97 + 0.
+        assert_eq!(keys, vec![97, 292, 704, 1505]);
+        assert_eq!(eql, 0);
+    }
+
+    /// `hash_key` caps eql at SMPSZE (`JDiff.cpp:364-365`: only increment
+    /// while `eql < SMPSZE`); once capped the eql term stays 32.
+    #[test]
+    fn hash_key_caps_eql_at_smpsze() {
+        let mut eql = 0i32;
+        let mut old = -1i32;
+        let mut k = 0u32;
+        for _ in 0..40 {
+            k = hash_key(k, old, b'a' as i32, &mut eql);
+            old = b'a' as i32;
+        }
+        assert_eq!(eql, SMPSZE);
+        let before = k;
+        k = hash_key(k, old, b'a' as i32, &mut eql);
+        assert_eq!(k, before.wrapping_mul(2).wrapping_add(97 + SMPSZE as u32));
+        assert_eq!(eql, SMPSZE);
+    }
 
     /// Deterministic pseudo-random filler byte stream (LCG, bits 8..=15),
     /// identical to the C++ oracle harness used to pin the expected sequences
@@ -877,10 +978,12 @@ mod tests {
         }
     }
 
-    /// Engine with the CLI default settings (spec §4), hashtable 65536 — for
-    /// the fixture sizes used here every sample is stored regardless of the
-    /// table prime, so behavior is identical to the 8388608 default (verified
-    /// against the C++ oracle with both sizes).
+    /// Engine with the CLI default settings (spec §4), hashtable 1 MB —
+    /// 65536 elements → prime 65521, the smallest table the 0.8.5 MB ctor
+    /// can build. For the fixture sizes used here every sample is stored
+    /// regardless of the table prime (all-high-quality adds store while
+    /// col_max is 4), so behavior is identical to the larger defaults
+    /// (verified against the C++ oracle with both sizes).
     fn engine<'a>(
         org: Box<dyn JFile + 'a>,
         r#new: Box<dyn JFile + 'a>,
@@ -890,7 +993,7 @@ mod tests {
             org,
             r#new,
             out,
-            65536,
+            1,
             0,
             true,
             true,

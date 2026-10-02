@@ -1,29 +1,57 @@
 //! Sample hash table mapping 32-bit hash keys to 64-bit file positions,
-//! ported 1:1 from C++ `src/JHashPos.cpp` + `headers/JHashPos.h` (spec §7).
+//! ported 1:1 from C++ `src/JHashPos.cpp` + `src/JHashPos.h` 0.8.5 (spec
+//! §18.E).
 //!
 //! Only samples from the original file are stored; samples from the new file
 //! are looked up. There is one slot per bucket: `add` overwrites the bucket
-//! when the collision-credit counter reaches the current threshold, and `get`
-//! is an exact-key match at `key % prime` — there is no probing.
+//! when the down-counting collision counter reaches 0, and `get` is an
+//! exact-key match at `key % prime` — there is no probing.
+//!
+//! # Constructor sizing (0.8.5)
+//!
+//! The 0.8.5 constructor takes the size in **MB** (`JHashPos.cpp:48-61`,
+//! `main.cpp:283` default 32) and converts it to an element count with the
+//! stock LP64 element size `sizeof(hkey) + sizeof(off_t) = 16` (spec §18.E:
+//! default 32 MB → `32*1024*1024/16 = 2097152` elements → prime 2097143 via
+//! [`crate::defs::get_lower_prime`]). The size in bytes (`miHshSze`) stays
+//! the port's actual element footprint `prime * 12` (hkey u32 + off_t i64;
+//! the 32-bit-hkey oracle build's accounting, Part I §4.4).
+//!
+//! # Zero-init deviation (spec §21.5)
+//!
+//! 0.8.5 allocates the table with plain `malloc` and **no** `memset`
+//! (`JHashPos.cpp:65-67`): reading an untouched bucket is C++ UB, and for
+//! the multi-MB tables Linux serves zero pages, so the observable oracle
+//! behavior is that of a zeroed table. This port zero-initializes both
+//! vectors (deterministic, matches the observable behavior); documented in
+//! [`JHashPos::get`]'s zero-bucket answer and pinned by the tests.
+//!
+//! # Interim `hash` shim (controller ruling, option B)
+//!
+//! 0.8.5 moved the hash function out of `JHashPos` into `JDiff::hash`
+//! (`JDiff.cpp:361-371`), ported as the pure function
+//! [`crate::jdiff::hash_key`]. The engine call sites still use this module's
+//! [`JHashPos::hash`] — kept as the 0.8.1 pure `*2 + byte` shim — until
+//! Task 17 rewires them; the DBGHSK "Hash Key" trace site rides along with
+//! the shim (0.8.5 has zero DBGHSK sites; Task 21 owns the site census).
 //!
 //! # Debug prints (spec §14, `debug` feature)
 //!
 //! The `#if debug` sites are ported with their exact C++ format strings:
-//! the constructor's "Hash Ini" line (`JHashPos.cpp:66-72`), the per-store
-//! "Hash Add" lines (`JHashPos.cpp:124-130`), the per-hash "Hash Key" lines
-//! (`JHashPos.h:111-116`) and the audit helpers [`JHashPos::print`] /
-//! [`JHashPos::dist`] (`JHashPos.cpp:163-223`; `print` has no call site in
-//! the C++ — dead-code parity). The "Hash Ini" addresses are printed from the
-//! two vectors' allocations like the C++ `mzHshTblPos`/`mkHshTblHsh` bounds;
-//! as everywhere `%p` values are non-reproducible and only the line shape is
-//! pinned.
+//! the constructor's "Hash Ini" line (`JHashPos.cpp:70-76`), the per-store
+//! "Hash Add" lines (`JHashPos.cpp:127-132`) and the audit helpers
+//! [`JHashPos::print`] / [`JHashPos::dist`] (`JHashPos.cpp:176-238`;
+//! `print` has no call site in the C++ — dead-code parity). The "Hash Ini"
+//! addresses are printed from the two vectors' allocations like the C++
+//! `mzHshTblPos`/`mkHshTblHsh` bounds; as everywhere `%p` values are
+//! non-reproducible and only the line shape is pinned.
 //!
 //! # Example
 //!
 //! ```
 //! use jojodiff_cli_rs::jhashpos::JHashPos;
 //!
-//! let mut tbl = JHashPos::new(65536);
+//! let mut tbl = JHashPos::new(1); // 1 MB: 65536 elements -> prime 65521
 //! let mut key = 0u32;
 //! for b in b"the quick brown fox" {
 //!     tbl.hash(*b as i32, &mut key);
@@ -35,7 +63,7 @@
 //! assert_eq!(pos, 4242);
 //! ```
 
-use crate::defs::{GIPME, SMPSZE};
+use crate::defs::{SMPSZE, get_lower_prime};
 #[cfg(feature = "debug")]
 use crate::jdebug::{DBGHSH, DBGHSK, c_chr, dbg, dbg_print};
 
@@ -49,12 +77,13 @@ pub const COLLISION_HIGH: i32 = 4;
 /// Rate at which low-quality samples should override (`JHashPos.cpp:35`).
 pub const COLLISION_LOW: i32 = 1;
 
-/// Hashtable of file positions for JDiff (`JHashPos.h:88`).
+/// Hashtable of file positions for JDiff (`JHashPos.h:109`).
 ///
-/// The C++ original allocates one block holding the `off_t` and `hkey` arrays
-/// and zero-initializes it with `memset` (`JHashPos.cpp:63-78`); an untouched
-/// bucket therefore answers `get(0)` with `(true, 0)`. The two zeroed vectors
-/// below replicate this exactly.
+/// The C++ 0.8.5 allocates one block with plain `malloc` and no `memset`
+/// (`JHashPos.cpp:65-67`) — reading an untouched bucket is UB there; see the
+/// module doc for the zero-init deviation (spec §21.5). The two zeroed
+/// vectors below make the port deterministic while matching the observable
+/// oracle behavior (Linux zero pages).
 pub struct JHashPos {
     /// Positions within the original file (`mzHshTblPos`).
     tbl_pos: Vec<i64>,
@@ -66,31 +95,44 @@ pub struct JHashPos {
     size_bytes: i32,
     /// Max number of collisions before override (`miHshColMax`).
     col_max: i32,
-    /// Current number of subsequent collisions (`miHshColCnt`).
+    /// Current number of subsequent collisions (`miHshColCnt`); 0.8.5 counts
+    /// this **down** and stores at `<= 0`.
     col_cnt: i32,
     /// Reliability: decreases as the overloading grows (`miHshRlb`).
     rlb: i32,
-    /// Load-counter (`miLodCnt`).
+    /// Load-counter (`miLodCnt`); 0.8.5 starts it at the prime and counts
+    /// **down**.
     load_cnt: i32,
     /// Number of hits found by this hashtable (`miHshHit`).
     hits: i32,
 }
 
 impl JHashPos {
-    /// Create a new hash-table with size not larger than the given size
-    /// (`JHashPos.cpp:45-61`).
+    /// Create a new hash-table with a size (in **MB**) not larger than the
+    /// given size (`JHashPos.cpp:48-82`).
     ///
-    /// The actual size is based on the highest prime below the highest power
-    /// of 2 lower or equal to the specified size, e.g. `8192` creates a
-    /// hashtable of 8191 elements.
-    pub fn new(requested: i32) -> Self {
-        let mut idx = 0usize;
-        while idx < 19 && GIPME[idx] > requested {
-            idx += 1;
-        }
-        let prime = GIPME[idx];
-        // miHshSze = prime * (sizeof(off_t) + sizeof(hkey)) on the 64-bit
-        // off_t / 32-bit hkey build = prime * (8 + 4).
+    /// The MB count converts to an element count with the stock LP64 element
+    /// size 16 — `mb * 1024 * 1024 / 16` (`JHashPos.cpp:58-59` divides by
+    /// `sizeof(hkey) + sizeof(off_t)`; spec §18.E: default 32 MB → 2097152
+    /// elements) — and the actual prime is the nearest lower prime
+    /// ([`get_lower_prime`], `JDefs.cpp:53-67`). `aiSze < 1` behaves like 1
+    /// (`JHashPos.cpp:54-57`).
+    ///
+    /// Initial state (`JHashPos.cpp:49-50,68`): `col_max = col_cnt =
+    /// COLLISION_THRESHOLD` (4), reliability seed `SMPSZE + SMPSZE/2` (48 at
+    /// the port's SMPSZE 32, spec §21.9), load counter at the prime, hits 0.
+    ///
+    /// MB values above 32767 overflow the C++ `int` element count (undefined
+    /// behavior); the port computes in i64 and clamps to `i32::MAX` for
+    /// determinism.
+    pub fn new(mb: i32) -> Self {
+        /* get largest prime < elements (JHashPos.cpp:53-61) */
+        let sze: i64 = if mb < 1 { 1 } else { i64::from(mb) };
+        let elements = (sze * 1024 * 1024 / 16).min(i64::from(i32::MAX)) as i32;
+        let prime = get_lower_prime(elements);
+
+        // miHshSze = prime * (sizeof(off_t) + sizeof(hkey)) on the port's
+        // 64-bit off_t / 32-bit hkey build = prime * (8 + 4).
         let size_bytes = prime * 12;
         let tbl = JHashPos {
             tbl_pos: vec![0i64; prime as usize],
@@ -99,13 +141,13 @@ impl JHashPos {
             size_bytes,
             col_max: COLLISION_THRESHOLD,
             col_cnt: COLLISION_THRESHOLD,
-            rlb: 48,
-            load_cnt: 0,
+            rlb: SMPSZE + SMPSZE / 2,
+            load_cnt: prime, // miLodCnt = miHshPme (JHashPos.cpp:68)
             hits: 0,
         };
 
         /* Debug: allocation bounds like the C++ `mzHshTblPos` /
-         * `mkHshTblHsh` start/end pointers (JHashPos.cpp:66-72); `%p` values
+         * `mkHshTblHsh` start/end pointers (JHashPos.cpp:70-76); `%p` values
          * are non-reproducible, only the shape is pinned. */
         #[cfg(feature = "debug")]
         if dbg(DBGHSH) {
@@ -128,14 +170,23 @@ impl JHashPos {
         tbl
     }
 
-    /// The hash function: generate a new hash value by adding a new byte
-    /// (`JHashPos.h:109-117`). Old bytes are shifted out in such a way that
-    /// the value corresponds to a sample of 32 bytes; the u32 arithmetic
-    /// wraps exactly like the 32-bit C++ `hkey` of the oracle build.
+    /// Interim engine shim for the 0.8.1 hash (`JHashPos.h:109-117`): the
+    /// value corresponds to a sample of 32 bytes, the u32 arithmetic wraps
+    /// exactly like the 32-bit C++ `hkey` of the oracle build.
+    ///
+    /// 0.8.5 has no `JHashPos::hash` — the function moved to `JDiff::hash`
+    /// (`JDiff.cpp:361-371`), ported as [`crate::jdiff::hash_key`] which adds
+    /// the equal-run counter into the value. The engine call sites still
+    /// call this shim until Task 17 rewires them (controller ruling, option
+    /// B), so the hash values feeding the engine stay the 0.8.1 pure
+    /// `*2 + byte`; engine outputs still shift in this task through the
+    /// 0.8.5 table sizing and quality gate. The DBGHSK trace rides along
+    /// (0.8.5 has no DBGHSK site here; Task 21 owns the site census).
     pub fn hash(&self, byte: i32, cur: &mut u32) {
         *cur = cur.wrapping_mul(2).wrapping_add(byte as u32);
 
-        /* Debug: hash-function trace (JHashPos.h:111-116). */
+        /* Debug: 0.8.1 hash-function trace (JHashPos.h:111-116), kept only
+         * while the shim is live. */
         #[cfg(feature = "debug")]
         if dbg(DBGHSK) {
             dbg_print(format_args!(
@@ -147,21 +198,24 @@ impl JHashPos {
         }
     }
 
-    /// Hashtable add (`JHashPos.cpp:96-137`).
+    /// Hashtable add (`JHashPos.cpp:99-139`).
     ///
     /// `key`: hash key to add, `pos`: position to add, `eql_cnt`: quality of
-    /// the sample (equal-character count; `<= SMPSZE - 4` counts as high
-    /// quality).
+    /// the sample (equal-character count; `<= SMPSZE * 2` counts as high
+    /// quality — the 0.8.1 gate was `SMPSZE - 4`; the low-quality branch is
+    /// unreachable from the engine because the hash caps `eql` at SMPSZE,
+    /// ported as written, spec §21.13).
     pub fn add(&mut self, key: u32, pos: i64, eql_cnt: i32) {
         // Every time the load factor increases by 1:
         // - increase col_max: the ratio at which we store values to achieve a
         //   uniform distribution of samples,
         // - increase rlb: the number of bytes to verify (reliability range)
         //   to be sure there is no match.
-        if self.load_cnt < self.prime {
-            self.load_cnt += 1;
+        // 0.8.5 counts the load down from the prime (`JHashPos.cpp:68,104-110`).
+        if self.load_cnt > 0 {
+            self.load_cnt -= 1;
         } else {
-            self.load_cnt = 0;
+            self.load_cnt = self.prime;
             self.col_max += COLLISION_THRESHOLD;
             self.rlb += 4; // try to keep a reliability of +/- 99%
         }
@@ -169,20 +223,21 @@ impl JHashPos {
         // Increase the collision strategy counter:
         // - HIGH for "good" samples,
         // - LOW for low-quality samples.
-        if eql_cnt <= SMPSZE - 4 {
-            self.col_cnt += COLLISION_HIGH;
+        // 0.8.5 counts down (`JHashPos.cpp:116-119`) and stores at `<= 0`.
+        if eql_cnt <= SMPSZE * 2 {
+            self.col_cnt -= COLLISION_HIGH;
         } else {
-            self.col_cnt += COLLISION_LOW; // reduce overrides by low-quality samples
+            self.col_cnt -= COLLISION_LOW; // reduce overrides by low-quality samples
         }
 
         // Store key and value when the collision counter reaches the
         // collision threshold.
-        if self.col_cnt >= self.col_max {
+        if self.col_cnt <= 0 {
             // Calculate the index in the hashtable for the given key.
             let idx = (key % self.prime as u32) as usize;
 
             /* Debug: per-store trace, before the store like the C++
-             * (JHashPos.cpp:124-130); `%c` is `.` for an empty bucket, `!`
+             * (JHashPos.cpp:127-132); `%c` is `.` for an empty bucket, `!`
              * for an override. */
             #[cfg(feature = "debug")]
             if dbg(DBGHSH) {
@@ -197,12 +252,26 @@ impl JHashPos {
 
             self.tbl_hsh[idx] = key;
             self.tbl_pos[idx] = pos;
-            self.col_cnt = 0; // reset subsequent lost collisions counter
+            self.col_cnt = self.col_max; // reset subsequent lost collisions counter
         }
     }
 
-    /// Hashtable lookup (`JHashPos.cpp:145-158`): exact-key match at
-    /// `key % prime` only; increments the hit counter on match.
+    /// Hashtable reset: consider the table to be empty
+    /// (`JHashPos::reset`, `JHashPos.cpp:144-149`).
+    ///
+    /// The C++ declares this method but never calls it — dead-code parity
+    /// (spec §21.13); kept public in matching dead form.
+    pub fn reset(&mut self) {
+        self.load_cnt = self.prime;
+        self.col_max = COLLISION_THRESHOLD;
+        self.col_cnt = COLLISION_THRESHOLD;
+        self.rlb = SMPSZE + SMPSZE / 2;
+    }
+
+    /// Hashtable lookup (`JHashPos.cpp:158-171`): exact-key match at
+    /// `key % prime` only; increments the hit counter on match. On a
+    /// zero-filled untouched bucket (`key == 0`) this answers `(true, 0)` —
+    /// the C++ UB reads zero pages in practice (spec §21.5 deviation).
     pub fn get(&mut self, key: u32, pos: &mut i64) -> bool {
         // Calculate the index in the hashtable for the given key.
         let idx = (key % self.prime as u32) as usize;
@@ -267,29 +336,34 @@ impl JHashPos {
     }
 
     /// Print the hashtable distribution over `bck` buckets
-    /// (`JHashPos::dist`, `JHashPos.cpp:176-223`); `max` is the largest
-    /// position to find. Debug builds only; called from the prescan under
-    /// DBGDST (`JDiff.cpp:574-577`).
+    /// (`JHashPos::dist`, `JHashPos.cpp:192-238`); `max` is the largest
+    /// position to find. Debug builds only; the 0.8.5 engine call sites are
+    /// `JDiff.cpp:324-327,784-787` (verbose>2, 10 buckets) — this port's
+    /// legacy DBGDST call site stays until Task 17 rewires it.
     ///
-    /// The C++ quirks are preserved: positions beyond the last bucket are
+    /// The 0.8.5 quirks are preserved: positions beyond the last bucket are
     /// *not* counted (`liIdx >= aiBck` only assigns `liIdx = 0`, the increment
-    /// is in the `else`), and the `Avg/Min/Max` line divides by `liMax`
-    /// without a zero check — on an empty distribution the C++ dies with
-    /// SIGFPE, this port panics on the same division. (For files smaller than
-    /// the bucket count the divisor `liHshDiv` is 0 as well; the prescan of
-    /// such files stores nothing, so the fill loop never divides.)
+    /// is in the `else`), `Overload` is `colMax/COLLISION_THRESHOLD - 1`
+    /// (`:202`), and the summary lines use the 0.8.5 guarded formulas
+    /// `Avg/Min/Max/%` = `liMax > 0 ? 100 - (liMin / (liMax / 100)) : -1`
+    /// and `Load` = `miHshPme > 0 ? liCnt / (miHshPme / 100) : -1` — both
+    /// print a literal `%`. The guards only cover the zero cases: when
+    /// `0 < liMax < 100` the inner `liMax / 100` is 0 and the C++ dies with
+    /// SIGFPE (integer division by zero); this port panics on the same
+    /// division. (0.8.5's own call sites pass 10 buckets over positions well
+    /// above 1000, so the shipped binary never reaches it.)
     #[cfg(feature = "debug")]
     pub fn dist(&self, max: i64, bck: i32) {
         dbg_print(format_args!(
             "Hash Dist Overload    = {}\n",
-            self.col_max / 3
+            self.col_max / COLLISION_THRESHOLD - 1
         ));
         dbg_print(format_args!("Hash Dist Reliability = {}\n", self.rlb));
 
         // Bucket counters (the C++ mallocs aiBck ints and memsets them).
         let mut bck_cnt = vec![0i32; bck as usize];
 
-        // Fill the buckets (JHashPos.cpp:195-209).
+        // Fill the buckets (JHashPos.cpp:210-221).
         let div = (max / i64::from(bck)) as i32;
         for idx in 0..self.prime as usize {
             if self.tbl_pos[idx] > 0 && self.tbl_pos[idx] <= max {
@@ -302,7 +376,7 @@ impl JHashPos {
             }
         }
 
-        // Printout (JHashPos.cpp:212-222).
+        // Printout (JHashPos.cpp:224-236).
         let mut sum: i32 = 0;
         let mut min = i32::MAX;
         let mut max_cnt: i32 = 0;
@@ -324,17 +398,25 @@ impl JHashPos {
             ));
         }
         dbg_print(format_args!(
-            "Hash Dist Avg/Min/Max/% = {}/{}/{}/{}\n",
+            "Hash Dist Avg/Min/Max/% = {}/{}/{}/{}%\n",
             sum / bck,
             min,
             max_cnt,
-            100 - (min * 100 / max_cnt),
+            if max_cnt > 0 {
+                100 - (min / (max_cnt / 100))
+            } else {
+                -1
+            },
         ));
         dbg_print(format_args!(
-            "Hash Dist Load           = {}/{}={}\n",
+            "Hash Dist Load          = {}/{}={}%\n",
             sum,
             self.prime,
-            i64::from(sum) * 100 / i64::from(self.prime)
+            if self.prime > 0 {
+                sum / (self.prime / 100)
+            } else {
+                -1
+            },
         ));
     }
 }
@@ -342,30 +424,116 @@ impl JHashPos {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
-    /// Prime selection loop (`JHashPos.cpp:58-61` with loop bound 19).
+    /// MB ctor → elements `mb*1024*1024/16` → [`get_lower_prime`] (spec
+    /// §18.E, `JHashPos.cpp:53-61` with the stock LP64 element size
+    /// `sizeof(hkey)+sizeof(off_t) = 16`); `aiSze < 1` behaves like 1
+    /// (`JHashPos.cpp:54-57`).
     #[test]
-    fn prime_selection() {
-        assert_eq!(JHashPos::new(8 * 1024 * 1024).hash_prime(), 8388593);
-        assert_eq!(JHashPos::new(8388593).hash_prime(), 8388593);
-        assert_eq!(JHashPos::new(8388592).hash_prime(), 4194301);
-        assert_eq!(JHashPos::new(1).hash_prime(), 251); // floor
-        assert_eq!(JHashPos::new(0).hash_prime(), 251);
-        assert_eq!(JHashPos::new(i32::MAX).hash_prime(), 134217689); // ceiling
+    fn prime_selection_mb_ctor() {
+        assert_eq!(JHashPos::new(32).hash_prime(), 2097143); // 0.8.5 default MB
+        assert_eq!(JHashPos::new(8).hash_prime(), 524287); // current CLI default
+        assert_eq!(JHashPos::new(2).hash_prime(), 131071);
+        assert_eq!(JHashPos::new(1).hash_prime(), 65521); // floor at mb >= 1
+        assert_eq!(JHashPos::new(0).hash_prime(), 65521); // aiSze < 1 -> 1 MB
+        assert_eq!(JHashPos::new(-3).hash_prime(), 65521);
+        // Element counts landing on get_lower_prime's switch cases
+        // (`JDefs.cpp:55-60`): 128 MB -> 8M elements, 256 MB -> 16M.
+        assert_eq!(JHashPos::new(128).hash_prime(), 8388593);
+        assert_eq!(JHashPos::new(256).hash_prime(), 16777213);
+        // Size in bytes stays prime * 12 (port hkey u32 + off_t i64).
+        assert_eq!(JHashPos::new(32).hash_size_bytes(), 25165716);
+        assert_eq!(JHashPos::new(8).hash_size_bytes(), 6291444);
     }
 
-    /// `hash` multiplies by 2 and adds the byte, wrapping on u32
-    /// (`JHashPos.h:111`).
+    /// The table is zero-initialized (spec §21.5 deviation: 0.8.5 `malloc`s
+    /// without `memset`, Rust zero-fills for determinism): an untouched
+    /// bucket answers `get(0)` with `(true, 0)`.
     #[test]
-    fn hash_wraps_u32() {
-        let tbl = JHashPos::new(251);
-        let mut h = 0u32;
-        let mut k = 0u32;
-        for b in 0u32..300 {
-            tbl.hash(b as i32, &mut h);
-            k = k.wrapping_mul(2).wrapping_add(b);
+    fn zero_initialized_table() {
+        let mut tbl = JHashPos::new(1);
+        let mut pos = -1i64;
+        assert!(tbl.get(0, &mut pos));
+        assert_eq!(pos, 0);
+    }
+
+    /// Down-counting collision counter (`JHashPos.cpp:49,116-137`): col_cnt
+    /// starts at col_max 4, a high-quality add decrements by COLLISION_HIGH
+    /// and stores at `<= 0`, resetting col_cnt to col_max — so with col_max
+    /// 4 the first high-quality add stores immediately and every further
+    /// high-quality add stores as well.
+    #[test]
+    fn down_counter_store_cadence() {
+        let mut tbl = JHashPos::new(1);
+        let mut pos = 0i64;
+
+        tbl.add(10, 100, 0); // 4 - 4 = 0 <= 0: stored, col_cnt reset to 4
+        assert!(tbl.get(10, &mut pos));
+        assert_eq!(pos, 100);
+
+        // Overwrite semantics on the same bucket (65531 % 65521 == 10): the
+        // exact-key lookup answers the new key only.
+        tbl.add(65531, 200, 0);
+        assert!(tbl.get(65531, &mut pos));
+        assert_eq!(pos, 200);
+        assert!(!tbl.get(10, &mut pos)); // key 10 was overwritten
+
+        // Quality gate at SMPSZE * 2 = 64 (`JHashPos.cpp:116`): eql_cnt 64
+        // is still high quality (the 0.8.1 gate was SMPSZE - 4 = 28).
+        let mut hi = JHashPos::new(1);
+        hi.add(10, 100, 64);
+        assert!(hi.get(10, &mut pos));
+        assert_eq!(pos, 100);
+
+        // A low-quality add (eql_cnt 65 > 64) decrements by COLLISION_LOW 1:
+        // on a fresh table 4 - 1 = 3 > 0, so it does NOT store (0.8.1's
+        // up-counter stored the first low-quality add: 4 + 1 = 5 >= 4). Four
+        // low-quality adds reach 0: 3, 2, 1, 0.
+        let mut lo = JHashPos::new(1);
+        lo.add(10, 100, 65);
+        assert!(!lo.get(10, &mut pos));
+        lo.add(10, 101, 65);
+        assert!(!lo.get(10, &mut pos));
+        lo.add(10, 102, 65);
+        assert!(!lo.get(10, &mut pos));
+        lo.add(10, 103, 65); // 0 <= 0: stored
+        assert!(lo.get(10, &mut pos));
+        assert_eq!(pos, 103);
+    }
+
+    /// Down-counting load counter (`JHashPos.cpp:68,104-110`): load_cnt
+    /// starts at the prime, counts down, and the rollover add resets it to
+    /// the prime while raising col_max and rlb by 4.
+    #[test]
+    fn load_rollover_counts_down() {
+        let mut tbl = JHashPos::new(1);
+        assert_eq!(tbl.reliability(), SMPSZE + SMPSZE / 2); // seed 48
+        assert_eq!(tbl.hash_colmax(), 4);
+
+        // The first 65521 adds (prime 65521) take load_cnt down to 0 without
+        // rolling over.
+        for i in 0..65521u32 {
+            tbl.add(i, i64::from(i), 0);
         }
-        assert_eq!(h, k);
+        assert_eq!(tbl.hash_colmax(), 4);
+        assert_eq!(tbl.reliability(), 48);
+
+        // The 65522nd add finds load_cnt 0: resets it to the prime and does
+        // col_max += 4, rlb += 4.
+        tbl.add(65521, 65521, 0);
+        assert_eq!(tbl.hash_colmax(), 8);
+        assert_eq!(tbl.reliability(), 52);
+
+        // At col_max 8 the high-quality cadence is every other add: the
+        // store reset refills col_cnt to 8, the next add decrements to
+        // 4 (> 0, lost), the one after to 0 (stored).
+        let mut pos = 0i64;
+        tbl.add(70000, 1, 0); // 8 - 4 = 4 > 0: lost
+        assert!(!tbl.get(70000, &mut pos));
+        tbl.add(70001, 2, 0); // 4 - 4 = 0: stored
+        assert!(tbl.get(70001, &mut pos));
+        assert_eq!(pos, 2);
     }
 
     /// Adds 32-byte-window keys (as the diff engine samples files), then
@@ -373,12 +541,12 @@ mod tests {
     /// overwritten and absent keys.
     #[test]
     fn add_then_get_roundtrip_and_hits() {
-        const PRIME: u32 = 251;
-        let mut tbl = JHashPos::new(PRIME as i32);
+        const PRIME: u32 = 65521;
+        let mut tbl = JHashPos::new(1);
         let mut pos = -1i64;
 
-        // The C++ table is zero-initialized (memset, `JHashPos.cpp:78`): an
-        // untouched bucket answers get(0) with (true, 0). Replicated 1:1.
+        // The table is zero-initialized (spec §21.5): an untouched bucket
+        // answers get(0) with (true, 0). Replicated 1:1.
         assert!(tbl.get(0, &mut pos));
         assert_eq!(pos, 0);
 
@@ -405,33 +573,23 @@ mod tests {
             keys.push(key);
         }
 
-        // Spec-derived oracle (spec §7 = `JHashPos.cpp:96-137`): every add
-        // counts toward the load (rollover every 252nd add raises col_max by
-        // 4), a high-quality add adds 4 collision credit, and a store
-        // overwrites bucket key % 251 when the credit reaches col_max.
-        let mut col_max = 4;
-        let mut col_cnt = 4;
-        let mut load_cnt = 0;
+        // 0.8.5 oracle (`JHashPos.cpp:99-138`): col_cnt starts at col_max 4,
+        // every high-quality add decrements to 0 and stores, resetting
+        // col_cnt to col_max; with 1000 adds there is no load rollover
+        // (prime 65521), so every add stores into bucket key % prime.
         let mut oracle_key = [0u32; PRIME as usize];
         let mut oracle_pos = [0i64; PRIME as usize];
-        let mut stores = 0usize;
         for (p, &k) in keys.iter().enumerate() {
-            if load_cnt < PRIME as i32 {
-                load_cnt += 1;
-            } else {
-                load_cnt = 0;
-                col_max += 4;
-            }
-            col_cnt += 4; // eql_cnt = 0 <= SMPSZE - 4
-            if col_cnt >= col_max {
-                let idx = (k % PRIME) as usize;
-                oracle_key[idx] = k;
-                oracle_pos[idx] = p as i64;
-                col_cnt = 0;
-                stores += 1;
-            }
+            let idx = (k % PRIME) as usize;
+            oracle_key[idx] = k;
+            oracle_pos[idx] = p as i64;
         }
-        assert!(stores < 1000); // overwrites really occurred
+        let occupied = keys
+            .iter()
+            .map(|&k| k % PRIME)
+            .collect::<HashSet<_>>()
+            .len();
+        assert!(occupied < 1000); // overwrites really occurred
 
         // Every lookup answers exactly per the oracle, and the hit counter
         // matches (including the get(0) above).
@@ -452,77 +610,19 @@ mod tests {
         assert!(!tbl.get(u32::MAX, &mut pos));
     }
 
-    /// Quality credit (`eql_cnt <= 28 ? 4 : 1`), overwrite semantics, and the
-    /// load-counter rollover (`JHashPos.cpp:101-135`).
+    /// The interim engine shim: 0.8.1's `JHashPos::hash` (`*2 + byte`,
+    /// wrapping on u32) which the engine keeps using until Task 17 rewires
+    /// the call sites to [`crate::jdiff::hash_key`] (controller ruling,
+    /// option B).
     #[test]
-    fn quality_and_load_counters() {
-        let mut tbl = JHashPos::new(251);
-        let mut pos = 0i64;
-
-        // High-quality sample (eql_cnt <= 28): initial col_cnt 4 + 4 = 8
-        // >= col_max 4, so it stores on the first add.
-        tbl.add(10, 100, 0);
-        assert!(tbl.get(10, &mut pos));
-        assert_eq!(pos, 100);
-
-        // Overwrite semantics on the same bucket with a different key:
-        // 261 % 251 == 10, but the exact-key lookup only answers key 261
-        // while bucket 10 holds it.
-        tbl.add(261, 200, 0);
-        assert!(tbl.get(261, &mut pos));
-        assert_eq!(pos, 200);
-        assert!(!tbl.get(10, &mut pos)); // key 10 was overwritten
-
-        // Low-quality sample (eql_cnt = 32 > 28): +1 credit only. On a fresh
-        // table the initial col_cnt 4 gives 4 + 1 = 5 >= 4, so the first
-        // low-quality add stores too; col_cnt then resets and three further
-        // low-quality adds are lost until the fourth one reaches col_max 4.
-        let mut lo = JHashPos::new(251);
-        lo.add(261, 300, 32); // 5 >= 4: stored
-        assert!(lo.get(261, &mut pos));
-        assert_eq!(pos, 300);
-        lo.add(261, 301, 32); // 1 < 4: lost
-        lo.add(261, 302, 32); // 2 < 4: lost
-        lo.add(261, 303, 32); // 3 < 4: lost
-        assert!(lo.get(261, &mut pos));
-        assert_eq!(pos, 300);
-        lo.add(261, 304, 32); // 4 >= 4: stored
-        assert!(lo.get(261, &mut pos));
-        assert_eq!(pos, 304);
-
-        // Load-counter rollover: every add counts, stored or not. After 251
-        // adds load_cnt equals prime 251; the next add (the 252nd) resets it
-        // and raises col_max 4 -> 8 and reliability 48 -> 52.
-        let mut roll = JHashPos::new(251);
-        for i in 0u32..251 {
-            roll.add(i, i64::from(i), 32); // mostly lost, still counted
+    fn hash_shim_wraps_u32() {
+        let tbl = JHashPos::new(1);
+        let mut h = 0u32;
+        let mut k = 0u32;
+        for b in 0u32..300 {
+            tbl.hash(b as i32, &mut h);
+            k = k.wrapping_mul(2).wrapping_add(b);
         }
-        assert_eq!(roll.hash_colmax(), 4);
-        assert_eq!(roll.reliability(), 48);
-        roll.add(0, 0, 32); // 252nd add: rollover
-        assert_eq!(roll.hash_colmax(), 8);
-        assert_eq!(roll.reliability(), 52);
-    }
-
-    /// Initial reliability 48 (`JHashPos.cpp:55-56`), growing by 4 on every
-    /// load-counter rollover (`JHashPos.cpp:106`); with prime 251 the
-    /// rollover fires on the 252nd, 504th, ... add.
-    #[test]
-    fn reliability_grows_by_4() {
-        let mut tbl = JHashPos::new(251);
-        assert_eq!(tbl.reliability(), 48);
-        assert_eq!(tbl.hash_colmax(), 4);
-
-        for i in 0u32..252 {
-            tbl.add(i, i64::from(i), 0);
-        }
-        assert_eq!(tbl.reliability(), 52);
-        assert_eq!(tbl.hash_colmax(), 8);
-
-        for i in 252u32..504 {
-            tbl.add(i, i64::from(i), 0);
-        }
-        assert_eq!(tbl.reliability(), 56);
-        assert_eq!(tbl.hash_colmax(), 12);
+        assert_eq!(h, k);
     }
 }

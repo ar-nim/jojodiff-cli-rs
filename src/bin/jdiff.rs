@@ -323,7 +323,11 @@ fn real_main() -> i32 {
         reader_org,
         reader_new,
         jout,
-        o.hsh_mbt.wrapping_mul(1024).wrapping_mul(1024),
+        // Hashtable size in MB (0.8.5 `main.cpp:819` passes liHshMbt, the
+        // option-parsed MB count, straight through; `JDiff.cpp:87` ->
+        // `JHashPos::new` converts MB to elements). The -s/-i parsing and
+        // the 0.8.5 default of 32 MB are Task 20's.
+        o.hsh_mbt,
         o.verbose,
         o.src_bkt,
         o.src_scn != 0,
