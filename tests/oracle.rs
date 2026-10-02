@@ -2,9 +2,15 @@
 //! port plan Task 12, re-pointed to the 0.8.5 oracle in Task 20, golden85
 //! layer regenerated in Task 22).
 //!
-//! Four layers, in order of strictness:
+//! Four layers (one numbering everywhere — README, CONTRIBUTING, here):
 //!
-//! 1. **Golden byte-compare** (runs everywhere): the Rust `jdiff` output
+//! 1. **Round-trip gate** (runs everywhere, spec §22.1): `jdiff OPTS A B p &&
+//!    jdiff -u A p out` restores B byte-exact across the whole matrix, plus
+//!    the francisdb cross-validation (§16.4: the third-party `jojodiff` crate
+//!    applies the Rust-produced patches of the NUL-free text pair — its
+//!    reader defaults the operator to MOD, the 0.8.5 reader semantics, so
+//!    implicit-MOD patches apply).
+//! 2. **Golden byte-compare** (runs everywhere): the Rust `jdiff` output
 //!    must be byte-identical to the committed 0.8.5-oracle goldens under
 //!    `tests/fixtures/golden85/<pair>/<optset>.*` — patches, `-l`/`-r`
 //!    listings, and `-vv` stderr with the one run-dependent stats line
@@ -13,21 +19,17 @@
 //!    un-overridden oracle defaults (port and oracle build identical index
 //!    tables since §21.18: 12 bytes/element on both sides). The 0.8.1
 //!    goldens under `tests/fixtures/golden/` are never compared here — they
-//!    re-pin the cross-version gate (tests/crossver.rs, §22.3).
-//! 2. **Live-oracle byte-compare** (auto-skips): when the compiled C++ 0.8.5
+//!    re-pin the cross-version gate (tests/crossver.rs, layer 3, §22.3).
+//! 3. **Cross-version gate** (runs everywhere): every committed 0.8.1 golden
+//!    patch applies with `jdiff -u` and an argv[0]=`jptch` copy and restores
+//!    byte-exact (tests/crossver.rs, §22.3).
+//! 4. **Live-oracle byte-compare** (auto-skips): when the compiled C++ 0.8.5
 //!    reference is present (`$JOJODIFF_ORACLE`, else `target/oracle/jdiff`
 //!    from `scripts/build-oracle.sh`), the Rust and C++ binaries are compared
 //!    directly: patch bytes and `-l`/`-r` listings across the §22.1 matrix on
 //!    the tiny pair and the corpus pairs, verbose stderr with the one
 //!    documented port deviation masked, and cross-applied patches
 //!    (`jdiff -u` on both sides).
-//! 3. **Round-trip gate** (runs everywhere, spec §22.1): `jdiff OPTS A B p &&
-//!    jdiff -u A p out` restores B byte-exact across the whole matrix (one
-//!    binary; argv[0] equivalents are covered in tests/roundtrip.rs).
-//! 4. **francisdb cross-validation** (runs everywhere, spec §16.4): the
-//!    third-party `jojodiff` crate applies the Rust-produced patches of the
-//!    NUL-free text pair (its reader defaults the operator to MOD — the
-//!    0.8.5 reader semantics — so implicit-MOD patches apply).
 //!
 //! The bundled corpus (`bkocomu.0000.fil`/`bkocomu.0009.fil`, ~1.8 MB binary
 //! with NULs; `test2.001.txt`/`test2.002.txt`, CRLF text) is vendored
@@ -204,7 +206,7 @@ fn assert_exit1(out: &Output, what: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// Layer 1: golden85 byte-compare (runs everywhere; goldens are committed)
+// Layer 2: golden85 byte-compare (runs everywhere; goldens are committed)
 // ---------------------------------------------------------------------------
 
 /// The only masked line of the golden85 verbose gate. The C++ never
@@ -320,7 +322,7 @@ fn golden85_verbose_stderr_matches() {
 }
 
 // ---------------------------------------------------------------------------
-// Layer 2: live-oracle byte-compare (auto-skips without the 0.8.5 oracle)
+// Layer 4: live-oracle byte-compare (auto-skips without the 0.8.5 oracle)
 // ---------------------------------------------------------------------------
 
 fn skip_message() -> &'static str {
@@ -348,9 +350,10 @@ fn mask_deviation_lines(stderr: &str) -> String {
 
 /// Direct Rust-vs-C++ 0.8.5 comparison across the §22.1 matrix:
 /// - tiny pair: patch/listing bytes and exit codes byte-exact on every set;
-/// - corpus pairs: patch/listing bytes byte-exact (port and oracle build
-///   identical index tables, spec §21.18) plus mutual round-trip (both
-///   patches restore the new file through their own `-u`).
+/// - corpus pairs: patch and listing bytes byte-exact on every set (port and
+///   oracle build identical index tables, spec §21.18 — including the ~80 MB
+///   bkocomu `-l` listing that is not a committed golden); appliable patches
+///   additionally round-trip through each binary's own `-u`.
 #[test]
 fn live_oracle_jdiff_matches() {
     let Some(oracle) = oracle_dir() else {
@@ -392,22 +395,25 @@ fn live_oracle_jdiff_matches() {
     }
     fs::remove_dir_all(&tdir).expect("clean temp dir");
 
-    // Corpus pairs: byte-compare every set's output and round-trip it
-    // through each binary's own `-u`.
+    // Corpus pairs: byte-compare every set's output (patch sets AND the
+    // `-l`/`-r` listings, including the ~80 MB bkocomu `-l` that is not a
+    // committed golden); appliable patches additionally round-trip through
+    // each binary's own `-u` (listings are diagnostics no patcher applies,
+    // spec §21.16).
     for (pair, org, new) in PAIRS {
         let new_bytes = fs::read(fixture(new)).expect("read new file");
-        for (name, opts, _) in OPTION_SETS {
+        for (name, opts, ext) in OPTION_SETS {
             let mut outs: Vec<(PathBuf, Output, PathBuf)> = Vec::new();
             for (tag, exe) in [("cpp", &oracle_jdiff), ("rs", &rust_jdiff)] {
                 let dir = temp_dir(&format!("live-{pair}-{name}-{tag}"));
-                let patch = dir.join("patch.jdf");
+                let output = dir.join("output.bin");
                 let outp = run_in(
                     &dir,
                     exe,
-                    &jdiff_args(opts, &fixture(org), &fixture(new), &patch),
+                    &jdiff_args(opts, &fixture(org), &fixture(new), &output),
                 );
                 assert_exit1(&outp, &format!("{tag} jdiff {pair}/{name}"));
-                outs.push((dir, outp, patch));
+                outs.push((dir, outp, output));
             }
             let (dir_cpp, _, file_cpp) = outs.remove(0);
             let (dir_rs, _, file_rs) = outs.remove(0);
@@ -416,6 +422,11 @@ fn live_oracle_jdiff_matches() {
                 fs::read(&file_cpp).expect("cpp output"),
                 "Rust and C++ jdiff diverge for {pair}/{name}"
             );
+            if *ext != "jdf" {
+                fs::remove_dir_all(&dir_cpp).expect("clean temp dir");
+                fs::remove_dir_all(&dir_rs).expect("clean temp dir");
+                continue;
+            }
             for (dir, exe, patch) in [
                 (dir_rs, &rust_jdiff, file_rs),
                 (dir_cpp, &oracle_jdiff, file_cpp),
@@ -521,7 +532,8 @@ fn live_oracle_patch_cross_applies() {
 }
 
 // ---------------------------------------------------------------------------
-// Layer 3: round-trip gate (runs everywhere, spec §22.1)
+// Layer 1: round-trip gate (runs everywhere, spec §22.1) — the optional
+// 0.8.1-oracle gate of §22.1 follows in the same layer
 // ---------------------------------------------------------------------------
 
 /// `jdiff OPTS a b p && jdiff -u a p out` restores b byte-exact for every
@@ -656,7 +668,7 @@ fn oracle_081_applies_compat_081_patches() {
 }
 
 // ---------------------------------------------------------------------------
-// Layer 4: francisdb cross-validation (runs everywhere, spec §16.4)
+// Layer 1 (continued): francisdb cross-validation (runs everywhere, §16.4)
 // ---------------------------------------------------------------------------
 
 /// The third-party `jojodiff` crate (v0.1.2) applies the Rust-produced
