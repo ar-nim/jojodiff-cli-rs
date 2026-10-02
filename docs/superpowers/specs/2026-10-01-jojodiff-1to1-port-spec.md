@@ -1032,9 +1032,14 @@ upstream option matrix informs §22's test matrix. The de-facto changelog is the
 3. **`-t`/`--test` ported faithfully although broken upstream.** Release semantics:
    after diffing, JPatcht is fed the **destination** file as the patch, appending
    misparsed data to the already-written patch output (observed: 283-byte corrupt output,
-   exit 0). Under the `debug` feature the `JFileAhead::getbuf` invariant assert fires →
-   exit 6 (`JFileAhead::getbuf(New,-1,1,0)-> ... failed !`). `liTst` is parsed and never
-   used — replicate. Documented in README as upstream-broken.
+   exit 0). `liTst` is parsed and never used — replicate. Documented in README as
+   upstream-broken. [Amended 2026-10-02 during Task 20: the original ruling added
+   "under the `debug` feature the `JFileAhead::getbuf` invariant assert fires → exit 6" —
+   that path is unreachable in the port: fresh input re-open (deviation §21.2's
+   single-binary wiring) never recreates the mid-cursor −1 position that trips the C++
+   assert, and even a negative read hits the §21.17 EOF gate before any assert. Ported
+   behavior: debug `-t` matches release (exit 0, corrupt shape), verified against the
+   debug oracle.]
 4. **Dedup not ported (R4).** `-y`/`--dedup` and argv[0]=`jdedup` map to a function that
    is compiled out upstream (`JDIFF_DEDUP` undefined in the shipped Makefile) where the
    real binary segfaults. The port's parser accepts `-y` (grammar parity) but exits
@@ -1101,6 +1106,20 @@ upstream option matrix informs §22's test matrix. The de-facto changelog is the
     Caveats documented in README: >4GiB EQL/DEL/BKT lengths use the 9-byte tier, which
     only LARGEFILE-built 0.8.1 patchers accept (§21.7); listings (`-l`/`-r`) are
     diagnostic formats, not applied by patchers, and are unaffected by the flag.
+17. **Negative read positions gate to EOF (upstream-termination deviation).** Upstream
+    0.8.5 has a genuine bug: when a `get` at a negative position escapes the EOF gate
+    (`JFileAhead`'s `getbuf` only checks `azPos >= mzPosEof`), `get_fromfile` takes the
+    Scrollback branch, the block-aligned seek rounds −1 up to 0, the read loop no-ops,
+    and the reader serves a stale buffer byte forever — `JPatcht`'s
+    `while ((liInp = mpFilPch.get()) != EOF)` never sees EOF again and the release
+    binary **hangs at 100% CPU** (debug builds trip the always-on invariant assert,
+    exit 6). Reproduced on the stock release and debug oracles (Task 20; the port's
+    1:1 replication hung identically on the `t20-u-del`/`t20-u-esc` round-trip
+    fixtures). The port gates `getbuf` to return `EOF` for `pos < 0`
+    (JFileMem-parity; documented deviation in `src/jfile/ahead.rs`, unit-pinned).
+    Cost: patches/org files that drive the C++ into the hang now terminate cleanly
+    (exit per the trailing-byte/EOF path) instead of hanging — a strict improvement,
+    and the only place this port deliberately does not replicate upstream behavior.
 
 ## 22. Acceptance gates (0.8.5 — supersede Part I §16)
 
