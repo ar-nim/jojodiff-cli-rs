@@ -1,0 +1,51 @@
+
+JDIFF - binary diff version 0.8.5 (beta) 2020
+Copyright (C) 2002-2020 Joris Heirbaut
+
+JojoDiff is free software: you can redistribute it and/or modify it
+under the terms of the  GNU General Public License  as published by
+the Free Software Foundation,  either version 3 of the License,  or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY  or  FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see www.gnu.org/licenses/gpl-3.0
+
+File adressing is 64 bit for files up to 8388607TB, samples are 32 bytes.
+
+Use -h for additional help and usage description.
+
+Index table size (default: 64Mb) (-s): 384Mb (33554393 samples)
+Search size     (0 = buffersize) (-a): 992kb
+Buffer size       (default  2Mb) (-m): 2Mb
+Block  size       (default 32kb) (-b): 32kb
+Min number of matches to search  (-n): 2
+Max number of matches to search  (-x): 128
+Compare out-of-buffer (-f to disable): yes
+Full indexing scan   (-ff to disbale): yes
+Backtrace allowed     (-p to disable): yes
+Comparing : ...           
+Indexing  : ...                      1Mb
+Comparing : ...           Comparing :            1MbComparing :            2Mb
+Index table hits        = 972576
+Index table repairs     = 558
+Index table overloading = 0
+Reliability distance    = 48
+Inaccurate  solutions   = (masked)
+Source      seeks       = 11682
+Destination seeks       = 0
+Delete      bytes       = 1042956102
+Backtrack   bytes       = 1042955489
+Escape      bytes       = 1
+Control     bytes       = 58171
+
+Equal       bytes       = 1905622
+Data        bytes       = 17962
+Control-Esc bytes       = 58172
+Total       bytes       = 76134
+
+Not all data has been found in source file.

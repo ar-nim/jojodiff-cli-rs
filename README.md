@@ -18,24 +18,25 @@ links or aliases of the binary named `jpatch`/`jptch` patch via argv[0] dispatch
 > existing `jptch` scripts migrate with a one-time `ln -s jdiff jptch` (or a shell alias,
 > or calling `jdiff -u`). Remove or replace any stale `jptch` binary left in `~/.cargo/bin`
 > by the 0.8.1 install: a leftover 0.8.1 `jptch` would silently keep 0.8.1 semantics,
-> including dropping implicit-MOD bytes.
+> including dropping implicit-MOD bytes. See [Version history](#version-history) for what
+> changed between the 0.8.1 and 0.8.5 lines.
 
 ## What is JojoDiff?
 
-JojoDiff is a binary diff/patch pair: `jdiff` compares two files and writes a small
-patch file; `jptch` applies that patch to the original file to reproduce the new file
+JojoDiff is a binary diff/patch tool: `jdiff` compares two files and writes a small patch
+file, and `jdiff -u` applies that patch to the original file to reproduce the new file
 byte-for-byte. It works on any data (no line-oriented assumptions), finds shifted and
 repeated blocks via backtracking, and has no external dependencies.
 
-This project reimplements the 0.8.1 algorithms **exactly**: patch files, listings,
-verbose output and exit codes are verified byte-for-byte against a fixed build of the
-original C++ source, which serves as the acceptance oracle.
+This project ports the 0.8.5 algorithms **exactly**: patch files, listings, verbose
+output and exit codes are verified byte-for-byte against a fixed build of the original
+C++ source, which serves as the acceptance oracle.
 
 ## Relationship to other projects
 
-`jojodiff-cli-rs` is an independent, complete Rust port of JojoDiff 0.8.1 by Joris
-Heirbaut (GPLv3, https://sourceforge.net/projects/jojodiff/), via the v0.8.1 C++ class
-rewrite.
+`jojodiff-cli-rs` is an independent, complete Rust port of JojoDiff 0.8.5 by Joris
+Heirbaut (GPLv3, https://sourceforge.net/projects/jojodiff/), which superseded the
+project's earlier 0.8.1 port (via the v0.8.1 C++ class rewrite).
 
 It is **not affiliated with, endorsed by, or derived from** the `jojodiff` crate /
 [francisdb/jojodiff-rs](https://github.com/francisdb/jojodiff-rs) — a separate
@@ -46,52 +47,58 @@ GPLv3 work is credited as the source of the algorithm, wire format, and test dat
 ## Usage
 
 ```
-jdiff [options] <original file> <new file> [<output file>]
-jptch [options] <original file> <patch file> [<output file>]
+jdiff [options] <original file> <new file> [<output file>]     # make a patch
+jdiff -u [options] <original file> <patch file> [<output file>] # apply a patch
 ```
 
-A missing output file or `-` means stdin/stdout.
+A missing output file or `-` means stdin/stdout. Options may appear anywhere on the
+command line (GNU permutation); `--` ends option processing.
+
+### Patch modes: `-u` and argv[0]
+
+Upstream 0.8.5 merged the old standalone patcher into `jdiff`:
+
+- **`jdiff -u`** (long form `--undiff`) is the upstream patch mode.
+- Copies, hard links or symlinks of the binary whose name starts with **`jpatch`**
+  patch via argv[0] dispatch (upstream behaviour, `main.cpp:303-315`).
+- Names starting with **`jptch`** also patch via argv[0] — a **port extension**
+  (upstream matches `jpatch` only), kept for 0.8.1 script compatibility.
 
 ### jdiff options
 
-| Option | Effect |
-|---|---|
-| `-v` | Verbose (greeting, results and tips) |
-| `-vv` | Verbose (debug info) |
-| `-h` | Help (this text) |
-| `-l` | List byte by byte (ascii output) |
-| `-lr` | List groups of bytes (ascii output) |
-| `-b` | Try to be better (using more memory) |
-| `-f` | Try to be faster: using less memory, no out of buffer compares |
-| `-ff` | Try to be faster: no out of buffer compares, no prescanning |
-| `-m size` | Size (in kB) for look-ahead buffer (default 256, 0 = no buffers / in-memory) |
-| `-bs size` | Block size (in bytes) for reading from files (default 4096) |
-| `-s size` | Number of samples in mega (default 8 mega samples) |
-| `-a size` | Number of kB to look ahead (default = same as buffer-size) |
-| `-min count` | Minimum number of solutions to find |
-| `-max count` | Maximum number of solutions to find |
-| `-do` | Write verbose and debug info to stdout instead of stderr |
-
-`-min`/`-max` defaults are 8/32; the presets assign their own values. Options `-b`,
-`-f` or `-ff` should be used before other options (parse order is part of the
-contract). Sample size is always lowered to the largest n-bit prime (n < 32).
-
-### jptch options
+Actual behaviour is listed below (the C++ help text contains stale numbers that the port
+replicates verbatim — e.g. it still says "-i (default 64)", "(in KB)" and "0=no
+buffering"; the table gives the real values):
 
 | Option | Effect |
 |---|---|
-| `-v` | Verbose: version and licence |
-| `-vv` | Verbose: debug info |
-| `-vvv` | Verbose: more debug info |
-| `-t` | Test: no output file |
-| `-d` | Write debug info to stdout |
-| `-h` | Help (this text) |
+| `-j` / `-u` | Force function: diff / patch |
+| `-v`, `-vv`, `-vvv` | Verbose: greeting + results / + progress + statistics / + help and details |
+| `-h`, `-hh` | Help; `-hh` adds notes and explanations |
+| `-l` | List byte by byte (ASCII output) |
+| `-r` | List regions (grouped bytes; was `-lr` in 0.8.1) |
+| `-c` | Write verbose and debug info to stdout instead of stderr (was `-do`) |
+| `-b`, `-bb`, ... | Better: use more memory, search more (multiplicative preset) |
+| `-f`, `-ff`, ... | Lazy: only compare buffered data (often slower); `-ff` drops the full index |
+| `-p` | Sequential source (auto-assumed for piped input) |
+| `-q` | Sequential destination (auto-assumed for piped input) |
+| `-s` | Use stdio files instead of iostreams (for testing; no size argument anymore) |
+| `-a <KB>` | Size (in KB) to search ahead (default = buffer size) |
+| `-i <MB>` | Index table size in MB (default 32; was `-s <size>`) |
+| `-k <B>` | Block size in bytes for reading (default 32768; was `-bs`) |
+| `-m <MB>` | Search buffers, MB in total, split evenly (default 2; `-m 0` = defaults; was KB) |
+| `-n <count>` | Minimum number of matches to search (default 2; was `-min`) |
+| `-x <count>` | Maximum number of matches to search (default 128; was `-max`) |
+| `-d <name>` | Debug flag by name (`hsh ahd cmp prg buf hsk ahh bkt red mch dst`); needs the `debug` feature |
+
+The index table size is always lowered to the nearest lower prime. Presets (`-b`, `-f`,
+...) should be used before other options (parse order is part of the contract).
 
 ### Example
 
 ```
 jdiff archive0000.tar archive0001.tar archive0001.jdf
-jptch archive0000.tar archive0001.jdf archive0001b.tar   # identical to archive0001.tar
+jdiff -u archive0000.tar archive0001.jdf archive0001b.tar   # identical to archive0001.tar
 ```
 
 Typical applications are incremental backups and synchronising files over slow
@@ -105,11 +112,35 @@ jdiff archive0000.zip archive0001.zip archive0001.jdf
 zip -9 archive0001.jdf.zip archive0001.jdf  # compress the patch for transfer
 # ... later:
 unzip archive0001.jdf.zip
-jptch archive0000.zip archive0001.jdf archive0001b.zip
+jdiff -u archive0000.zip archive0001.jdf archive0001b.zip
 unzip archive0001b.zip                    # restore mydir
 ```
 
 `tar` + `gzip` (or any other archiver/compressor) works the same way.
+
+## Patch-format compatibility (breaking change in 0.8.5)
+
+Upstream 0.8.5 changed the patch wire format: MOD data runs are emitted **without** the
+leading `ESC MOD` control pair ("implicit MOD"), and equal runs become `ESC EQL len`
+from 3 bytes on (0.8.1 needed 5). Consequences, all verified in the test suite:
+
+- **Patches produced by this port (≥0.8.5) are NOT applicable by 0.8.1-era patchers** —
+  a 0.8.1 `jptch` silently drops the implicit-MOD data bytes and produces corrupt
+  output. Regenerate patches when upgrading, or keep a 0.8.1 `jdiff` for old pairs.
+- **0.8.1 patches still apply**: explicit opcodes are a subset of the 0.8.5 grammar.
+  This one-way gate is pinned by `tests/crossver.rs`, which applies the entire committed
+  0.8.1 golden corpus with `jdiff -u` and with an argv[0]=`jptch` copy of the binary.
+- Listings (`-l`/`-r`) are diagnostic formats, not applied by patchers; they are not
+  affected by compatibility concerns.
+
+## The `-t` option is broken (upstream behaviour, ported faithfully)
+
+`jdiff -t` (`--test`) is parsed but never used by upstream 0.8.5, so after diffing the
+program feeds the **destination file** to the patch phase, appending misparsed data to
+the already-written patch output (exit 0, corrupt file). The port replicates this
+exactly — including in `debug` builds: the debug-only invariant assert upstream fires on
+is unreachable in the port (fresh input re-open plus the EOF gate below), so debug and
+release behave identically. Do not use `-t`; it exists for fidelity only.
 
 ## Building
 
@@ -139,90 +170,117 @@ available too.
 cargo test --all-features
 ```
 
-Three layers run everywhere: the round-trip gate over the bundled test corpus, golden
-byte-compares against oracle outputs committed under `tests/fixtures/golden/`, and
-cross-validation with the third-party `jojodiff` crate. A fourth layer compares the
-Rust tools directly against a compiled C++ reference whenever one is present, and
-skips silently otherwise:
+Four layers run in `tests/`:
+
+1. **Golden byte-compares** (everywhere): `scripts/gen-golden.sh` runs the compiled C++
+   0.8.5 reference over the bundled corpus (`bkocomu.0000/0009.fil`,
+   `test2.001/002.txt`) and the option matrix of spec §22.1, storing patches, listings
+   and `-vv` stderr captures under `tests/fixtures/golden85/`. The Rust tool must
+   reproduce those files byte-for-byte on every machine (one run-dependent statistics
+   line is masked — see the script header).
+2. **Cross-version gate** (everywhere): every committed **0.8.1** golden patch under
+   `tests/fixtures/golden/` applies through `jdiff -u` and an argv[0]=`jptch` copy and
+   restores byte-exact (spec §22.3).
+3. **Round-trip gate** (everywhere): `jdiff OPTS A B p && jdiff -u A p out` restores B
+   byte-exact for every corpus pair × option set, plus the francisdb-crate
+   cross-validation.
+4. **Live-oracle compares** (run when the reference is built): Rust and C++ binaries are
+   compared directly across the whole matrix — `jdiff` outputs, verbose stderr, corpus
+   listings (including the ~80 MB ASCII listing of the binary pair, intentionally not
+   committed) and cross-applied patches. Skips silently without the oracle:
 
 ```
-scripts/build-oracle.sh                          # build the C++ reference (g++, make)
+scripts/build-oracle.sh                          # build the C++ 0.8.5 reference (g++, make)
 JOJODIFF_ORACLE=target/oracle cargo test --all-features
 ```
 
 See [Oracle verification](#oracle-verification) for details. `scripts/runtest.sh
 <original> <new>` is the cross-platform equivalent of the C++ `make runtest`
-(`jdiff -m 0 A B > p; jptch A p > patched; cmp`).
+(`jdiff -m 0 A B p; jdiff -u A p out; cmp`).
 
 ## Port fidelity
 
-The port is a 1:1 translation of the 0.8.1 C++ sources; the contract is byte-exact
-output — including historical quirks such as the `Hastable` typo in verbose output.
-The only behavioural deltas are the documented deviations in
-[spec §15](docs/superpowers/specs/2026-10-01-jojodiff-1to1-port-spec.md):
+The port is a 1:1 translation of the 0.8.5 C++ sources; the contract is byte-exact
+output — including historical quirks such as the `disbale` typo in the verbose echo and
+the stale "-i (default 64)" help texts. The deviations are catalogued exhaustively in
+[spec §20/§21](docs/superpowers/specs/2026-10-01-jojodiff-1to1-port-spec.md); the
+user-visible ones:
 
-- **§15.1** — the Linux ifstream pre-read defect is fixed as in the spec'd 2-line
-  patch (or the MinGW build); the port opens files directly.
-- **§15.2** — the never-used OpenMP `make parallel` target (a data race) is not
-  ported; the port is serial and deterministic.
-- **§15.3** — the in-memory reader (`-m 0`/`-m 1`) serves full content; the C++
-  `istringstream` construction truncates at NUL bytes (and overflows on long input).
-- **§15.4** — `jptch -` reads stdin fully instead of seeking (strictly more
-  permissive; under verbose, the out-position prints −1 on non-seekable stdout).
-- **§15.5** — MinGW ifdefs are collapsed into one uniform implementation.
-- **§15.6** — `JFileAhead` and `JFileIStreamAhead` (byte-identical twins in C++) are
-  one implementation.
-- **§15.7** — known francisdb/jojodiff-rs decoder edge cases are not copied; the port
-  follows C++ everywhere.
-- **§15.8** — the dead scroll-back mode 2 (collapsed by a `bool` seek flag) is
-  replicated as dead-code parity.
-- **§15.9** — the dead `lbFnd < 0` error check (`bool` forcing) is replicated as
-  control flow; errors surface via the final EOB min-check.
-- **§15.10** — the stale-failbit reader defect of C++ `JFileIStream` is not ported.
-- **§15.11** — unopenable `jdiff` inputs produce the documented open-check messages
-  and exit codes (the stock Linux oracle aborts there; `jptch` open checks are live
-  in C++ and are oracle-faithful).
-- **§15.12** — the port is the 32-bit `hkey` variant (SMPSZE = 32, Windows/x86
-  semantics); the Linux oracle build forces the same width.
+- **EOF gate (the one deliberate non-replication, §21.17):** upstream 0.8.5 can read at
+  a negative file position during patching, serves a stale buffer byte forever and
+  **hangs at 100% CPU**; the port gates negative positions to EOF so affected patches
+  terminate cleanly instead of hanging.
+- **Deterministic counters (§21.5/§21.6):** the C++ leaves the index-hit/repair and
+  inaccurate-solution counters uninitialized (its verbose output prints garbage that
+  changes between runs); the port zero-initializes them and prints the real counts.
+- **Index-table divisor (§18.E/§21.7):** the port keeps the stock-LP64 16-byte element
+  size, so the same `-i <MB>` builds a smaller table than the 32-bit-`hkey` oracle
+  build; the gates compare at element-equal sizes (`-i 8` port ≡ `-i 6` oracle).
+- **Single binary (§21.2):** `jpatch`/`jptch` argv[0] routes replace the removed
+  `jpatch.cpp`/`jptch` binaries; `jptch` matching is the port extension.
+- **Not ported (compiled out upstream):** dedup (`-y`/`--dedup` exits 20 instead of
+  crashing like upstream) and the `jdedup`/`jtst` argv[0] routes.
 
 ## Oracle verification
 
-`tests/oracle.rs` implements the acceptance gates of spec §16:
-
-1. **Golden byte-compares** (always run): `scripts/gen-golden.sh` runs the compiled
-   C++ reference over the bundled corpus (`bkocomu.0000/0009.fil`,
-   `test2.001/002.txt`) and the option matrix of spec §13, storing patches, listings
-   and verbose stderr captures under `tests/fixtures/golden/`. The Rust tools must
-   reproduce those files byte-for-byte on every machine.
-2. **Round-trip gate** (always run): `jdiff A B p && jptch A p out` restores B
-   byte-exact for every corpus pair × option set.
-3. **Cross-validation** (always run): the `jojodiff` crate (francisdb) applies the
-   Rust-produced patches of the text pair.
-4. **Live-oracle compares** (run when the reference is built): Rust and C++ binaries
-   are compared directly across the whole matrix — `jdiff` outputs, verbose stderr,
-   and `jptch` outputs for every golden patch — including the ~80 MB ASCII listing of
-   the binary pair, which is intentionally not committed as a golden.
-
-To build the reference locally:
+`tests/oracle.rs` implements the acceptance gates of spec §22 (see
+[Testing](#testing) for the layer overview). To build the reference locally:
 
 ```
 scripts/build-oracle.sh
 ```
 
-copies the pristine vendored tree (`reference/jojodiff-cpp`) to `target/oracle-src/`,
-applies exactly the two source patches that define the canonical verification build
-(spec §15.1 ifstream fix, §15.12 32-bit `hkey`), compiles it and places the binaries
-in `target/oracle/`. Tests find them via `$JOJODIFF_ORACLE` or that default location;
-without them, layer 4 skips and everything else still runs. CI runs the live compare
-in a dedicated ubuntu job on every push.
+copies the pristine vendored tree (`reference/jojodiff-0.8.5`) to `target/oracle-src85/`,
+applies exactly the source patch that defines the canonical verification build (the
+§21.7 32-bit `hkey` typedef) and compiles it with `-D_FILE_OFFSET_BITS=64`
+(`JDIFF_LARGEFILE` live); the binary lands in `target/oracle/jdiff`. Tests find it via
+`$JOJODIFF_ORACLE` or that default location; without it, layer 4 skips and everything
+else still runs. CI runs the live compare in a dedicated ubuntu job on every push.
+
+`tests/fixtures/golden85/` (0.8.5, regenerated by `scripts/gen-golden.sh`) and
+`tests/fixtures/golden/` (0.8.1, frozen) are both oracle truth: never regenerate them
+from Rust output.
+
+## Version history
+
+### 0.8.5 re-target (this port)
+
+The port began as a byte-exact 0.8.1 port and was re-targeted to the 0.8.5 C++ sources,
+adopting every upstream change from the 0.8.1 → 0.8.5 window (summarized from the
+upstream changelog, `main.cpp:117-149`):
+
+- **v0.8.2** — `jfopen`/`jfclose`/`jfread`/`jfseek` wrappers against LARGEFILE
+  redefinition clashes; virtual destructors for `JFile`/`JOut`.
+- **v0.8.3a-z** — `getopt_long` option processing (GNU permutation, long options, new
+  option names); index table sized in MB and lowered to the nearest prime; improved
+  progress feedback; equal-run counter mixed into the hash for quality; dynamic matching
+  table (new/old lists replace the freelist); `-` standard-input support; `-s` stdio
+  backend; `jpatch` integrated as `JFile.getbuf` client (one binary).
+- **v0.8.4b-c** — hash re-initialization for incremental scanning.
+- **v0.8.5a-ca** — rewritten sequential-file buffer logic; unbuffered istream
+  implementation removed; experimental (and upstream-disabled) deduplication; fewer
+  compares via cached negative results; improved gliding-match detection; incremental
+  search; accuracy work for non-compared matches (`-f`/`-p`) and incremental scanning
+  (`-ff`); `isOld` tuning.
+
+Net user-visible effects (all ported and oracle-verified): a single `jdiff` binary with
+`-u`/argv[0] patching, the new (breaking) patch wire format, the rewritten CLI surface,
+`-` for any file argument including piped patches, and swapped exit codes for
+differences (1) vs identical (0).
+
+### 0.8.1 port (superseded)
+
+The original scope of this project — a byte-exact port of the 0.8.1 C++ class rewrite,
+complete with its own oracle and goldens (now frozen under `tests/fixtures/golden/` and
+`tests/crossver.rs`).
 
 ## Roadmap
 
 - [x] Repository scaffolding, port plan and functional specification
 - [x] Library: readers, hash table, match table, output writers, diff engine
-- [x] `jdiff` and `jptch` CLIs
-- [x] Debug feature (`-d*` flags, parity with the `_DEBUG` builds)
-- [x] Oracle conformance harness, golden fixtures, full documentation
+- [x] `jdiff` CLI (single binary; `-u` and argv[0] patch modes)
+- [x] Debug feature (`-d <name>` flags, parity with the `_DEBUG` builds)
+- [x] 0.8.5 re-target: engine, writers, CLI, oracle, goldens, cross-version gate
 
 ## License
 
@@ -232,5 +290,5 @@ See [LICENSE](LICENSE).
 Credits:
 
 - **Joris Heirbaut** — author of the original JojoDiff (algorithm, wire format, test data).
-- The v0.8.1 C++ class rewrite of JojoDiff, used as the porting reference and
-  verification oracle.
+- The v0.8.5 C++ sources (and the earlier v0.8.1 class rewrite), used as the porting
+  reference and verification oracle.

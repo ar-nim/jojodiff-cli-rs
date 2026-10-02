@@ -27,11 +27,9 @@ pub enum ReadType {
 /// (`_LARGESAMPLE` is not set by the Makefile); literal in Rust.
 pub const SMPSZE: i32 = 32;
 
-/// Matching hashtable prime (`JMatchTable.h:29`).
-pub const MCH_PME: i64 = 127;
-
-/// Maximum size of matching table (`JMatchTable.h:30`).
-pub const MCH_MAX: i32 = 256;
+// (The 0.8.1-era MCH_PME/MCH_MAX table constants are gone in 0.8.5: the
+// matching table is dynamic — `getLowerPrime(aiMchSze * 2)`, spec §18.E/§19.
+// The prime lives on as the `mch_pme` field of `JMatchTable`.)
 
 /// EQL flush threshold (`MINEQL`, `JOutBin.h:28`): 0.8.5 lowered it from 4
 /// to 2 ("start EQL-sequence on 3'rd byte"), a wire-format break (§18.C).

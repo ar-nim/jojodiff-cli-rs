@@ -23,9 +23,14 @@ jobs:
       - run: cargo build --release
 
   oracle:
-    # Ubuntu-only: builds the vendored C++ reference (scripts/build-oracle.sh
-    # applies the spec §15.1 + §15.12 patches) and byte-compares the Rust
-    # tools against it across the spec §13 matrix (tests/oracle.rs layer 2).
+    # Ubuntu-only: builds the vendored C++ 0.8.5 reference (scripts/
+    # build-oracle.sh applies the spec §21.7 hkey patch and makes
+    # JDIFF_LARGEFILE live) and byte-compares the Rust tools against it
+    # across the spec §22.1 matrix (tests/oracle.rs layer 2: patches,
+    # verbose stderr, cross-applies, -i equivalence and the corpus-pair
+    # listings). The committed golden85 layer (tests/oracle.rs layer 1) and
+    # the cross-version 0.8.1 gate (tests/crossver.rs, §22.3) run everywhere
+    # in the matrix job above without the oracle.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,6 +39,8 @@ jobs:
       - run: scripts/build-oracle.sh
       - run: cargo test --all-features
         env:
+          # $JOJODIFF_ORACLE is what tests/oracle.rs reads (a directory
+          # holding `jdiff`; relative values are canonicalized by the test).
           JOJODIFF_ORACLE: target/oracle
 
   msrv:

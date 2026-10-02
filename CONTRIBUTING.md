@@ -4,12 +4,12 @@ Thanks for your interest in contributing to `jojodiff-cli-rs`!
 
 ## Project goal
 
-This project is a 1:1 port of JojoDiff 0.8.1. **Byte-exact compatibility with the
+This project is a 1:1 port of JojoDiff 0.8.5. **Byte-exact compatibility with the
 original C++ tools is the contract** — patch files, listings, verbose output, exit
 codes, and even historical quirks (integer truncation semantics, typos in output
 strings) must match the reference build. Do not "fix" behaviour that differs from the
 C++ reference; deviations are allowed only where the specification lists them
-explicitly (§15 of `docs/superpowers/specs/2026-10-01-jojodiff-1to1-port-spec.md`).
+explicitly (§20/§21 of `docs/superpowers/specs/2026-10-01-jojodiff-1to1-port-spec.md`).
 
 ## Development setup
 
@@ -36,12 +36,16 @@ C++ module, make the tests pass, then commit.
 `cargo test --all-features` runs the oracle harness layers (see `tests/oracle.rs`):
 
 1. Round-trip gate and francisdb cross-validation — always run.
-2. Golden byte-compares against the committed oracle outputs under
-   `tests/fixtures/golden/` — always run; the goldens are C++-oracle truth,
-   never regenerate them from Rust output (`scripts/gen-golden.sh`).
-3. Live-oracle byte-compares against a compiled C++ reference — skipped
+2. Golden byte-compares against the committed 0.8.5-oracle outputs under
+   `tests/fixtures/golden85/` — always run; the goldens are C++-oracle truth,
+   never regenerate them from Rust output (`scripts/gen-golden.sh` rebuilds
+   them from the oracle only).
+3. Cross-version gate (`tests/crossver.rs`) — always run: the frozen 0.8.1
+   goldens under `tests/fixtures/golden/` (never regenerated) must apply with
+   `jdiff -u` and an argv[0]=`jptch` copy of the binary and restore byte-exact.
+4. Live-oracle byte-compares against a compiled C++ 0.8.5 reference — skipped
    automatically unless `$JOJODIFF_ORACLE` points at a directory containing
-   `jdiff`/`jptch`, or `target/oracle` exists. Build it locally with
+   `jdiff`, or `target/oracle` exists. Build it locally with
    `scripts/build-oracle.sh` (needs g++ and make; Linux/WSL).
 
 ```
