@@ -859,7 +859,8 @@ flows: `cat new | jdiff org - > p`; `cat org | jdiff -p - new`; `cat p | jdiff -
   `if (old==new) {if (eql<SMPSZE) eql++} else {old=new; if (eql!=0) eql=0}`; returns
   `(cur_hash*2) + new + eql` — the equal-run counter is **added into the hash value**.
   This alone changes match decisions (and thus patch bytes) vs 0.8.1.
-* **`JHashPos`** (`JHashPos.cpp`): ctor takes **MB** → elements `mb*1024*1024/16` →
+* **`JHashPos`** (`JHashPos.cpp`): ctor takes **MB** → elements `mb*1024*1024/12` [§21.18:
+  amended from `/16` during the final review — see §21.18] →
   `getLowerPrime` (`JDefs.cpp:53-67`: switch returns 1021/33554393/16777213/8388593/
   134217689/536870909 for exact 1024/32M/16M/8M/128M/512M, else downward `isPrime`
   search — default 32 MB → 2097152 elements → prime **2097143**). Collision counter
@@ -1120,6 +1121,20 @@ upstream option matrix informs §22's test matrix. The de-facto changelog is the
     Cost: patches/org files that drive the C++ into the hang now terminate cleanly
     (exit per the trailing-byte/EOF path) instead of hanging — a strict improvement,
     and the only place this port deliberately does not replicate upstream behavior.
+18. **Index-table element divisor = 12 (`sizeof(u32 hkey) + sizeof(i64 off_t)`);
+    §18.E amended from `/16` (final-review ruling, 2026-10-02).** The C++ computes
+    elements as `aiSze*1024*1024/(sizeof(hkey)+sizeof(off_t))` (`JHashPos.cpp:48-60`) —
+    16 B/element on stock LP64 (8-byte hkey), **12 B/element on the 32-bit-hkey variant
+    the port targets everywhere else** (u32 hkey per §2/§15.12, SMPSZE=32 per §21.9, and
+    the §21.7 hkey-patched oracle). An earlier revision of this spec carried the stock
+    LP64 `/16`, making the port a hybrid: 32-bit sample semantics with a 64-bit-variant
+    divisor — visible as permanent harness friction (an oracle `-i 24` override so
+    goldens pinned element-equal tables, a `-i` remap mirrored in three places, a
+    masked live stats line) and as broken §22.2 byte-parity at default `-i 32`
+    (port prime 2097143 vs oracle 2796181). Ruling: `/12`, making the port a coherent
+    port of one variant and restoring full default-table byte-parity with the
+    acceptance oracle; the remap machinery is deleted and golden85 regenerated from
+    un-overridden oracle defaults.
 
 ## 22. Acceptance gates (0.8.5 — supersede Part I §16)
 
