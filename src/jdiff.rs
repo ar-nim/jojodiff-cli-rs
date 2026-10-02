@@ -1209,8 +1209,9 @@ mod tests {
     }
 
     /// Always-failing original file: every `get` returns `EXI_RED` (a
-    /// negative exit code at 0.8.5), like a hard read error (`JFile`
-    /// implementations may return negative EXI codes; spec §6.2 step 8).
+    /// negative exit code at 0.8.5) — `JFile` implementations may return
+    /// negative EXI codes as hard read errors, and the engine aborts with
+    /// that code (the CLI prints "Error reading file !", exit 8).
     struct FailingJFile;
 
     impl JFile for FailingJFile {

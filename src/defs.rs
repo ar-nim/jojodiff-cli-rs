@@ -136,7 +136,8 @@ pub fn p8(v: i64) -> String {
 /// C `atoi` semantics on the lossy form of an [`OsStr`]: skip leading C
 /// whitespace (space, `\t`, `\n`, `\v`, `\f`, `\r`), optional sign, then the
 /// leading decimal digits; everything after the digits is ignored, and `0` is
-/// returned when there are none (so `-m abc` ⇒ 0 ⇒ in-memory mode).
+/// returned when there are none (so `-m abc` parses as `-m 0`, which at 0.8.5
+/// selects the default sizes — spec §21.12; 0.8.1's in-memory mode is void).
 ///
 /// Unlike C, where overflow is undefined behavior, the accumulator saturates:
 /// results clamp to `i32::MAX` / `i32::MIN`.

@@ -2,8 +2,9 @@
 //! (`headers/JDebug.h` / `src/JDebug.cpp`).
 //!
 //! In C++, `JDebug::stddbg` is a `FILE*` pointing at stderr by default and at
-//! stdout when the `-do` option is given. This port models it with a
-//! process-wide [`DBG_TO_STDOUT`] flag and two accessors.
+//! stdout when the `-c`/`--console` option is given (0.8.1's `-do` is gone at
+//! 0.8.5, spec §18.G). This port models it with a process-wide
+//! [`DBG_TO_STDOUT`] flag and two accessors.
 //!
 //! # The `debug` cargo feature (spec §14, parity with `make debug`)
 //!
@@ -11,7 +12,7 @@
 //! (`#define debug 1`): it enables the `gbDbg` flag array (`JDebug::gbDbg`,
 //! `JDebug.h:37-47`), the 11 `-dhsh`…`-ddst` CLI flags and every
 //! `#if debug` print site. Without the feature this module provides only the
-//! release-build surface (`-do`/`stddbg`, verbose greetings/statistics).
+//! release-build surface (`-c`/`stddbg`, verbose greetings/statistics).
 //!
 //! Debug builds format positions with `P8zd = %10lld` (width 10) instead of
 //! the release `%12lld` — [`crate::defs::p8`] switches on the feature.
@@ -30,7 +31,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Debug/verbose output target: `false` (default) = stderr, `true` = stdout
-/// (set by the `-do` option).
+/// (set by the `-c`/`--console` option).
 pub static DBG_TO_STDOUT: AtomicBool = AtomicBool::new(false);
 
 /// Debug-flag indices into `gbDbg` (`JDebug.h:37-47`). Only meaningful with
@@ -51,8 +52,9 @@ pub const DBGDST: usize = 10; // Debug Hashtable distribution   -ddst
 /// Port of the C++ `JDebug` class; the `gbDbg` flags live in [`GB_DBG`].
 pub struct JDebug;
 
-/// Returns the debug/verbose stream (`JDebug::stddbg`): stderr, or stdout with
-/// `-do`. Callers write and flush per line, like the C++ `fprintf(stddbg, ...)`.
+/// Returns the debug/verbose stream (`JDebug::stddbg`): stderr, or stdout
+/// with `-c`. Callers write and flush per line, like the C++
+/// `fprintf(stddbg, ...)`.
 pub fn stddbg() -> Box<dyn Write> {
     if DBG_TO_STDOUT.load(Ordering::Relaxed) {
         Box::new(std::io::stdout())
@@ -62,7 +64,7 @@ pub fn stddbg() -> Box<dyn Write> {
 }
 
 /// Writes one formatted chunk to the debug stream (stderr, or stdout with
-/// `-do`) and flushes. Stream errors are ignored, like a C `FILE*`.
+/// `-c`) and flushes. Stream errors are ignored, like a C `FILE*`.
 pub fn dbg_print(args: std::fmt::Arguments<'_>) {
     if DBG_TO_STDOUT.load(Ordering::Relaxed) {
         let mut out = std::io::stdout().lock();

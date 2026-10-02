@@ -126,9 +126,9 @@ impl JHashPos {
     /// COLLISION_THRESHOLD` (4), reliability seed `SMPSZE + SMPSZE/2` (48 at
     /// the port's SMPSZE 32, spec §21.9), load counter at the prime, hits 0.
     ///
-    /// MB values above 32767 overflow the C++ `int` element count (undefined
-    /// behavior); the port computes in i64 and clamps to `i32::MAX` for
-    /// determinism.
+    /// MB values above 2047 overflow the C++ `int` product
+    /// `aiSze*1024*1024` (undefined behavior there); the port computes in
+    /// i64 and clamps to `i32::MAX` for determinism.
     pub fn new(mb: i32) -> Self {
         /* get largest prime < elements (JHashPos.cpp:53-61) */
         let sze: i64 = if mb < 1 { 1 } else { i64::from(mb) };

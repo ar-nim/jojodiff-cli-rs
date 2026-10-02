@@ -121,7 +121,8 @@ fn run_dbg(dir: &Path, org: &[u8], new: &[u8], extra: &[&str], tag: &str) -> (St
 }
 
 /// The patch jdiff produces for (big pair), pinned byte-exact against the
-/// oracle (EQL 250, implicit-MOD 0xc3, EQL 749-run — 10 bytes total). 0.8.5
+/// oracle: an `ESC EQL 250` record, one implicit-MOD data byte (0xc3), then
+/// the `ESC EQL` record for the remaining equal run — 9 bytes total. 0.8.5
 /// wire format (spec §18.C): the MOD byte follows the EQL record without the
 /// 0.8.1 `ESC MOD` pair. Debug flags must not change it (the debug flush's
 /// `put(ESC, 0, …)` is a writer no-op).

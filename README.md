@@ -52,7 +52,10 @@ jdiff -u [options] <original file> <patch file> [<output file>] # apply a patch
 ```
 
 A missing output file or `-` means stdin/stdout. Options may appear anywhere on the
-command line (GNU permutation); `--` ends option processing.
+command line (GNU permutation); `--` ends option processing. On Windows, a `-` input
+falls back to the un-seekable stdin handle (there is no `/dev/stdin`), so redirected
+regular-file input gets sequential (auto `-p`/`-q`) semantics there; output is
+unaffected.
 
 ### Patch modes: `-u` and argv[0]
 
@@ -187,20 +190,20 @@ available too.
 cargo test --all-features
 ```
 
-Four layers run in `tests/`:
+Four layers run in `tests/` (one numbering everywhere):
 
-1. **Golden byte-compares** (everywhere): `scripts/gen-golden.sh` runs the compiled C++
+1. **Round-trip gate** (everywhere): `jdiff OPTS A B p && jdiff -u A p out` restores B
+   byte-exact for every corpus pair × option set, plus the francisdb-crate
+   cross-validation.
+2. **Golden byte-compares** (everywhere): `scripts/gen-golden.sh` runs the compiled C++
    0.8.5 reference over the bundled corpus (`bkocomu.0000/0009.fil`,
    `test2.001/002.txt`) and the option matrix of spec §22.1, storing patches, listings
    and `-vv` stderr captures under `tests/fixtures/golden85/`. The Rust tool must
    reproduce those files byte-for-byte on every machine (one run-dependent statistics
    line is masked — see the script header).
-2. **Cross-version gate** (everywhere): every committed **0.8.1** golden patch under
+3. **Cross-version gate** (everywhere): every committed **0.8.1** golden patch under
    `tests/fixtures/golden/` applies through `jdiff -u` and an argv[0]=`jptch` copy and
    restores byte-exact (spec §22.3).
-3. **Round-trip gate** (everywhere): `jdiff OPTS A B p && jdiff -u A p out` restores B
-   byte-exact for every corpus pair × option set, plus the francisdb-crate
-   cross-validation.
 4. **Live-oracle compares** (run when the reference is built): Rust and C++ binaries are
    compared directly across the whole matrix — `jdiff` outputs, verbose stderr, corpus
    listings (including the ~80 MB ASCII listing of the binary pair, intentionally not
