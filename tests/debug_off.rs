@@ -1,8 +1,10 @@
 #![cfg(not(feature = "debug"))]
-//! Release-build contract for the `-d*` tokens (Task 11, spec §14): without
-//! the `debug` feature the `#if debug` strcmp branches are gone, so `-dhsh`…
-//! `-ddst` fall through to the non-option branch and are treated as filenames,
-//! exactly like the stock release C++ binary (`main.cpp:286-309`).
+//! Release-build contract for the `-d <name>` option (Task 20's 0.8.5 CLI,
+//! spec §14/§18.G): the `#if debug` strcmp arms are compiled out in release
+//! builds, so `-d <name>` is parsed and consumed like every other option but
+//! sets nothing — the run stays pristine (the 0.8.1 behavior of `-dhsh`
+//! falling through to a filename died with the getopt_long rewrite: it is
+//! now `-d` with an attached argument).
 
 use std::fs;
 use std::path::PathBuf;
@@ -22,12 +24,14 @@ fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
-/// `jdiff -dhsh …`: the token is not an option here, ends the option loop and
-/// becomes the first filename — the "Could not open first file" error proves
-/// it was never consumed as a debug flag (`main.cpp` falls to the `else`).
+/// `jdiff -dhsh a.bin b.bin p.bin` (release build): `-dhsh` is `-d` with the
+/// attached argument "hsh" — consumed silently (the strcmp arms are compiled
+/// out), and the diff runs normally on the three operands.
 #[test]
-fn dhsh_token_is_a_filename_without_the_feature() {
+fn dhsh_token_is_an_option_without_the_feature() {
     let dir = temp_dir("dhsh");
+    fs::write(dir.join("a.bin"), b"hello world hello").unwrap();
+    fs::write(dir.join("b.bin"), b"hello world byebye").unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_jdiff"))
         .arg("-dhsh")
         .arg("a.bin")
@@ -36,11 +40,12 @@ fn dhsh_token_is_a_filename_without_the_feature() {
         .current_dir(&dir)
         .output()
         .expect("spawn jdiff");
-    assert_eq!(out.status.code(), Some(3));
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
-        "Could not open first file -dhsh for reading.\n"
-    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stderr.is_empty(), "{:?}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(fs::read(dir.join("p.bin")).unwrap(), {
+        // ESC EQL 11 "byeby" ESC INS "e" (0.8.5 implicit MOD).
+        [0xA7u8, 0xA3, 0x0B, b'b', b'y', b'e', b'b', b'y', 0xA7, 0xA5, b'e']
+    });
     fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -59,7 +64,7 @@ fn default_run_is_pristine() {
         .current_dir(&dir)
         .output()
         .expect("spawn jdiff");
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(1));
     assert!(out.stdout.is_empty());
     assert!(out.stderr.is_empty());
     fs::remove_dir_all(&dir).unwrap();

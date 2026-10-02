@@ -11,7 +11,7 @@
 //! prints position `-1` (the C++ prints `lzPosOrg - 1` before the first
 //! increment — quirk preserved).
 //!
-//! The tests spawn the real binary with `-do`, which redirects the debug
+//! The tests spawn the real binary with `-c`, which redirects the debug
 //! stream to stdout (`JDebug::stddbg = stdout`, `main.cpp:283-284`), so
 //! `Command::output()` captures it deterministically and no test leaks output
 //! into the test log. The patch always goes to a file, leaving stdout purely
@@ -79,15 +79,26 @@ fn write_file(path: &Path, content: &[u8]) -> PathBuf {
     path.to_path_buf()
 }
 
-/// Runs `jdiff -do <args...> a b out` with the given fixture pair and returns
-/// (stdout-as-utf8, output). `-do` sends the debug stream to stdout.
+/// Runs `jdiff -c <args...> a b out` with the given fixture pair and returns
+/// (stdout-as-utf8, output). The 0.8.5 CLI sends the debug stream to stdout
+/// with `-c` (`main.cpp:360-362`; the 0.8.1 `-do` option is gone), and the
+/// 0.8.5 `-d <name>` syntax splits the 0.8.1 attached `-dprg` form — the
+/// mechanical flag-syntax adaptation of Task 20; Task 21 owns the full
+/// debug-surface test rewrite (spec §18.G).
 fn run_dbg(dir: &Path, org: &[u8], new: &[u8], extra: &[&str], tag: &str) -> (String, Output) {
     let a = write_file(&dir.join(format!("{tag}a.bin")), org);
     let b = write_file(&dir.join(format!("{tag}b.bin")), new);
     let p = dir.join(format!("{tag}p.bin"));
 
-    let mut args: Vec<std::ffi::OsString> = vec!["-do".into()];
-    args.extend(extra.iter().map(std::ffi::OsString::from));
+    let mut args: Vec<std::ffi::OsString> = vec!["-c".into()];
+    for tok in extra {
+        if let Some(name) = tok.strip_prefix("-d").filter(|n| !n.is_empty()) {
+            args.push("-d".into());
+            args.push(name.into());
+        } else {
+            args.push((*tok).into());
+        }
+    }
     args.extend([
         a.as_os_str().to_os_string(),
         b.as_os_str().to_os_string(),
@@ -115,7 +126,7 @@ const PATCH_BIG: &[u8] = &[0xA7, 0xA3, 0xF9, 0xC3, 0xA7, 0xA3, 0xFD, 0x02, 0xED]
 fn prg_input_lines_tiny() {
     let dir = temp_dir("prg-tiny");
     let (stdout, out) = run_dbg(&dir, ORG_A, NEW_B, &["-dprg"], "prg");
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(1));
     assert!(
         stdout.contains("Input         -1->68         -1->68.\n"),
         "first Input line: {stdout:?}"
@@ -128,20 +139,22 @@ fn prg_input_lines_tiny() {
 }
 
 /// DBGBUF (`-dbuf`, `JFileAhead.cpp:50-54`): one `ufFabOpn` line per reader
-/// with the buffer pointers (shape-only) and size.
+/// with the buffer pointers (shape-only) and size. The 0.8.5 CLI defaults
+/// both buffers to 1 MB (`main.cpp:618-620`), so `sze=1048576` (debug-oracle
+/// verified); 0.8.1 defaulted to 256 kB.
 #[test]
 fn buf_open_lines() {
     let dir = temp_dir("buf-open");
     let (stdout, out) = run_dbg(&dir, ORG_A, NEW_B, &["-dbuf"], "buf");
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(1));
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 2, "exactly two ufFabOpn lines: {stdout:?}");
     assert!(
-        lines[0].starts_with("ufFabOpn(Org):(buf=0x") && lines[0].ends_with("sze=262144)"),
+        lines[0].starts_with("ufFabOpn(Org):(buf=0x") && lines[0].ends_with("sze=1048576)"),
         "Org open line: {stdout:?}"
     );
     assert!(
-        lines[1].starts_with("ufFabOpn(New):(buf=0x") && lines[1].ends_with("sze=262144)"),
+        lines[1].starts_with("ufFabOpn(New):(buf=0x") && lines[1].ends_with("sze=1048576)"),
         "New open line: {stdout:?}"
     );
     fs::remove_dir_all(&dir).unwrap();
@@ -157,7 +170,7 @@ fn buf_open_lines() {
 fn red_double_verify_silent_tiny() {
     let dir = temp_dir("red-tiny");
     let (stdout, out) = run_dbg(&dir, ORG_A, NEW_B, &["-dred"], "red");
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(1));
     assert!(
         stdout.is_empty(),
         "no DBGRED output expected (sites removed at 0.8.5, double-verify\n\
@@ -173,7 +186,7 @@ fn prg_big_mismatch_and_current_position() {
     let dir = temp_dir("prg-big");
     let (org, new) = big_pair();
     let (stdout, out) = run_dbg(&dir, &org, &new, &["-dprg"], "prgB");
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(1));
     assert!(
         stdout.starts_with("Input         -1->59         -1->59.\n"),
         "first line: {stdout:?}"
@@ -197,7 +210,7 @@ fn ahd_findahead_line_big() {
     let dir = temp_dir("ahd-big");
     let (org, new) = big_pair();
     let (stdout, out) = run_dbg(&dir, &org, &new, &["-dahd"], "ahdB");
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         stdout, "Findahead on 250 250 skip 0 0 ahead 1\n",
         "exact find-ahead line"
@@ -218,7 +231,7 @@ fn ahh_prescan_lines_big() {
     let dir = temp_dir("ahh-big");
     let (org, new) = big_pair();
     let (stdout, out) = run_dbg(&dir, &org, &new, &["-vv", "-dahh"], "ahhB");
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(1));
     // Filter out the verbose>1 engine/CLI text mixed into the stream; the
     // "Indexing  : ...           " marker shares the first line with the
     // first trace (no newline in between, 1:1 with the C++), so each line
@@ -250,7 +263,7 @@ fn ahh_findahead_lines_ff() {
     let dir = temp_dir("ahh-ff");
     let (org, new) = big_pair();
     let (stdout, out) = run_dbg(&dir, &org, &new, &["-ff", "-dahh"], "ahhFF");
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(1));
     assert!(
         stdout.is_empty(),
         "no DBGAHH site in the 0.8.5 search loop: {stdout:?}"
@@ -265,7 +278,7 @@ fn ahh_findahead_lines_ff() {
 fn hsk_flag_is_silent() {
     let dir = temp_dir("hsk-tiny");
     let (stdout, out) = run_dbg(&dir, ORG_A, NEW_B, &["-dhsk"], "hsk");
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(1));
     assert!(
         stdout.is_empty(),
         "-dhsk has zero print sites at 0.8.5: {stdout:?}"
@@ -277,17 +290,18 @@ fn hsk_flag_is_silent() {
 /// and the per-store "Hash Add" lines (`JHashPos.cpp:127-132`), where the
 /// final `%c` is `.` for an empty bucket and `!` for an override.
 ///
-/// 0.8.5 MB sizing (spec §18.E): the CLI default of 8 MB (Task 20 changes it
-/// to 32) gives 8*1024*1024/16 = 524288 elements → prime 524287, and the
-/// size in bytes is prime*12 = 6291444. The first store's index is the
-/// window key c8d9b3a9 mod 524287 = 117956 (the engine keys are unchanged
-/// until Task 17 rewires the hash shim).
+/// 0.8.5 MB sizing (spec §18.E): the run pins the CLI default-equivalent
+/// element count via `-i 8` (8*1024*1024/16 = 524288 elements → prime
+/// 524287, size in bytes prime*12 = 6291444) — element-count-equivalent to
+/// the 32-bit-hkey debug oracle's `-i 6` (6*1024*1024/12), re-verified
+/// byte-for-byte today ("Hash Ini sizeof= 4+ 8=12, 524287 samples,
+/// 6291444 bytes" and first store "Hash Add   117956         31 c8d9b3a9 .").
 #[test]
 fn hsh_ini_and_add_lines_big() {
     let dir = temp_dir("hsh-big");
     let (org, new) = big_pair();
-    let (stdout, out) = run_dbg(&dir, &org, &new, &["-dhsh"], "hshB");
-    assert_eq!(out.status.code(), Some(0));
+    let (stdout, out) = run_dbg(&dir, &org, &new, &["-i", "8", "-dhsh"], "hshB");
+    assert_eq!(out.status.code(), Some(1));
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 970, "Ini + 969 stores: {stdout:?}");
     assert!(
@@ -318,7 +332,7 @@ fn mch_lines_big() {
     let dir = temp_dir("mch-big");
     let (org, new) = big_pair();
     let (stdout, out) = run_dbg(&dir, &org, &new, &["-dmch"], "mchB");
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         stdout,
         concat!(
@@ -343,7 +357,7 @@ fn cmp_check_line_big() {
     let dir = temp_dir("cmp-big");
     let (org, new) = big_pair();
     let (stdout, out) = run_dbg(&dir, &org, &new, &["-dcmp"], "cmpB");
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         stdout,
         "Cmp Col (       250,       250,1024,1):        251        251 256 OK! ( )b9 == ( )b9\n",
@@ -356,19 +370,18 @@ fn cmp_check_line_big() {
 /// sites** (spec §18.G/§21.13). The 0.8.1 site (distribution after the
 /// prescan, 128 buckets) is gone with the 0.8.5 prescan; `dist()` now serves
 /// only the release-visible verbose>2 call sites (`JDiff.cpp:324-327,784-787`,
-/// 10 buckets), which need `-vvv`, not `-ddst`. The debug stream must stay
+/// 10 buckets), which need `-vvv`, not `-ddst` — that block is pinned
+/// oracle-exact in tests/roundtrip.rs
+/// (`inaccurate_solution_lines_at_verbose_3`). The debug stream must stay
 /// completely empty.
-// TODO(T20): the -vvv dist output (verbose-driven, 10 buckets) is part of
-// the 0.8.5 verbose block; it becomes assertable with the Task 20 verbose
-// work.
 #[test]
 fn dst_flag_is_silent() {
     let dir = temp_dir("dst-big");
-    let mut org = lcg(1, 100_000);
+    let org = lcg(1, 100_000);
     let mut new = org.clone();
     new[250] ^= 0xFF;
     let (stdout, out) = run_dbg(&dir, &org, &new, &["-ddst"], "dstB");
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(1));
     assert!(
         stdout.is_empty(),
         "-ddst has zero print sites at 0.8.5: {stdout:?}"
@@ -376,16 +389,19 @@ fn dst_flag_is_silent() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
-/// DBGBUF at 0.8.5 on the 100000-byte pair with an 8 kB buffer (spec §18.G):
+/// DBGBUF at 0.8.5 on the 100000-byte pair with an 8 MB buffer (`-m 16`):
 /// the 0.8.1 `ufFabGet: Seek` trace site is gone — the only DBGBUF output is
 /// the two `ufFabOpn` lines, even across the heavy reset/scrollback traffic
-/// of this pair.
+/// of this pair. The sek pair is a pure block move, so the patch holds no
+/// data bytes (`dta == 0`) and the 0.8.5 swapped mapping exits 0
+/// ("all data found within source", main.cpp:921-924) despite the non-empty
+/// 29-byte EQL/DEL/BKT patch.
 #[test]
 fn buf_open_only_no_seek_lines_sek() {
     let dir = temp_dir("buf-sek");
     let (org, new) = sek_pair();
     let (stdout, out) = run_dbg(&dir, &org, &new, &["-m", "16", "-dbuf"], "sekB");
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(0), "EQL-only patch: dta == 0");
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(
         lines.len(),
@@ -406,7 +422,8 @@ fn buf_open_only_no_seek_lines_sek() {
 /// DBGRED on the sek pair (plain and with `-f`, exercising reset, scrollback,
 /// EOF latching and soft-ahead bounds): the double-verify block stays silent
 /// — the buffer contents match fresh reads everywhere, and EOF/EOB are no
-/// longer traced at 0.8.5.
+/// longer traced at 0.8.5. (Exit 0: the EQL-only block-move patch carries no
+/// data bytes, `dta == 0` → EXI_EQL under the swapped mapping.)
 #[test]
 fn red_double_verify_silent_sek() {
     let dir = temp_dir("red-sek");
@@ -415,7 +432,7 @@ fn red_double_verify_silent_sek() {
         let mut opts = extra;
         opts.push("-dred");
         let (stdout, out) = run_dbg(&dir, &org, &new, &opts, tag);
-        assert_eq!(out.status.code(), Some(0), "{tag}");
+        assert_eq!(out.status.code(), Some(0), "{tag}: EQL-only patch");
         assert!(
             stdout.is_empty(),
             "{tag}: no DBGRED output expected (sites removed at 0.8.5,\n\
@@ -448,7 +465,7 @@ fn dmch_leaves_patch_bytes_unchanged() {
             .args(&args)
             .output()
             .expect("spawn jdiff");
-        assert_eq!(out.status.code(), Some(0));
+        assert_eq!(out.status.code(), Some(1));
     }
     assert_eq!(fs::read(&p0).unwrap(), PATCH_BIG);
     assert_eq!(
@@ -466,6 +483,7 @@ fn dmch_leaves_patch_bytes_unchanged() {
 /// the same division), and the 1000-byte pair tops out at `liMax` 7 over 128
 /// buckets. (`-ddst` on a file smaller than the 128 buckets divides by zero
 /// in the fill loop in the C++ too — SIGFPE, verified on the 0.8.1 oracle.)
+/// 0.8.5 syntax: `-d <name>` consumes the name; `-c` redirects the stream.
 #[test]
 fn all_eleven_flags_accepted() {
     let dir = temp_dir("flags");
@@ -474,12 +492,13 @@ fn all_eleven_flags_accepted() {
     let b = write_file(&dir.join("b.bin"), &new);
     let p = dir.join("p.bin");
     for flag in [
-        "-dhsh", "-dahd", "-dcmp", "-dprg", "-dbuf", "-dhsk", "-dahh", "-dbkt", "-dred", "-dmch",
+        "hsh", "ahd", "cmp", "prg", "buf", "hsk", "ahh", "bkt", "red", "mch",
     ] {
         let out = Command::new(env!("CARGO_BIN_EXE_jdiff"))
             .args([
+                "-d",
                 flag,
-                "-do",
+                "-c",
                 a.as_os_str().to_str().unwrap(),
                 b.as_os_str().to_str().unwrap(),
                 p.as_os_str().to_str().unwrap(),
@@ -488,21 +507,22 @@ fn all_eleven_flags_accepted() {
             .expect("spawn jdiff");
         assert_eq!(
             out.status.code(),
-            Some(0),
-            "{flag} must be an option, not a filename: {:?}",
+            Some(1),
+            "-d {flag} must be an option, not a filename: {:?}",
             String::from_utf8_lossy(&out.stderr)
         );
     }
-    // -ddst on the 100000-byte pair (liMax 781 >= 100: no SIGFPE path).
-    let mut org = lcg(1, 100_000);
+    // -d dst on the 100000-byte pair (liMax 781 >= 100: no SIGFPE path).
+    let org = lcg(1, 100_000);
     let mut new = org.clone();
     new[250] ^= 0xFF;
     let a = write_file(&dir.join("a-big.bin"), &org);
     let b = write_file(&dir.join("b-big.bin"), &new);
     let out = Command::new(env!("CARGO_BIN_EXE_jdiff"))
         .args([
-            "-ddst",
-            "-do",
+            "-d",
+            "dst",
+            "-c",
             a.as_os_str().to_str().unwrap(),
             b.as_os_str().to_str().unwrap(),
             p.as_os_str().to_str().unwrap(),
@@ -511,8 +531,8 @@ fn all_eleven_flags_accepted() {
         .expect("spawn jdiff");
     assert_eq!(
         out.status.code(),
-        Some(0),
-        "-ddst must be an option, not a filename: {:?}",
+        Some(1),
+        "-d dst must be an option, not a filename: {:?}",
         String::from_utf8_lossy(&out.stderr)
     );
     fs::remove_dir_all(&dir).unwrap();

@@ -4,7 +4,7 @@ version = "0.8.5"
 edition = "2024"
 rust-version = "1.85"
 license = "GPL-3.0-or-later"
-description = "Independent Rust port of JojoDiff 0.8.1: byte-compatible jdiff and jptch binary diff/patch CLIs (not affiliated with the jojodiff crate)"
+description = "Independent Rust port of JojoDiff 0.8.5: byte-compatible jdiff binary diff/patch CLI (single binary; jpatch/jptch patch via -u or argv[0] dispatch; not affiliated with the jojodiff crate)"
 repository = "https://github.com/ar-nim/jojodiff-cli-rs"
 readme = "README.md"
 keywords = ["jojodiff", "binary-diff", "patch", "cli", "diff"]
@@ -18,9 +18,9 @@ name = "jojodiff_cli_rs"
 name = "jdiff"
 path = "src/bin/jdiff.rs"
 
-[[bin]]
-name = "jptch"
-path = "src/bin/jptch.rs"
+# One binary (spec §21.2): patching is `jdiff -u` or an argv[0] dispatch —
+# copies/links of the binary named jpatch*/jptch* patch. The 0.8.1 jptch
+# [[bin]] target is gone; scripts migrate with `ln -s jdiff jptch`.
 
 [features]
 default = []

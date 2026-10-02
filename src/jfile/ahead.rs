@@ -18,6 +18,21 @@
 //! short reads (`:415-423`). There is no `Buffer out of bounds` abort
 //! anymore — 0.8.5 clamps and wraps (spec §18.E).
 //!
+//! # Deviation from the C++ (documented)
+//!
+//! **Negative positions read as EOF.** An EOF read resets the read cursor to
+//! -1 (`get_frombuffer`, `JFileAhead.cpp:142-147`); the C++ `getbuf` EOF gate
+//! (`azPos >= mzPosEof`) does not catch a re-read at that negative cursor, so
+//! `JPatcht`'s zero-argument `get()` — which re-issues there after every EOF
+//! — scrolls the buffer back and receives a stale byte as data. In release
+//! builds the patch decoder then never sees EOF again and spins forever on
+//! corrupt patches (reproduced byte-for-byte with the 0.8.5 oracle: a
+//! DEL-only patch streams zero bytes, a trailing lone ESC cycles
+//! `x ESC FF 00 ESC MOD`); debug builds trip the always-on `getbuf` assert
+//! instead (exit 6). The port ends the file at any negative position
+//! (`getbuf_off`: `pos < 0` → EOF), matching `JFileMem` and terminating the
+//! decode.
+//!
 //! # Debug surface (spec §18.G, `debug` feature)
 //!
 //! Three sites are ported: the DBGBUF `ufFabOpn` open line
@@ -312,8 +327,16 @@ impl<R: Read + Seek> JFileAhead<R> {
     /// On success `*len` holds the number of available bytes; on failure it
     /// holds the EOF/EOB/EXI sentinel.
     fn getbuf_off(&mut self, pos: i64, len: &mut i64, typ: ReadType) -> Option<usize> {
-        if pos >= self.pos_eof {
-            /* eof (JFileAhead.cpp:213-216) */
+        if pos >= self.pos_eof || pos < 0 {
+            /* eof (JFileAhead.cpp:213-216). `pos < 0` is the port's
+             * deviation 4 (module docs): the C++ gate is only
+             * `azPos >= mzPosEof`, so the negative read cursor left by an
+             * EOF read escapes it, scrolls the buffer back and serves a
+             * stale byte — 0.8.5's release build then never sees EOF again
+             * and spins forever (verified against the oracle), while its
+             * debug build trips the getbuf assert (exit 6). Negative
+             * positions cannot be valid in any file, so the port ends the
+             * file there, like `JFileMem` (`pos < 0` → EOF). */
             *len = i64::from(EOF);
             return None;
         } else if pos < self.pos_inp && pos >= self.pos_inp - self.buf_usd {
@@ -714,6 +737,26 @@ mod tests {
         assert_eq!(f.get(255, ReadType::Read), pat(255));
         assert_eq!(f.seekcount(), 0, "append read of the whole file");
         assert_eq!(f.get(256, ReadType::Read), EOF);
+    }
+
+    /// After an EOF read the read cursor sits at -1 (`get_frombuffer`'s
+    /// reset, `JFileAhead.cpp:142-147`); re-reading at that negative
+    /// position must return EOF again — never scroll back and serve a stale
+    /// buffer byte. (Upstream 0.8.5 escapes its EOF gate with `-1` and spins
+    /// forever on corrupt patches through this window in release builds;
+    /// its debug build asserts. The port returns EOF, matching `JFileMem`
+    /// and terminating the decode — module docs, deviation 4.)
+    #[test]
+    fn get_at_negative_position_after_eof_returns_eof() {
+        let mut f = mk(data(3));
+        for i in 0..3 {
+            assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
+        }
+        assert_eq!(f.get(3, ReadType::Read), EOF, "EOF at end");
+        // The C++ zero-arg get() re-issues at the reset cursor (-1).
+        assert_eq!(f.get(-1, ReadType::Read), EOF, "EOF is sticky at -1");
+        assert_eq!(f.get(-1, ReadType::Read), EOF, "EOF stays sticky at -1");
+        assert_eq!(f.get(-42, ReadType::Read), EOF, "any negative position");
     }
 
     /// Soft-ahead appends are bounded by the lookahead base:

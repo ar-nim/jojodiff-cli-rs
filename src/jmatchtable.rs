@@ -680,7 +680,7 @@ impl JMatchTable {
             let (mut li_new, mut li_old) = (0, 0);
             // The C++ walks the new list with the extra bound
             // lpCur != mpLst->ipNxt (short-circuited away when mpNew is null).
-            let lst_nxt = self.mp_lst.map(|l| self.nodes[l].nxt).flatten();
+            let lst_nxt = self.mp_lst.and_then(|l| self.nodes[l].nxt);
             let mut p = self.mp_new;
             while let Some(ci) = p {
                 if Some(ci) == lst_nxt {

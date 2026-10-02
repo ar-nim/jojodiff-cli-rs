@@ -3,14 +3,22 @@
 [![ci](https://github.com/ar-nim/jojodiff-cli-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/ar-nim/jojodiff-cli-rs/actions/workflows/ci.yml)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
 
-An independent Rust port of [JojoDiff](https://sourceforge.net/projects/jojodiff/) 0.8.1 by
-Joris Heirbaut — byte-compatible `jdiff` and `jptch` binary diff/patch command-line tools
-for Windows, Linux and macOS, plus a reusable library.
+An independent Rust port of [JojoDiff](https://sourceforge.net/projects/jojodiff/) by
+Joris Heirbaut — byte-compatible binary diff/patch command-line tools for Windows, Linux
+and macOS, plus a reusable library. The port started from 0.8.1 and is re-targeted to
+**0.8.5**, which ships a **single `jdiff` binary**: patching is `jdiff -u`, and copies,
+links or aliases of the binary named `jpatch`/`jptch` patch via argv[0] dispatch.
 
-> **Status: beta** — the port is complete and matches JojoDiff 0.8.1. Every patch byte,
+> **Status: beta** — the port is complete and matches JojoDiff 0.8.5. Every patch byte,
 > listing, verbose line and exit code produced by this implementation is verified against
 > the original C++ source compiled as a fixed oracle build (see
 > [Oracle verification](#oracle-verification)). Bugs are fidelity bugs; report them as such.
+>
+> **Migrating from the 0.8.1 package:** after `cargo install` only `jdiff` exists —
+> existing `jptch` scripts migrate with a one-time `ln -s jdiff jptch` (or a shell alias,
+> or calling `jdiff -u`). Remove or replace any stale `jptch` binary left in `~/.cargo/bin`
+> by the 0.8.1 install: a leftover 0.8.1 `jptch` would silently keep 0.8.1 semantics,
+> including dropping implicit-MOD bytes.
 
 ## What is JojoDiff?
 
@@ -111,9 +119,10 @@ Rust 1.85 or newer (edition 2024); no runtime dependencies beyond `std`:
 cargo build --release
 ```
 
-produces `target/release/jdiff` and `target/release/jptch`.
+produces `target/release/jdiff` (0.8.5 ships one binary; `jpatch`/`jptch` are
+argv[0] aliases — see the migration note at the top).
 
-For regular use, install both binaries onto your `PATH` (default `~/.cargo/bin`):
+For regular use, install the binary onto your `PATH` (default `~/.cargo/bin`):
 
 ```
 cargo install --path .
