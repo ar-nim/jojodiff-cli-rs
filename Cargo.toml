@@ -52,3 +52,9 @@ anyhow = "1"
 [dev-dependencies]
 pretty_assertions = "1.4"
 jojodiff = "0.1.2"   # francisdb crate, cross-validation only (tests/oracle.rs)
+# Test-harness modernization (spec §8.4): tempfile-backed RAII scratch dirs
+# and the assert_cmd/predicates spawn+assert layer (tests/common/mod.rs).
+# The MSRV job's plain `cargo check` never compiles dev-deps.
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"

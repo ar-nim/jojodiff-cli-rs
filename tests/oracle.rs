@@ -38,12 +38,14 @@
 //! exit codes); the identical-files exit-0 case is pinned in
 //! `tests/roundtrip.rs`.
 
+mod common;
+
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU32, Ordering};
+use tempfile::TempDir;
 
 /// The two bundled corpus pairs: (golden directory name, original, new).
 const PAIRS: &[(&str, &str, &str)] = &[
@@ -143,19 +145,6 @@ fn oracle_dir() -> Option<PathBuf> {
             .join("target")
             .join("oracle"),
     )
-}
-
-/// Unique temp directory per test (parallel-safe), cleaned up by the caller.
-fn temp_dir(tag: &str) -> PathBuf {
-    static N: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "jdiff-t12-{}-{}-{}",
-        tag,
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir_all(&dir).expect("create temp dir");
-    dir
 }
 
 /// Run a binary with OsString `args` inside `dir`.
@@ -263,10 +252,10 @@ fn golden85_jdiff_outputs_match() {
             let golden = golden85_dir().join(pair).join(format!("{name}.{ext}"));
             let golden_bytes = fs::read(&golden)
                 .unwrap_or_else(|e| panic!("read golden {}: {e}", golden.display()));
-            let dir = temp_dir(&format!("g85-{pair}-{name}"));
-            let out = dir.join("output.bin");
+            let dir = common::scratch(&format!("g85-{pair}-{name}"));
+            let out = dir.path().join("output.bin");
             let outp = run_in(
-                &dir,
+                dir.path(),
                 Path::new(env!("CARGO_BIN_EXE_jdiff")),
                 &jdiff_args(opts, &fixture(org), &fixture(new), &out),
             );
@@ -280,7 +269,7 @@ fn golden85_jdiff_outputs_match() {
                 rust_bytes, golden_bytes,
                 "rust jdiff output diverges from 0.8.5-oracle golden for {pair}/{name}"
             );
-            fs::remove_dir_all(&dir).expect("clean temp dir");
+            drop(dir);
         }
     }
 }
@@ -297,12 +286,12 @@ fn golden85_verbose_stderr_matches() {
             let golden = golden85_dir().join(pair).join(format!("{name}.vv.stderr"));
             let golden_bytes = fs::read(&golden)
                 .unwrap_or_else(|e| panic!("read golden {}: {e}", golden.display()));
-            let dir = temp_dir(&format!("g85v-{pair}-{name}"));
-            let out = dir.join("output.bin");
+            let dir = common::scratch(&format!("g85v-{pair}-{name}"));
+            let out = dir.path().join("output.bin");
             let mut all: Vec<&str> = vec!["-vv"];
             all.extend_from_slice(opts);
             let outp = run_in(
-                &dir,
+                dir.path(),
                 Path::new(env!("CARGO_BIN_EXE_jdiff")),
                 &jdiff_args(&all, &fixture(org), &fixture(new), &out),
             );
@@ -316,7 +305,7 @@ fn golden85_verbose_stderr_matches() {
                 String::from_utf8_lossy(&golden_bytes).into_owned(),
                 "rust jdiff verbose stderr diverges from 0.8.5-oracle golden for {pair}/{name}"
             );
-            fs::remove_dir_all(&dir).expect("clean temp dir");
+            drop(dir);
         }
     }
 }
@@ -364,17 +353,17 @@ fn live_oracle_jdiff_matches() {
     let rust_jdiff = PathBuf::from(env!("CARGO_BIN_EXE_jdiff"));
 
     // Tiny pair: write fixtures, byte-compare every set's output.
-    let tdir = temp_dir("live-tiny");
-    let org = tdir.join("a.bin");
-    let new = tdir.join("b.bin");
+    let tdir = common::scratch("live-tiny");
+    let org = tdir.path().join("a.bin");
+    let new = tdir.path().join("b.bin");
     fs::write(&org, TINY_ORG).unwrap();
     fs::write(&new, TINY_NEW).unwrap();
     for (name, opts, _) in OPTION_SETS {
-        let mut outs: Vec<(PathBuf, Output, PathBuf)> = Vec::new(); // (dir, output, out-file)
+        let mut outs: Vec<(TempDir, Output, PathBuf)> = Vec::new(); // (dir, output, out-file)
         for (tag, exe) in [("cpp", &oracle_jdiff), ("rs", &rust_jdiff)] {
-            let dir = temp_dir(&format!("live-tiny-{name}-{tag}"));
-            let out_file = dir.join("output.bin");
-            let outp = run_in(&dir, exe, &jdiff_args(opts, &org, &new, &out_file));
+            let dir = common::scratch(&format!("live-tiny-{name}-{tag}"));
+            let out_file = dir.path().join("output.bin");
+            let outp = run_in(dir.path(), exe, &jdiff_args(opts, &org, &new, &out_file));
             assert_exit1(&outp, &format!("{tag} jdiff tiny/{name}"));
             assert!(
                 outp.stdout.is_empty(),
@@ -390,10 +379,10 @@ fn live_oracle_jdiff_matches() {
             "Rust and C++ jdiff diverge for tiny/{name}"
         );
         assert_eq!(outp_rs.status.code(), outp_cpp.status.code());
-        fs::remove_dir_all(&dir_cpp).expect("clean temp dir");
-        fs::remove_dir_all(&dir_rs).expect("clean temp dir");
+        drop(dir_cpp);
+        drop(dir_rs);
     }
-    fs::remove_dir_all(&tdir).expect("clean temp dir");
+    drop(tdir);
 
     // Corpus pairs: byte-compare every set's output (patch sets AND the
     // `-l`/`-r` listings, including the ~80 MB bkocomu `-l` that is not a
@@ -403,12 +392,12 @@ fn live_oracle_jdiff_matches() {
     for (pair, org, new) in PAIRS {
         let new_bytes = fs::read(fixture(new)).expect("read new file");
         for (name, opts, ext) in OPTION_SETS {
-            let mut outs: Vec<(PathBuf, Output, PathBuf)> = Vec::new();
+            let mut outs: Vec<(TempDir, Output, PathBuf)> = Vec::new();
             for (tag, exe) in [("cpp", &oracle_jdiff), ("rs", &rust_jdiff)] {
-                let dir = temp_dir(&format!("live-{pair}-{name}-{tag}"));
-                let output = dir.join("output.bin");
+                let dir = common::scratch(&format!("live-{pair}-{name}-{tag}"));
+                let output = dir.path().join("output.bin");
                 let outp = run_in(
-                    &dir,
+                    dir.path(),
                     exe,
                     &jdiff_args(opts, &fixture(org), &fixture(new), &output),
                 );
@@ -423,23 +412,27 @@ fn live_oracle_jdiff_matches() {
                 "Rust and C++ jdiff diverge for {pair}/{name}"
             );
             if *ext != "jdf" {
-                fs::remove_dir_all(&dir_cpp).expect("clean temp dir");
-                fs::remove_dir_all(&dir_rs).expect("clean temp dir");
+                drop(dir_cpp);
+                drop(dir_rs);
                 continue;
             }
             for (dir, exe, patch) in [
                 (dir_rs, &rust_jdiff, file_rs),
                 (dir_cpp, &oracle_jdiff, file_cpp),
             ] {
-                let restored = dir.join("restored.bin");
-                let outp = run_in(&dir, exe, &apply_args(&fixture(org), &patch, &restored));
+                let restored = dir.path().join("restored.bin");
+                let outp = run_in(
+                    dir.path(),
+                    exe,
+                    &apply_args(&fixture(org), &patch, &restored),
+                );
                 assert_exit0(&outp, &format!("{} -u {pair}/{name}", exe.display()));
                 assert_eq!(
                     fs::read(&restored).expect("restored"),
                     new_bytes,
                     "round-trip failed for {pair}/{name}"
                 );
-                fs::remove_dir_all(&dir).expect("clean temp dir");
+                drop(dir);
             }
         }
     }
@@ -454,20 +447,24 @@ fn live_oracle_verbose_stderr_matches() {
         eprintln!("{}", skip_message());
         return;
     };
-    let tdir = temp_dir("lverb-tiny");
-    let org = tdir.join("a.bin");
-    let new = tdir.join("b.bin");
+    let tdir = common::scratch("lverb-tiny");
+    let org = tdir.path().join("a.bin");
+    let new = tdir.path().join("b.bin");
     fs::write(&org, TINY_ORG).unwrap();
     fs::write(&new, TINY_NEW).unwrap();
     for (vtag, vopt) in VERBOSE_LEVELS {
-        let mut runs: Vec<(PathBuf, Output)> = Vec::new();
+        let mut runs: Vec<(TempDir, Output)> = Vec::new();
         for (tag, exe) in [
             ("cpp", oracle.join("jdiff")),
             ("rs", PathBuf::from(env!("CARGO_BIN_EXE_jdiff"))),
         ] {
-            let dir = temp_dir(&format!("lverb-tiny-{vtag}-{tag}"));
-            let out_file = dir.join("output.bin");
-            let outp = run_in(&dir, &exe, &jdiff_args(&[vopt], &org, &new, &out_file));
+            let dir = common::scratch(&format!("lverb-tiny-{vtag}-{tag}"));
+            let out_file = dir.path().join("output.bin");
+            let outp = run_in(
+                dir.path(),
+                &exe,
+                &jdiff_args(&[vopt], &org, &new, &out_file),
+            );
             assert_exit1(&outp, &format!("{tag} jdiff -{vtag} tiny"));
             runs.push((dir, outp));
         }
@@ -478,10 +475,10 @@ fn live_oracle_verbose_stderr_matches() {
             mask_deviation_lines(&String::from_utf8_lossy(&outp_cpp.stderr)),
             "Rust and C++ jdiff verbose stderr diverge for tiny -{vtag}"
         );
-        fs::remove_dir_all(&dir_cpp).expect("clean temp dir");
-        fs::remove_dir_all(&dir_rs).expect("clean temp dir");
+        drop(dir_cpp);
+        drop(dir_rs);
     }
-    fs::remove_dir_all(&tdir).expect("clean temp dir");
+    drop(tdir);
 }
 
 /// Cross-applies patches through both binaries' `-u`: for the tiny pair,
@@ -495,9 +492,9 @@ fn live_oracle_patch_cross_applies() {
     };
     let oracle_jdiff = oracle.join("jdiff");
     let rust_jdiff = PathBuf::from(env!("CARGO_BIN_EXE_jdiff"));
-    let tdir = temp_dir("cross-tiny");
-    let org = tdir.join("a.bin");
-    let new = tdir.join("b.bin");
+    let tdir = common::scratch("cross-tiny");
+    let org = tdir.path().join("a.bin");
+    let new = tdir.path().join("b.bin");
     fs::write(&org, TINY_ORG).unwrap();
     fs::write(&new, TINY_NEW).unwrap();
 
@@ -505,30 +502,35 @@ fn live_oracle_patch_cross_applies() {
         if *ext != "jdf" {
             continue;
         }
-        let mut patches: Vec<(&str, PathBuf)> = Vec::new();
+        // The maker scratch dirs must outlive their patches: the RAII
+        // TempDir would delete patch.jdf at the inner scope's end, so the
+        // dirs are kept (and dropped) alongside the patch paths. (The old
+        // manual helper leaked these dirs until process end; the TempDir
+        // now cleans them up deterministically after the apply loop.)
+        let mut patches: Vec<(&str, TempDir, PathBuf)> = Vec::new();
         for (tag, exe) in [("cpp", &oracle_jdiff), ("rs", &rust_jdiff)] {
-            let dir = temp_dir(&format!("cross-tiny-{name}-{tag}"));
-            let patch = dir.join("patch.jdf");
-            let outp = run_in(&dir, exe, &jdiff_args(opts, &org, &new, &patch));
+            let dir = common::scratch(&format!("cross-tiny-{name}-{tag}"));
+            let patch = dir.path().join("patch.jdf");
+            let outp = run_in(dir.path(), exe, &jdiff_args(opts, &org, &new, &patch));
             assert_exit1(&outp, &format!("{tag} jdiff tiny/{name}"));
-            patches.push((tag, patch));
+            patches.push((tag, dir, patch));
         }
-        for (maker, patch) in &patches {
+        for (maker, _maker_dir, patch) in &patches {
             for (tag, exe) in [("cpp", &oracle_jdiff), ("rs", &rust_jdiff)] {
-                let dir = temp_dir(&format!("cross-tiny-{name}-{maker}-by-{tag}"));
-                let restored = dir.join("restored.bin");
-                let outp = run_in(&dir, exe, &apply_args(&org, patch, &restored));
+                let dir = common::scratch(&format!("cross-tiny-{name}-{maker}-by-{tag}"));
+                let restored = dir.path().join("restored.bin");
+                let outp = run_in(dir.path(), exe, &apply_args(&org, patch, &restored));
                 assert_exit0(&outp, &format!("{tag} -u of {maker} patch tiny/{name}"));
                 assert_eq!(
                     fs::read(&restored).expect("restored"),
                     TINY_NEW,
                     "{maker} patch applied by {tag} diverges for tiny/{name}"
                 );
-                fs::remove_dir_all(&dir).expect("clean temp dir");
+                drop(dir);
             }
         }
     }
-    fs::remove_dir_all(&tdir).expect("clean temp dir");
+    drop(tdir);
 }
 
 // ---------------------------------------------------------------------------
@@ -545,11 +547,11 @@ fn roundtrip_gate() {
     for (pair, org, new) in PAIRS {
         let new_bytes = fs::read(fixture(new)).expect("read new file");
         for (name, opts) in roundtrip_sets(pair) {
-            let dir = temp_dir(&format!("rt-{pair}-{name}"));
-            let patch = dir.join("patch.jdf");
-            let patched = dir.join("patched.bin");
+            let dir = common::scratch(&format!("rt-{pair}-{name}"));
+            let patch = dir.path().join("patch.jdf");
+            let patched = dir.path().join("patched.bin");
             let d = run_in(
-                &dir,
+                dir.path(),
                 Path::new(env!("CARGO_BIN_EXE_jdiff")),
                 &jdiff_args(opts, &fixture(org), &fixture(new), &patch),
             );
@@ -559,7 +561,7 @@ fn roundtrip_gate() {
                 "jdiff {pair}/{name}: patch for a differing pair must not be empty"
             );
             let p = run_in(
-                &dir,
+                dir.path(),
                 Path::new(env!("CARGO_BIN_EXE_jdiff")),
                 &apply_args(&fixture(org), &patch, &patched),
             );
@@ -569,7 +571,7 @@ fn roundtrip_gate() {
                 new_bytes,
                 "round-trip failed for {pair}/{name}"
             );
-            fs::remove_dir_all(&dir).expect("clean temp dir");
+            drop(dir);
         }
     }
 }
@@ -608,9 +610,9 @@ fn oracle_081_applies_compat_081_patches() {
 
     // Corpus: the tiny pair (TINY_ORG/TINY_NEW) plus both bundled pairs,
     // over a few option sets.
-    let tiny_dir = temp_dir("o81-tiny");
-    let tiny_org = tiny_dir.join("a.bin");
-    let tiny_new = tiny_dir.join("b.bin");
+    let tiny_dir = common::scratch("o81-tiny");
+    let tiny_org = tiny_dir.path().join("a.bin");
+    let tiny_new = tiny_dir.path().join("b.bin");
     fs::write(&tiny_org, TINY_ORG).expect("write tiny org");
     fs::write(&tiny_new, TINY_NEW).expect("write tiny new");
 
@@ -636,16 +638,16 @@ fn oracle_081_applies_compat_081_patches() {
     for (pair, org, new, new_bytes) in &corpus {
         for opts in option_sets {
             let tag = format!("{}-{}", pair, opts.join(""));
-            let dir = temp_dir(&format!("o81-{tag}"));
-            let patch = dir.join("patch.jdf");
-            let patched = dir.join("patched.bin");
+            let dir = common::scratch(&format!("o81-{tag}"));
+            let patch = dir.path().join("patch.jdf");
+            let patched = dir.path().join("patched.bin");
 
             // The Rust diff with --compat-081: the flag is prepended to
             // jdiff_args' [opts… org new out] (GNU permutation keeps the
             // operand order).
             let mut args: Vec<OsString> = vec![OsStr::new("--compat-081").to_os_string()];
             args.extend(jdiff_args(opts, org, new, &patch));
-            let d = run_in(&dir, &rust_jdiff, &args);
+            let d = run_in(dir.path(), &rust_jdiff, &args);
             assert_exit1(&d, &format!("jdiff --compat-081 {tag}"));
 
             // The C++ 0.8.1 oracle's jptch applies it.
@@ -654,17 +656,17 @@ fn oracle_081_applies_compat_081_patches() {
                 patch.as_os_str().to_os_string(),
                 patched.as_os_str().to_os_string(),
             ];
-            let p = run_in(&dir, &jptch, &jargs);
+            let p = run_in(dir.path(), &jptch, &jargs);
             assert_exit0(&p, &format!("0.8.1 jptch apply {tag}"));
             assert_eq!(
                 fs::read(&patched).expect("patched output"),
                 *new_bytes,
                 "0.8.1 jptch restore failed for {tag}"
             );
-            fs::remove_dir_all(&dir).expect("clean temp dir");
+            drop(dir);
         }
     }
-    fs::remove_dir_all(&tiny_dir).expect("clean tiny dir");
+    drop(tiny_dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -684,10 +686,10 @@ fn francisdb_cross_validation() {
     let org_bytes = fs::read(fixture(org)).expect("read original file");
     let new_bytes = fs::read(fixture(new)).expect("read new file");
     for (name, opts, _) in patch_sets() {
-        let dir = temp_dir(&format!("fdb-{pair}-{name}"));
-        let patch = dir.join("patch.jdf");
+        let dir = common::scratch(&format!("fdb-{pair}-{name}"));
+        let patch = dir.path().join("patch.jdf");
         let d = run_in(
-            &dir,
+            dir.path(),
             Path::new(env!("CARGO_BIN_EXE_jdiff")),
             &jdiff_args(opts, &fixture(org), &fixture(new), &patch),
         );
@@ -703,6 +705,6 @@ fn francisdb_cross_validation() {
             out, new_bytes,
             "francisdb-applied patch differs for {pair}/{name}"
         );
-        fs::remove_dir_all(&dir).expect("clean temp dir");
+        drop(dir);
     }
 }

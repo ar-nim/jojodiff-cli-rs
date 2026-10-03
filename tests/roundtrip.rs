@@ -21,12 +21,13 @@
 //! writer vectors live inline in `src/jout/bin.rs`, the 0.8.1-oracle gate in
 //! `tests/oracle.rs`.
 
+mod common;
+
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use jojodiff_cli_rs::defs::Op;
 
@@ -160,29 +161,14 @@ const PATCH_AB_081: &[u8] = &[
     0xA7, 0xA5, b'e', // ESC INS "e"
 ];
 
-/// Unique temp directory per test (parallel-safe), cleaned up by the caller.
-fn temp_dir(tag: &str) -> PathBuf {
-    static N: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "jdiff-t20-{}-{}-{}",
-        tag,
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir_all(&dir).expect("create temp dir");
-    dir
-}
-
 fn write_file(path: &Path, content: &[u8]) -> PathBuf {
     fs::write(path, content).expect("write fixture");
     path.to_path_buf()
 }
 
+/// Runs `jdiff` with the given args (assert_cmd factory under the hood).
 fn run(args: &[&OsStr]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_jdiff"))
-        .args(args)
-        .output()
-        .expect("spawn jdiff")
+    common::jdiff(args).output().expect("spawn jdiff")
 }
 
 /// Runs `jdiff` with the given args, `file` wired to stdin as a real file
@@ -327,21 +313,20 @@ fn usage_contains_stale_texts() {
     assert!(text.contains("(in KB)"), "stale -m unit: {text:?}");
     assert!(text.contains("0=no buffering"), "stale -m 0 mode: {text:?}");
     // The verbose echo's "disbale" typo (main.cpp:834) — assertable via -vv.
-    let dir = temp_dir("disbale");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
+    let dir = common::scratch("disbale");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
     let out = run(&[
         OsStr::new("-vv"),
         a.as_os_str(),
         b.as_os_str(),
-        dir.join("p.bin").as_os_str(),
+        dir.path().join("p.bin").as_os_str(),
     ]);
     assert!(
         stderr_str(&out).contains("(-ff to disbale)"),
         "verbose echo typo: {:?}",
         stderr_str(&out)
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ===========================================================================
@@ -353,56 +338,53 @@ fn usage_contains_stale_texts() {
 /// file, oracle-pinned (`A7 A3 11`).
 #[test]
 fn equal_files_exit_0_and_eql_patch() {
-    let dir = temp_dir("equal");
-    let a = write_file(&dir.join("a.bin"), b"abcdefghijklmnopqr");
-    let b = write_file(&dir.join("b.bin"), b"abcdefghijklmnopqr");
-    let outp = dir.join("p.bin");
+    let dir = common::scratch("equal");
+    let a = write_file(&dir.path().join("a.bin"), b"abcdefghijklmnopqr");
+    let b = write_file(&dir.path().join("b.bin"), b"abcdefghijklmnopqr");
+    let outp = dir.path().join("p.bin");
 
     let out = run(&[a.as_os_str(), b.as_os_str(), outp.as_os_str()]);
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(fs::read(&outp).unwrap(), [0xA7, 0xA3, 0x11]);
     assert!(stderr_str(&out).is_empty());
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Differing fixture pair: exit 1, patch byte-exact with the oracle.
 #[test]
 fn differ_files_exit_1_nonempty_patch() {
-    let dir = temp_dir("differ");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
-    let outp = dir.join("p.bin");
+    let dir = common::scratch("differ");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
+    let outp = dir.path().join("p.bin");
 
     let out = run(&[a.as_os_str(), b.as_os_str(), outp.as_os_str()]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(fs::read(&outp).unwrap(), PATCH_AB);
     assert!(stderr_str(&out).is_empty());
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// With only two file arguments the patch goes to stdout and stddbg stays
 /// empty (`main.cpp:607-610`).
 #[test]
 fn missing_output_goes_to_stdout() {
-    let dir = temp_dir("stdout");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
+    let dir = common::scratch("stdout");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
 
     let out = run(&[a.as_os_str(), b.as_os_str()]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(out.stdout, PATCH_AB);
     assert!(out.stderr.is_empty());
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Unopenable original file: exit 3, `Could not open first file %s for
 /// reading.` (`main.cpp:744-747`).
 #[test]
 fn unopenable_org_exit_3_message() {
-    let dir = temp_dir("org3");
-    let b = write_file(&dir.join("b.bin"), NEW_B);
-    let missing = dir.join("does-not-exist");
-    let outp = dir.join("p.bin");
+    let dir = common::scratch("org3");
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
+    let missing = dir.path().join("does-not-exist");
+    let outp = dir.path().join("p.bin");
 
     let out = run(&[missing.as_os_str(), b.as_os_str(), outp.as_os_str()]);
     assert_eq!(out.status.code(), Some(3));
@@ -414,16 +396,15 @@ fn unopenable_org_exit_3_message() {
         )
     );
     assert!(!outp.exists(), "output must not be created");
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Unopenable new file: exit 4 (`main.cpp:749-752`).
 #[test]
 fn unopenable_new_exit_4() {
-    let dir = temp_dir("new4");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let missing = dir.join("does-not-exist");
-    let outp = dir.join("p.bin");
+    let dir = common::scratch("new4");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let missing = dir.path().join("does-not-exist");
+    let outp = dir.path().join("p.bin");
 
     let out = run(&[a.as_os_str(), missing.as_os_str(), outp.as_os_str()]);
     assert_eq!(out.status.code(), Some(4));
@@ -434,16 +415,15 @@ fn unopenable_new_exit_4() {
             missing.display()
         )
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Unopenable output file: exit 5 (`main.cpp:770-773`).
 #[test]
 fn unopenable_out_exit_5() {
-    let dir = temp_dir("out5");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
-    let bad_out = dir.join("no-such-dir").join("p.bin");
+    let dir = common::scratch("out5");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
+    let bad_out = dir.path().join("no-such-dir").join("p.bin");
 
     let out = run(&[a.as_os_str(), b.as_os_str(), bad_out.as_os_str()]);
     assert_eq!(out.status.code(), Some(5));
@@ -455,7 +435,6 @@ fn unopenable_out_exit_5() {
         )
     );
     assert!(!bad_out.exists(), "output must not be created");
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ===========================================================================
@@ -467,10 +446,10 @@ fn unopenable_out_exit_5() {
 /// statistics lines (oracle capture, 1072 bytes).
 #[test]
 fn greeting_matches_reference() {
-    let dir = temp_dir("greet");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
-    let outp = dir.join("p.bin");
+    let dir = common::scratch("greet");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
+    let outp = dir.path().join("p.bin");
 
     let expected = concat!(
         "\nJDIFF - binary diff version 0.8.5 (beta) 2020\n",
@@ -505,7 +484,6 @@ fn greeting_matches_reference() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(stderr_str(&out), expected);
     assert_eq!(fs::read(&outp).unwrap(), PATCH_AB);
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// `jdiff -vv` on the tiny pair: additionally the pre-run echo and the
@@ -523,10 +501,10 @@ fn greeting_matches_reference() {
 ///    deterministically 0-initializes it (spec §21.6).
 #[test]
 fn stats_lines_match_reference() {
-    let dir = temp_dir("stats");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
-    let outp = dir.join("p.bin");
+    let dir = common::scratch("stats");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
+    let outp = dir.path().join("p.bin");
 
     let expected = concat!(
         "\nJDIFF - binary diff version 0.8.5 (beta) 2020\n",
@@ -585,17 +563,16 @@ fn stats_lines_match_reference() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(stderr_str(&out), expected);
     assert_eq!(fs::read(&outp).unwrap(), PATCH_AB);
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// An identical pair at -vv ends with exit 0 and the "Found all data …"
 /// verdict (`main.cpp:921-924`).
 #[test]
 fn identical_at_verbose_ends_found_all() {
-    let dir = temp_dir("foundall");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("a2.bin"), ORG_A);
-    let outp = dir.join("p.bin");
+    let dir = common::scratch("foundall");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("a2.bin"), ORG_A);
+    let outp = dir.path().join("p.bin");
 
     let out = run(&[
         OsStr::new("-vv"),
@@ -605,7 +582,6 @@ fn identical_at_verbose_ends_found_all() {
     ]);
     assert_eq!(out.status.code(), Some(0));
     assert!(stderr_str(&out).ends_with("\nFound all data within source file.\n"));
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Option parsing precedes the greeting: the `-i`/`-k` warnings print BEFORE
@@ -613,10 +589,10 @@ fn identical_at_verbose_ends_found_all() {
 /// JDebug::stddbg during parsing).
 #[test]
 fn warnings_precede_greeting_and_console_switch() {
-    let dir = temp_dir("warnorder");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
-    let outp = dir.join("p.bin");
+    let dir = common::scratch("warnorder");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
+    let outp = dir.path().join("p.bin");
 
     // -i 0: warning first, then greeting (verbose), exit 1.
     let out = run(&[
@@ -648,7 +624,6 @@ fn warnings_precede_greeting_and_console_switch() {
         String::from_utf8_lossy(&out.stdout)
             .starts_with("Warning: invalid --index-size/-i specified, set to 1.\n")
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ===========================================================================
@@ -660,9 +635,9 @@ fn warnings_precede_greeting_and_console_switch() {
 /// `-Z a b` diffs to stdout, exit 1.
 #[test]
 fn unknown_option_help_then_diff() {
-    let dir = temp_dir("unkopt");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
+    let dir = common::scratch("unkopt");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
 
     let out = run(&[OsStr::new("-Z"), a.as_os_str(), b.as_os_str()]);
     assert_eq!(out.status.code(), Some(1));
@@ -671,7 +646,6 @@ fn unknown_option_help_then_diff() {
         getopt_err("invalid option -- 'Z'") + GREETING + &usage(2, 128)
     );
     assert_eq!(out.stdout, PATCH_AB);
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// `-h a b c`: help printed AND the diff runs to the third operand
@@ -679,10 +653,10 @@ fn unknown_option_help_then_diff() {
 /// 3 operands).
 #[test]
 fn help_then_diff_three_operands() {
-    let dir = temp_dir("helpdiff");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
-    let outp = dir.join("c.out");
+    let dir = common::scratch("helpdiff");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
+    let outp = dir.path().join("c.out");
 
     let out = run(&[
         OsStr::new("-h"),
@@ -694,16 +668,15 @@ fn help_then_diff_three_operands() {
     assert_eq!(stderr_str(&out), GREETING.to_string() + &usage(2, 128));
     assert_eq!(fs::read(&outp).unwrap(), PATCH_AB);
     assert!(out.stdout.is_empty());
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// GNU permutation: options may follow the filenames (`jdiff a b -l` lists to
 /// stdout; `jdiff a -l b out` writes the listing to out).
 #[test]
 fn gnu_permutation_options_after_files() {
-    let dir = temp_dir("perm");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
+    let dir = common::scratch("perm");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
 
     let out = run(&[a.as_os_str(), b.as_os_str(), OsStr::new("-l")]);
     assert_eq!(out.status.code(), Some(1));
@@ -714,7 +687,7 @@ fn gnu_permutation_options_after_files() {
         String::from_utf8_lossy(&out.stdout)
     );
 
-    let outp = dir.join("o.asc");
+    let outp = dir.path().join("o.asc");
     let out = run(&[
         a.as_os_str(),
         OsStr::new("-l"),
@@ -725,7 +698,6 @@ fn gnu_permutation_options_after_files() {
     assert_eq!(out.status.code(), Some(1));
     assert!(fs::read(&outp).unwrap().starts_with(b"           0"));
     assert!(stderr_str(&out).contains("Use -h for additional help"));
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// `--` ends option processing; everything after it is an operand (including
@@ -733,12 +705,12 @@ fn gnu_permutation_options_after_files() {
 /// literally named `--` (oracle-verified).
 #[test]
 fn double_dash_ends_options() {
-    let dir = temp_dir("ddash");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
+    let dir = common::scratch("ddash");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
     // The third operand is a file NAMED `--`; absolute so the patch lands in
     // the temp dir, not the test process's working directory.
-    let dash = dir.join("--");
+    let dash = dir.path().join("--");
 
     let out = run(&[
         OsStr::new("--"),
@@ -754,11 +726,10 @@ fn double_dash_ends_options() {
         "patch must land in the file named --"
     );
     assert!(
-        !dir.join("o.bin").exists(),
+        !dir.path().join("o.bin").exists(),
         "o.bin is a 5th operand, unused"
     );
     assert!(stderr_str(&out).is_empty());
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Missing required argument at the end of argv (bare `-d`): glibc error,
@@ -781,9 +752,9 @@ fn missing_arg_bare_d_exit_2() {
 /// - ambiguous prefix `--s` → "is ambiguous; possibilities: …", diff continues.
 #[test]
 fn long_option_errors() {
-    let dir = temp_dir("lngerr");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
+    let dir = common::scratch("lngerr");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
 
     let out = run(&[OsStr::new("--nope"), a.as_os_str(), b.as_os_str()]);
     assert_eq!(out.status.code(), Some(1));
@@ -818,18 +789,17 @@ fn long_option_errors() {
         stderr_str(&out)
     );
     assert_eq!(out.stdout, PATCH_AB);
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Unambiguous long-option prefixes resolve (`--und` → --undiff) and
 /// `--opt=value` attaches arguments (`--index-size=1`).
 #[test]
 fn long_option_abbreviation_and_equals() {
-    let dir = temp_dir("lngok");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
-    let p = write_file(&dir.join("p.bin"), PATCH_AB);
-    let outp = dir.join("o.bin");
+    let dir = common::scratch("lngok");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
+    let p = write_file(&dir.path().join("p.bin"), PATCH_AB);
+    let outp = dir.path().join("o.bin");
 
     // --und applies the patch.
     let out = run(&[
@@ -847,7 +817,7 @@ fn long_option_abbreviation_and_equals() {
         OsStr::new("-vv"),
         a.as_os_str(),
         b.as_os_str(),
-        dir.join("p2.bin").as_os_str(),
+        dir.path().join("p2.bin").as_os_str(),
     ]);
     assert_eq!(out.status.code(), Some(1));
     assert!(
@@ -855,7 +825,6 @@ fn long_option_abbreviation_and_equals() {
         "port 1MB table: {:?}",
         stderr_str(&out)
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// `-d <name>` consumes a name argument (in release builds any name is
@@ -864,30 +833,29 @@ fn long_option_abbreviation_and_equals() {
 /// argument "hsh", NOT a filename (0.8.5 getopt syntax).
 #[test]
 fn d_option_consumes_argument() {
-    let dir = temp_dir("darg");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
+    let dir = common::scratch("darg");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
 
     let out = run(&[
         OsStr::new("-d"),
         OsStr::new("hsh"),
         a.as_os_str(),
         b.as_os_str(),
-        dir.join("p.bin").as_os_str(),
+        dir.path().join("p.bin").as_os_str(),
     ]);
     assert_eq!(out.status.code(), Some(1), "{}", stderr_str(&out));
-    assert_eq!(fs::read(dir.join("p.bin")).unwrap(), PATCH_AB);
+    assert_eq!(fs::read(dir.path().join("p.bin")).unwrap(), PATCH_AB);
 
     // Attached form: -dhsh = -d hsh → not a filename.
     let out = run(&[
         OsStr::new("-dhsh"),
         a.as_os_str(),
         b.as_os_str(),
-        dir.join("p2.bin").as_os_str(),
+        dir.path().join("p2.bin").as_os_str(),
     ]);
     assert_eq!(out.status.code(), Some(1));
-    assert_eq!(fs::read(dir.join("p2.bin")).unwrap(), PATCH_AB);
-    fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(fs::read(dir.path().join("p2.bin")).unwrap(), PATCH_AB);
 }
 
 /// Multiplicative presets in parse order leak into the usage `-n`/`-x` lines:
@@ -937,10 +905,10 @@ fn presets_leak_into_usage_defaults() {
 /// third and subsequent ignored. Oracle-verified values.
 #[test]
 fn m_option_echo_lines() {
-    let dir = temp_dir("mecho");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
-    let outp = dir.join("p.bin");
+    let dir = common::scratch("mecho");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
+    let outp = dir.path().join("p.bin");
 
     fn buffer_line(out: &Output) -> String {
         stderr_str(out)
@@ -1004,7 +972,6 @@ fn m_option_echo_lines() {
         search_line(&out),
         "Search size     (0 = buffersize) (-a): 3040kb"
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// `-i`/`-k` clamping (main.cpp:408-421, 617-621): `-i 1` → 1Mb table
@@ -1014,10 +981,10 @@ fn m_option_echo_lines() {
 /// line). All oracle-verified values.
 #[test]
 fn i_and_k_clamps_and_misalign_warnings() {
-    let dir = temp_dir("ikclamp");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
-    let outp = dir.join("p.bin");
+    let dir = common::scratch("ikclamp");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
+    let outp = dir.path().join("p.bin");
 
     let run_vv = |extra: &[&str]| -> Output {
         let mut full: Vec<&OsStr> = extra.iter().map(OsStr::new).collect();
@@ -1081,7 +1048,6 @@ fn i_and_k_clamps_and_misalign_warnings() {
         text.contains("Block  size       (default 32kb) (-b): 64kb"),
         "{text:?}"
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// `-x 5` runs (the §21.15 quirk: the unclamped value sizes the bucket prime
@@ -1089,10 +1055,10 @@ fn i_and_k_clamps_and_misalign_warnings() {
 /// `-x 0` floors to 1024; `-n` floors at 0.
 #[test]
 fn x_option_floors_and_runs() {
-    let dir = temp_dir("xfloor");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
-    let outp = dir.join("p.bin");
+    let dir = common::scratch("xfloor");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
+    let outp = dir.path().join("p.bin");
 
     let out = run(&[
         OsStr::new("-x"),
@@ -1133,17 +1099,16 @@ fn x_option_floors_and_runs() {
         "{:?}",
         stderr_str(&out)
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// `-s` is accepted and recorded without observable effect (spec §21.11):
 /// the run behaves exactly like the default.
 #[test]
 fn s_option_accepted_without_effect() {
-    let dir = temp_dir("sopt");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
-    let outp = dir.join("p.bin");
+    let dir = common::scratch("sopt");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
+    let outp = dir.path().join("p.bin");
 
     let out = run(&[
         OsStr::new("-s"),
@@ -1154,7 +1119,6 @@ fn s_option_accepted_without_effect() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(fs::read(&outp).unwrap(), PATCH_AB);
     assert!(stderr_str(&out).is_empty());
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ===========================================================================
@@ -1184,10 +1148,10 @@ fn both_inputs_dash_exit_2() {
 /// (bytes verified identical to the explicit `-p` output on the oracle).
 #[test]
 fn dash_reads_stdin_org() {
-    let dir = temp_dir("dashorg");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
-    let outp = dir.join("p.bin");
+    let dir = common::scratch("dashorg");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
+    let outp = dir.path().join("p.bin");
 
     let out = run_stdin_file(&[OsStr::new("-"), b.as_os_str(), outp.as_os_str()], &a);
     assert_eq!(out.status.code(), Some(1), "{}", stderr_str(&out));
@@ -1197,7 +1161,7 @@ fn dash_reads_stdin_org() {
             "\nWarning: Source file is a sequential file, assuming -p.\n"
         );
         // Sequential (-p) semantics: bytes equal the explicit `-p` run.
-        let reff = dir.join("pref.bin");
+        let reff = dir.path().join("pref.bin");
         let refo = run(&[
             OsStr::new("-p"),
             a.as_os_str(),
@@ -1214,7 +1178,6 @@ fn dash_reads_stdin_org() {
         assert!(stderr_str(&out).is_empty());
         assert_eq!(fs::read(&outp).unwrap(), PATCH_AB);
     }
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Piped destination: `cat b | jdiff a -` auto-detects sequential input,
@@ -1222,9 +1185,9 @@ fn dash_reads_stdin_org() {
 /// (`main.cpp:791-795`).
 #[test]
 fn pipe_destination_auto_q_warning_and_roundtrip() {
-    let dir = temp_dir("pipeq");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let outp = dir.join("p.bin");
+    let dir = common::scratch("pipeq");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let outp = dir.path().join("p.bin");
 
     let out = run_stdin_pipe(&[a.as_os_str(), OsStr::new("-"), outp.as_os_str()], NEW_B);
     assert_eq!(out.status.code(), Some(1));
@@ -1237,20 +1200,19 @@ fn pipe_destination_auto_q_warning_and_roundtrip() {
         OsStr::new("-u"),
         a.as_os_str(),
         outp.as_os_str(),
-        dir.join("restored.bin").as_os_str(),
+        dir.path().join("restored.bin").as_os_str(),
     ]);
     assert_eq!(out2.status.code(), Some(0), "{}", stderr_str(&out2));
-    assert_eq!(fs::read(dir.join("restored.bin")).unwrap(), NEW_B);
-    fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(fs::read(dir.path().join("restored.bin")).unwrap(), NEW_B);
 }
 
 /// Piped source with explicit `-p` (`cat a | jdiff -p - b`): no warning (the
 /// option was explicit), exit 1, round-trips.
 #[test]
 fn pipe_source_explicit_p_roundtrip() {
-    let dir = temp_dir("pipep");
-    let b = write_file(&dir.join("b.bin"), NEW_B);
-    let outp = dir.join("p.bin");
+    let dir = common::scratch("pipep");
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
+    let outp = dir.path().join("p.bin");
 
     let out = run_stdin_pipe(
         &[
@@ -1265,16 +1227,15 @@ fn pipe_source_explicit_p_roundtrip() {
     assert!(stderr_str(&out).is_empty(), "explicit -p must not warn");
 
     // Restore from the piped-source patch with the original from a file.
-    let a = write_file(&dir.join("a.bin"), ORG_A);
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
     let out2 = run(&[
         OsStr::new("-u"),
         a.as_os_str(),
         outp.as_os_str(),
-        dir.join("restored.bin").as_os_str(),
+        dir.path().join("restored.bin").as_os_str(),
     ]);
     assert_eq!(out2.status.code(), Some(0), "{}", stderr_str(&out2));
-    assert_eq!(fs::read(dir.join("restored.bin")).unwrap(), NEW_B);
-    fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(fs::read(dir.path().join("restored.bin")).unwrap(), NEW_B);
 }
 
 /// Piped source without `-p` (`cat a | jdiff - b`): the sequential source is
@@ -1284,9 +1245,9 @@ fn pipe_source_explicit_p_roundtrip() {
 /// fixture) and round-trips through -u (`main.cpp:781-788`).
 #[test]
 fn pipe_source_auto_p_warning_and_roundtrip() {
-    let dir = temp_dir("pipeautop");
-    let b = write_file(&dir.join("b.bin"), NEW_B);
-    let outp = dir.join("p.bin");
+    let dir = common::scratch("pipeautop");
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
+    let outp = dir.path().join("p.bin");
 
     let out = run_stdin_pipe(&[OsStr::new("-"), b.as_os_str(), outp.as_os_str()], ORG_A);
     assert_eq!(out.status.code(), Some(1));
@@ -1301,24 +1262,23 @@ fn pipe_source_auto_p_warning_and_roundtrip() {
     );
 
     // Restore from the piped-source patch with the original from a file.
-    let a = write_file(&dir.join("a.bin"), ORG_A);
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
     let out2 = run(&[
         OsStr::new("-u"),
         a.as_os_str(),
         outp.as_os_str(),
-        dir.join("restored.bin").as_os_str(),
+        dir.path().join("restored.bin").as_os_str(),
     ]);
     assert_eq!(out2.status.code(), Some(0), "{}", stderr_str(&out2));
-    assert_eq!(fs::read(dir.join("restored.bin")).unwrap(), NEW_B);
-    fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(fs::read(dir.path().join("restored.bin")).unwrap(), NEW_B);
 }
 
 /// Piped patch: `cat p | jdiff -u a -` applies to stdout, exit 0
 /// (spec §18.D verified pipe flow).
 #[test]
 fn pipe_patch_through_u() {
-    let dir = temp_dir("pipeu");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
+    let dir = common::scratch("pipeu");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
 
     let out = run_stdin_pipe(
         &[OsStr::new("-u"), a.as_os_str(), OsStr::new("-")],
@@ -1327,7 +1287,6 @@ fn pipe_patch_through_u() {
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(out.stdout, NEW_B);
     assert!(out.stderr.is_empty());
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ===========================================================================
@@ -1339,14 +1298,14 @@ fn pipe_patch_through_u() {
 /// §21.2); `jdedup` is NOT a ported route and falls through to Diff.
 #[test]
 fn argv0_dispatch_jpatch_jptch_jdedup() {
-    let dir = temp_dir("argv0");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
-    let p = write_file(&dir.join("p.bin"), PATCH_AB);
+    let dir = common::scratch("argv0");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
+    let p = write_file(&dir.path().join("p.bin"), PATCH_AB);
 
     for name in ["jpatch", "jptch", "jdedup", "jtst"] {
-        let exe = copy_binary_as(&dir, name);
-        let outp = dir.join(format!("out-{name}.bin"));
+        let exe = copy_binary_as(dir.path(), name);
+        let outp = dir.path().join(format!("out-{name}.bin"));
         if name.starts_with("jpatch") || name.starts_with("jptch") {
             let out = run_copied(&exe, &[a.as_os_str(), p.as_os_str(), outp.as_os_str()]);
             assert_eq!(out.status.code(), Some(0), "{name}: {}", stderr_str(&out));
@@ -1364,7 +1323,6 @@ fn argv0_dispatch_jpatch_jptch_jdedup() {
             assert_eq!(fs::read(&outp).unwrap(), PATCH_AB, "{name} diff output");
         }
     }
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// The argv[0] copies carry a `.exe` suffix on Windows (CreateProcessW only
@@ -1372,27 +1330,26 @@ fn argv0_dispatch_jpatch_jptch_jdedup() {
 /// [`copy_binary_as`]) and the plain name elsewhere.
 #[test]
 fn argv0_copy_name_matches_platform() {
-    let dir = temp_dir("argv0-suffix");
-    let exe = copy_binary_as(&dir, "jptch");
+    let dir = common::scratch("argv0-suffix");
+    let exe = copy_binary_as(dir.path(), "jptch");
     let name = exe.file_name().expect("copied file name").to_string_lossy();
     if cfg!(windows) {
         assert_eq!(name, "jptch.exe");
     } else {
         assert_eq!(name, "jptch");
     }
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// `-j` forces Diff even under a `jpatch`-named argv[0]
 /// (`main.cpp:366-368` overrides the dispatch).
 #[test]
 fn argv0_jpatch_with_jflag_diffs() {
-    let dir = temp_dir("argv0j");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
-    let exe = copy_binary_as(&dir, "jpatch");
+    let dir = common::scratch("argv0j");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
+    let exe = copy_binary_as(dir.path(), "jpatch");
 
-    let outp = dir.join("p.bin");
+    let outp = dir.path().join("p.bin");
     let out = run_copied(
         &exe,
         &[
@@ -1404,7 +1361,6 @@ fn argv0_jpatch_with_jflag_diffs() {
     );
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(fs::read(&outp).unwrap(), PATCH_AB);
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ===========================================================================
@@ -1418,10 +1374,10 @@ fn argv0_jpatch_with_jflag_diffs() {
 /// garbage is the whole destination file.
 #[test]
 fn t_option_release_corrupt_mixed_output() {
-    let dir = temp_dir("topt");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
-    let outp = dir.join("t.bin");
+    let dir = common::scratch("topt");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
+    let outp = dir.path().join("t.bin");
 
     let out = run(&[
         OsStr::new("-t"),
@@ -1442,7 +1398,6 @@ fn t_option_release_corrupt_mixed_output() {
     let out = run(&[OsStr::new("-t"), a.as_os_str(), b.as_os_str()]);
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(out.stdout, corrupt);
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// `-t` in debug builds: the port exits 0 with the same corrupt mixed output
@@ -1458,10 +1413,10 @@ fn t_option_release_corrupt_mixed_output() {
 #[cfg(feature = "debug")]
 #[test]
 fn t_option_debug_matches_release() {
-    let dir = temp_dir("tdebug");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
-    let outp = dir.join("t.bin");
+    let dir = common::scratch("tdebug");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
+    let outp = dir.path().join("t.bin");
 
     let out = run(&[
         OsStr::new("-t"),
@@ -1478,16 +1433,15 @@ fn t_option_debug_matches_release() {
         corrupt,
         "-t appends the misparsed destination in debug builds too"
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// `-y` (Dedup) is accepted but the function is not ported (spec §21.4):
 /// exit 20 via the "Error occurred !" path.
 #[test]
 fn y_option_exit_20() {
-    let dir = temp_dir("yopt");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
+    let dir = common::scratch("yopt");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
 
     let out = run(&[OsStr::new("-y"), a.as_os_str(), b.as_os_str()]);
     assert_eq!(out.status.code(), Some(20));
@@ -1499,11 +1453,10 @@ fn y_option_exit_20() {
     assert_eq!(out.status.code(), Some(20));
     let out = run(&[
         OsStr::new("-y"),
-        dir.join("missing.bin").as_os_str(),
+        dir.path().join("missing.bin").as_os_str(),
         b.as_os_str(),
     ]);
     assert_eq!(out.status.code(), Some(3));
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ===========================================================================
@@ -1583,14 +1536,14 @@ fn option_matrix() -> Vec<(&'static str, Vec<&'static str>, bool)> {
 /// file-based runs.
 #[test]
 fn roundtrip_all_option_sets() {
-    let dir = temp_dir("rt-matrix");
+    let dir = common::scratch("rt-matrix");
     let pairs: [(&str, Vec<u8>, Vec<u8>); 2] = [
         ("tiny", ORG_A.to_vec(), NEW_B.to_vec()),
         ("big", big_pair().0, big_pair().1),
     ];
 
     for (pair_name, org, new) in &pairs {
-        let pdir = dir.join(pair_name);
+        let pdir = dir.path().join(pair_name);
         fs::create_dir_all(&pdir).expect("create pair dir");
         let a = write_file(&pdir.join("a.bin"), org);
         let b = write_file(&pdir.join("b.bin"), new);
@@ -1676,7 +1629,6 @@ fn roundtrip_all_option_sets() {
             );
         }
     }
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ===========================================================================
@@ -1800,9 +1752,9 @@ fn compat_081_patches_have_zero_implicit_mod_segments() {
     ];
     let option_sets: [&[&str]; 5] = [&[], &["-b"], &["-f"], &["-p", "-q"], &["-x", "5"]];
 
-    let dir = temp_dir("compat-struct");
+    let dir = common::scratch("compat-struct");
     for (name, org, new) in &corpus {
-        let pdir = dir.join(name);
+        let pdir = dir.path().join(name);
         fs::create_dir_all(&pdir).expect("create corpus dir");
         let a = write_file(&pdir.join("a.bin"), org);
         let b = write_file(&pdir.join("b.bin"), new);
@@ -1853,7 +1805,6 @@ fn compat_081_patches_have_zero_implicit_mod_segments() {
             );
         }
     }
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// `--compat-081` on the diff side (§21.16): the tiny pair's patch comes out
@@ -1863,10 +1814,10 @@ fn compat_081_patches_have_zero_implicit_mod_segments() {
 /// it exactly.
 #[test]
 fn compat_081_diff_produces_explicit_patch() {
-    let dir = temp_dir("compat-cli");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
-    let patch = dir.join("p.jdf");
+    let dir = common::scratch("compat-cli");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
+    let patch = dir.path().join("p.jdf");
 
     let out = run(&[
         OsStr::new("--compat-081"),
@@ -1884,7 +1835,7 @@ fn compat_081_diff_produces_explicit_patch() {
     );
 
     // `jdiff -u` restores.
-    let o1 = dir.join("out1.bin");
+    let o1 = dir.path().join("out1.bin");
     let urun = run(&[
         OsStr::new("-u"),
         a.as_os_str(),
@@ -1896,13 +1847,12 @@ fn compat_081_diff_produces_explicit_patch() {
     assert_eq!(fs::read(&o1).unwrap(), NEW_B);
 
     // An argv[0]=`jptch` copy restores too (spec §21.2 dispatch).
-    let jptch = copy_binary_as(&dir, "jptch");
-    let o2 = dir.join("out2.bin");
+    let jptch = copy_binary_as(dir.path(), "jptch");
+    let o2 = dir.path().join("out2.bin");
     let prun = run_copied(&jptch, &[a.as_os_str(), patch.as_os_str(), o2.as_os_str()]);
     assert_eq!(prun.status.code(), Some(0), "{}", stderr_str(&prun));
     assert!(stderr_str(&prun).is_empty());
     assert_eq!(fs::read(&o2).unwrap(), NEW_B);
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// GNU permutation (`--compat-081` after the filenames) and the patch side's
@@ -1910,12 +1860,12 @@ fn compat_081_diff_produces_explicit_patch() {
 /// the flag only selects the diff-side writer, so patches still apply.
 #[test]
 fn compat_081_permutation_and_patch_side_ignored() {
-    let dir = temp_dir("compat-perm");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
+    let dir = common::scratch("compat-perm");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
 
     // Flag after the filenames: identical explicit patch.
-    let p = dir.join("p.jdf");
+    let p = dir.path().join("p.jdf");
     let out = run(&[
         a.as_os_str(),
         b.as_os_str(),
@@ -1927,7 +1877,7 @@ fn compat_081_permutation_and_patch_side_ignored() {
     assert_eq!(fs::read(&p).unwrap(), PATCH_AB_081);
 
     // Patch side accepts and ignores: `jdiff -u --compat-081`.
-    let o1 = dir.join("out1.bin");
+    let o1 = dir.path().join("out1.bin");
     let urun = run(&[
         OsStr::new("--compat-081"),
         OsStr::new("-u"),
@@ -1940,8 +1890,8 @@ fn compat_081_permutation_and_patch_side_ignored() {
     assert_eq!(fs::read(&o1).unwrap(), NEW_B);
 
     // … and under an argv[0]=`jpatch` copy.
-    let jpatch = copy_binary_as(&dir, "jpatch");
-    let o2 = dir.join("out2.bin");
+    let jpatch = copy_binary_as(dir.path(), "jpatch");
+    let o2 = dir.path().join("out2.bin");
     let prun = run_copied(
         &jpatch,
         &[
@@ -1954,7 +1904,6 @@ fn compat_081_permutation_and_patch_side_ignored() {
     assert_eq!(prun.status.code(), Some(0), "{}", stderr_str(&prun));
     assert!(stderr_str(&prun).is_empty());
     assert_eq!(fs::read(&o2).unwrap(), NEW_B);
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ===========================================================================
@@ -1965,10 +1914,10 @@ fn compat_081_permutation_and_patch_side_ignored() {
 /// original on stdin, patch on stdin, output on stdout.
 #[test]
 fn u_dash_variants() {
-    let dir = temp_dir("u-dash");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let p = write_file(&dir.join("p.bin"), PATCH_AB);
-    let out = dir.join("out.bin");
+    let dir = common::scratch("u-dash");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let p = write_file(&dir.path().join("p.bin"), PATCH_AB);
+    let out = dir.path().join("out.bin");
 
     // Original from (seekable, file-redirected) stdin: `jdiff -u - p out`.
     let r = run_stdin_file(
@@ -2008,7 +1957,6 @@ fn u_dash_variants() {
     assert_eq!(r.status.code(), Some(0), "{}", stderr_str(&r));
     assert_eq!(r.stdout, NEW_B, "patch to stdout");
     assert!(r.stderr.is_empty());
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Both inputs `-` is rejected in patch mode too (the check precedes the
@@ -2029,10 +1977,10 @@ fn u_both_dash_exit_2() {
 /// with P8zd (`pw`).
 #[test]
 fn u_verbose_lines_match_reference() {
-    let dir = temp_dir("u-vrb");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let p = write_file(&dir.join("p.bin"), PATCH_AB);
-    let out = dir.join("out.bin");
+    let dir = common::scratch("u-vrb");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let p = write_file(&dir.path().join("p.bin"), PATCH_AB);
+    let out = dir.path().join("out.bin");
 
     let expected = format!(
         "{}\nUse -h for additional help and usage description.\n\
@@ -2061,17 +2009,16 @@ fn u_verbose_lines_match_reference() {
     assert_eq!(r.status.code(), Some(0), "{}", stderr_str(&r));
     assert_eq!(stderr_str(&r), expected);
     assert_eq!(fs::read(&out).unwrap(), NEW_B);
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// The 0.8.1-format patch (explicit `ESC MOD`) applies identically — the
 /// explicit opcodes are a subset of the 0.8.5 grammar (spec §18.C).
 #[test]
 fn u_applies_081_format_patches() {
-    let dir = temp_dir("u-081");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let p = write_file(&dir.join("p.bin"), PATCH_AB_081);
-    let out = dir.join("out.bin");
+    let dir = common::scratch("u-081");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let p = write_file(&dir.path().join("p.bin"), PATCH_AB_081);
+    let out = dir.path().join("out.bin");
 
     let r = run(&[
         OsStr::new("-u"),
@@ -2081,7 +2028,6 @@ fn u_applies_081_format_patches() {
     ]);
     assert_eq!(r.status.code(), Some(0), "{}", stderr_str(&r));
     assert_eq!(fs::read(&out).unwrap(), NEW_B);
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// ESC-escaped data applies exactly through the CLI (`ESC ESC` → one literal
@@ -2089,11 +2035,14 @@ fn u_applies_081_format_patches() {
 /// operand, oracle-pinned in the library gates).
 #[test]
 fn u_esc_escaped_data() {
-    let dir = temp_dir("u-esc");
-    let org = write_file(&dir.join("org.bin"), b"0123456789");
-    let out = dir.join("out.bin");
+    let dir = common::scratch("u-esc");
+    let org = write_file(&dir.path().join("org.bin"), b"0123456789");
+    let out = dir.path().join("out.bin");
 
-    let p = write_file(&dir.join("p1.bin"), &[0xA7, 0xA6, b'A', 0xA7, 0xA7, b'B']);
+    let p = write_file(
+        &dir.path().join("p1.bin"),
+        &[0xA7, 0xA6, b'A', 0xA7, 0xA7, b'B'],
+    );
     let r = run(&[
         OsStr::new("-u"),
         org.as_os_str(),
@@ -2103,7 +2052,10 @@ fn u_esc_escaped_data() {
     assert_eq!(r.status.code(), Some(0), "{}", stderr_str(&r));
     assert_eq!(fs::read(&out).unwrap(), [b'A', 0xA7, b'B']);
 
-    let p = write_file(&dir.join("p2.bin"), &[0xA7, 0xA5, b'A', 0xA7, 0xA7, b'B']);
+    let p = write_file(
+        &dir.path().join("p2.bin"),
+        &[0xA7, 0xA5, b'A', 0xA7, 0xA7, b'B'],
+    );
     let r = run(&[
         OsStr::new("-u"),
         org.as_os_str(),
@@ -2113,7 +2065,7 @@ fn u_esc_escaped_data() {
     assert_eq!(r.status.code(), Some(0), "{}", stderr_str(&r));
     assert_eq!(fs::read(&out).unwrap(), [b'A', 0xA7, b'B'], "INS escape");
 
-    let p = write_file(&dir.join("p3.bin"), &[0xA7, 0xA6, b'x', 0xA7]);
+    let p = write_file(&dir.path().join("p3.bin"), &[0xA7, 0xA6, b'x', 0xA7]);
     let r = run(&[
         OsStr::new("-u"),
         org.as_os_str(),
@@ -2122,7 +2074,6 @@ fn u_esc_escaped_data() {
     ]);
     assert_eq!(r.status.code(), Some(0), "{}", stderr_str(&r));
     assert_eq!(fs::read(&out).unwrap(), [b'x', 0xA7, 0xFF], "trailing ESC");
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Leading/trailing garbage around a complete record is handled by the 0.8.5
@@ -2132,13 +2083,13 @@ fn u_esc_escaped_data() {
 /// "XY" + EQL 12 yields "XY" + org[2..14]).
 #[test]
 fn u_garbage_bytes_are_mod_data() {
-    let dir = temp_dir("u-grb");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let out = dir.join("out.bin");
+    let dir = common::scratch("u-grb");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let out = dir.path().join("out.bin");
 
     // Leading garbage "XY": default-MOD data before the EQL record; the MOD
     // run advances the source position mirror to 2.
-    let p = write_file(&dir.join("p1.bin"), &[b'X', b'Y', 0xA7, 0xA3, 0x0B]);
+    let p = write_file(&dir.path().join("p1.bin"), &[b'X', b'Y', 0xA7, 0xA3, 0x0B]);
     let r = run(&[
         OsStr::new("-u"),
         a.as_os_str(),
@@ -2151,7 +2102,7 @@ fn u_garbage_bytes_are_mod_data() {
     assert_eq!(fs::read(&out).unwrap(), want, "leading garbage");
 
     // Trailing garbage after a complete EQL likewise rides MOD.
-    let p = write_file(&dir.join("p2.bin"), &[0xA7, 0xA3, 0x0B, b'X', b'Y']);
+    let p = write_file(&dir.path().join("p2.bin"), &[0xA7, 0xA3, 0x0B, b'X', b'Y']);
     let r = run(&[
         OsStr::new("-u"),
         a.as_os_str(),
@@ -2162,7 +2113,6 @@ fn u_garbage_bytes_are_mod_data() {
     let mut want = ORG_A[..12].to_vec();
     want.extend_from_slice(b"XY");
     assert_eq!(fs::read(&out).unwrap(), want, "trailing garbage");
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// A lone ESC at a sequence start is the trailing-byte corruption warning
@@ -2171,10 +2121,10 @@ fn u_garbage_bytes_are_mod_data() {
 /// oracle-verified byte-exact).
 #[test]
 fn u_trailing_byte_warning_exit_20() {
-    let dir = temp_dir("u-trail");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let p = write_file(&dir.join("p.bin"), &[0xA7]);
-    let out = dir.join("out.bin");
+    let dir = common::scratch("u-trail");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let p = write_file(&dir.path().join("p.bin"), &[0xA7]);
+    let out = dir.path().join("out.bin");
 
     let r = run(&[
         OsStr::new("-u"),
@@ -2188,7 +2138,6 @@ fn u_trailing_byte_warning_exit_20() {
         "Warning: unexpected trailing byte at end of file, patch file may be corrupted.\n\nError occurred !\n"
     );
     assert!(fs::read(&out).unwrap().is_empty());
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// A DEL-only patch never touches the source: exit 0, empty output
@@ -2196,10 +2145,10 @@ fn u_trailing_byte_warning_exit_20() {
 /// jpatch.cpp "seek to -5" error is gone).
 #[test]
 fn u_del_only_patch_is_silent() {
-    let dir = temp_dir("u-del");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let p = write_file(&dir.join("p.bin"), &[0xA7, 0xA4, 0xFC]); // DEL 252
-    let out = dir.join("out.bin");
+    let dir = common::scratch("u-del");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let p = write_file(&dir.path().join("p.bin"), &[0xA7, 0xA4, 0xFC]); // DEL 252
+    let out = dir.path().join("out.bin");
 
     let r = run(&[
         OsStr::new("-u"),
@@ -2229,7 +2178,6 @@ fn u_del_only_patch_is_silent() {
         text.contains(&format!("{} {} EOF\n", pw(252), pw(0))),
         "{text:?}"
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Length reads at patch EOF follow the C arithmetic on getc-or-EOF (-1)
@@ -2239,13 +2187,13 @@ fn u_del_only_patch_is_silent() {
 /// arithmetic; the exit-code mapping is main.cpp:929-931).
 #[test]
 fn u_negative_length_unknown_exit_code() {
-    let dir = temp_dir("u-neglen");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
+    let dir = common::scratch("u-neglen");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
     let p = write_file(
-        &dir.join("p.bin"),
+        &dir.path().join("p.bin"),
         &[0xA7, 0xA4, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
     );
-    let out = dir.join("out.bin");
+    let out = dir.path().join("out.bin");
 
     let r = run(&[
         OsStr::new("-u"),
@@ -2256,7 +2204,6 @@ fn u_negative_length_unknown_exit_code() {
     assert_eq!(r.status.code(), Some(20), "{}", stderr_str(&r));
     assert_eq!(stderr_str(&r), "\nUnknown exit code -257\n");
     assert!(fs::read(&out).unwrap().is_empty());
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Checked I/O error paths of the EQL copy (`JFileOut.cpp:33-75`): a short
@@ -2266,14 +2213,14 @@ fn u_negative_length_unknown_exit_code() {
 /// is absorbed by the stdio-style buffer (silent exit 0).
 #[test]
 fn u_read_write_error_exits() {
-    let dir = temp_dir("u-ioerr");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let out = dir.join("out.bin");
+    let dir = common::scratch("u-ioerr");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let out = dir.path().join("out.bin");
 
     // EQL 100 from a 17-byte file: the fast path writes the 17 available
     // bytes, the re-issued getbuf hits EOF → exit 8 (oracle-verified: the
     // partial 17-byte output stays on disk).
-    let p = write_file(&dir.join("p.eql100"), &[0xA7, 0xA3, 0x63]);
+    let p = write_file(&dir.path().join("p.eql100"), &[0xA7, 0xA3, 0x63]);
     let r = run(&[
         OsStr::new("-u"),
         a.as_os_str(),
@@ -2291,7 +2238,7 @@ fn u_read_write_error_exits() {
     // buffer absorbs the write, silent exit 0 (oracle-pinned).
     #[cfg(target_os = "linux")]
     {
-        let big = write_file(&dir.join("big200.bin"), &[0u8; 200]);
+        let big = write_file(&dir.path().join("big200.bin"), &[0u8; 200]);
         let r = run(&[
             OsStr::new("-u"),
             big.as_os_str(),
@@ -2308,9 +2255,9 @@ fn u_read_write_error_exits() {
 
         // Large EQL (65536 = 16 blocks) to /dev/full: the checked write
         // eventually fails → "Error writing output file.", exit 9.
-        let big = write_file(&dir.join("big64k.bin"), &[0u8; 65536]);
+        let big = write_file(&dir.path().join("big64k.bin"), &[0u8; 65536]);
         let p9 = write_file(
-            &dir.join("p.eql64k.bin"),
+            &dir.path().join("p.eql64k.bin"),
             &[0xA7, 0xA3, 0xFE, 0x00, 0x01, 0x00, 0x00],
         );
         let r = run(&[
@@ -2322,8 +2269,6 @@ fn u_read_write_error_exits() {
         assert_eq!(r.status.code(), Some(9), "{}", stderr_str(&r));
         assert!(stderr_str(&r).contains("Error writing output file.\n"));
     }
-
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Patch-mode open errors reuse the diff CLI's messages and exits (one
@@ -2332,11 +2277,11 @@ fn u_read_write_error_exits() {
 /// patch file" are gone.)
 #[test]
 fn u_open_error_exits_3_4_5() {
-    let dir = temp_dir("u-open");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let p = write_file(&dir.join("p.bin"), PATCH_AB);
-    let out = dir.join("out.bin");
-    let missing = dir.join("does-not-exist");
+    let dir = common::scratch("u-open");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let p = write_file(&dir.path().join("p.bin"), PATCH_AB);
+    let out = dir.path().join("out.bin");
+    let missing = dir.path().join("does-not-exist");
 
     let r = run(&[
         OsStr::new("-u"),
@@ -2369,7 +2314,7 @@ fn u_open_error_exits_3_4_5() {
         )
     );
 
-    let bad_out = dir.join("no-such-dir").join("out.bin");
+    let bad_out = dir.path().join("no-such-dir").join("out.bin");
     let r = run(&[
         OsStr::new("-u"),
         a.as_os_str(),
@@ -2384,17 +2329,16 @@ fn u_open_error_exits_3_4_5() {
             bad_out.display()
         )
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// A patch of an identical pair applies to the org exactly (exit 0 — patch
 /// success always exits 0).
 #[test]
 fn u_eql_only_patch_restores() {
-    let dir = temp_dir("u-eql");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let p = write_file(&dir.join("p.bin"), &[0xA7, 0xA3, 0x10]); // EQL 17
-    let out = dir.join("out.bin");
+    let dir = common::scratch("u-eql");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let p = write_file(&dir.path().join("p.bin"), &[0xA7, 0xA3, 0x10]); // EQL 17
+    let out = dir.path().join("out.bin");
 
     let r = run(&[
         OsStr::new("-u"),
@@ -2404,7 +2348,6 @@ fn u_eql_only_patch_restores() {
     ]);
     assert_eq!(r.status.code(), Some(0), "{}", stderr_str(&r));
     assert_eq!(fs::read(&out).unwrap(), ORG_A);
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ===========================================================================
@@ -2419,9 +2362,9 @@ fn u_eql_only_patch_restores() {
 #[cfg(target_os = "linux")]
 #[test]
 fn write_error_dev_full_matches_oracle() {
-    let dir = temp_dir("devfull");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
+    let dir = common::scratch("devfull");
+    let a = write_file(&dir.path().join("a.bin"), ORG_A);
+    let b = write_file(&dir.path().join("b.bin"), NEW_B);
 
     let out = run(&[a.as_os_str(), b.as_os_str(), OsStr::new("/dev/full")]);
     assert_eq!(
@@ -2434,7 +2377,6 @@ fn write_error_dev_full_matches_oracle() {
         "no EXI_WRI message: {:?}",
         stderr_str(&out)
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Engine verbose pin carried from Task 17, re-pinned to the 0.8.5 oracle
@@ -2447,13 +2389,13 @@ fn write_error_dev_full_matches_oracle() {
 /// port deviation per §21.5/§21.6 determinism stance).
 #[test]
 fn inaccurate_solution_lines_at_verbose_3() {
-    let dir = temp_dir("t17-inacc");
+    let dir = common::scratch("t17-inacc");
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures");
     let a = fixtures.join("bkocomu.0000.fil");
     let b = fixtures.join("bkocomu.0009.fil");
-    let outp = dir.join("p.bin");
+    let outp = dir.path().join("p.bin");
 
     let out = run(&[
         OsStr::new("-vvv"),
@@ -2510,5 +2452,4 @@ fn inaccurate_solution_lines_at_verbose_3() {
         stderr.contains("Hash Dist Load          = 498306/699037=71%\n"),
         "{stderr:?}"
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
