@@ -1332,14 +1332,14 @@ fn check(
      * conditions in the C++ (`liEql >= EQLSZE` / `aiLen <= 0`) — kept 1:1. */
     #[allow(clippy::if_same_then_else)]
     while eql < EQLMAX {
-        lc_org = org.getv(*pos_org, sft);
+        lc_org = org.get(*pos_org, sft);
         /* `lcOrg < 0` (:835): EOF, EOB (soft reads) and the error sentinels
          * end the compare; the sentinel stays in `lc_org` for the EOB check
          * below. */
         let ByteOrEof::Byte(lc_o) = &lc_org else {
             break;
         };
-        lc_new = newf.getv(*pos_new, sft);
+        lc_new = newf.get(*pos_new, sft);
         /* `lcNew < 0` (:838): same sentinels on the destination read. */
         let ByteOrEof::Byte(lc_n) = &lc_new else {
             break;

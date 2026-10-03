@@ -79,7 +79,7 @@ impl<'a, W: Write> JPatcht<'a, W> {
     /// arithmetic computes with `EOF` like the C, so this is deliberately
     /// the i32 representation boundary of the typed reader.
     fn pch_get(&mut self) -> i32 {
-        let li_inp = self.fil_pch.getv(self.pos_pch, ReadType::Read).to_i32();
+        let li_inp = self.fil_pch.get(self.pos_pch, ReadType::Read).to_i32();
         if li_inp < 0 {
             self.pos_pch = -1;
         } else {

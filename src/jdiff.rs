@@ -302,9 +302,9 @@ impl<'a> JDiff<'a> {
                 self.hash_add_org(i32::from(*lc_o));
             }
             *pos_org += 1;
-            *val_org = self.org.getv(*pos_org, ReadType::Read);
+            *val_org = self.org.get(*pos_org, ReadType::Read);
             *pos_new += 1;
-            *val_new = self.r#new.getv(*pos_new, ReadType::Read);
+            *val_new = self.r#new.get(*pos_new, ReadType::Read);
         }
         cnt
     }
@@ -341,8 +341,8 @@ impl<'a> JDiff<'a> {
         }
 
         /* Take one byte from each file ... (JDiff.cpp:174-175) */
-        lc_org = self.org.getv(lz_pos_org, ReadType::Read);
-        lc_new = self.r#new.getv(lz_pos_new, ReadType::Read);
+        lc_org = self.org.get(lz_pos_org, ReadType::Read);
+        lc_new = self.r#new.get(lz_pos_new, ReadType::Read);
         /* while (lcNew >= 0) (JDiff.cpp:176): the comparison loop runs on
          * data bytes only — EOF, EOB (never returned by a plain read) and
          * the error sentinels are all negative. */
@@ -389,9 +389,9 @@ impl<'a> JDiff<'a> {
                         lz_ahd -= 1; // decrease ahead counter
 
                         lz_pos_org += 1;
-                        lc_org = self.org.getv(lz_pos_org, ReadType::Read);
+                        lc_org = self.org.get(lz_pos_org, ReadType::Read);
                         lz_pos_new += 1;
-                        lc_new = self.r#new.getv(lz_pos_new, ReadType::Read);
+                        lc_new = self.r#new.get(lz_pos_new, ReadType::Read);
                     } else {
                         /* fast loop (JDiff.cpp:201-224): the src_scn==0 variant
                          * incrementally indexes the source. */
@@ -427,7 +427,7 @@ impl<'a> JDiff<'a> {
 
                         /* Take next byte from destination file ... */
                         lz_pos_new += 1;
-                        lc_new = self.r#new.getv(lz_pos_new, ReadType::Read);
+                        lc_new = self.r#new.get(lz_pos_new, ReadType::Read);
                     } else {
                         /* `lcOrg != lcNew && lcOrg >= 0 && lcNew >= 0 &&
                          * lzAhd > 0`: continue exactly on two unequal data
@@ -450,9 +450,9 @@ impl<'a> JDiff<'a> {
 
                             /* Take next byte from each file ... */
                             lz_pos_org += 1;
-                            lc_org = self.org.getv(lz_pos_org, ReadType::Read);
+                            lc_org = self.org.get(lz_pos_org, ReadType::Read);
                             lz_pos_new += 1;
-                            lc_new = self.r#new.getv(lz_pos_new, ReadType::Read);
+                            lc_new = self.r#new.get(lz_pos_new, ReadType::Read);
                         }
                     }
                 }
@@ -524,11 +524,11 @@ impl<'a> JDiff<'a> {
                     if lz_skp_org > 0 {
                         self.out.put(DEL, lz_skp_org, 0, 0, lz_pos_org, lz_pos_new);
                         lz_pos_org += lz_skp_org;
-                        lc_org = self.org.getv(lz_pos_org, ReadType::Read);
+                        lc_org = self.org.get(lz_pos_org, ReadType::Read);
                     } else if lz_skp_org < 0 {
                         self.out.put(BKT, -lz_skp_org, 0, 0, lz_pos_org, lz_pos_new);
                         lz_pos_org += lz_skp_org;
-                        lc_org = self.org.getv(lz_pos_org, ReadType::Read);
+                        lc_org = self.org.get(lz_pos_org, ReadType::Read);
                     }
                     if lz_skp_new > 0 {
                         /* `lcNew > EOF` (JDiff.cpp:300): data bytes only —
@@ -541,7 +541,7 @@ impl<'a> JDiff<'a> {
                                 .put(INS, 1, 0, i32::from(*lc_n), lz_pos_org, lz_pos_new);
                             lz_skp_new -= 1;
                             lz_pos_new += 1;
-                            lc_new = self.r#new.getv(lz_pos_new, ReadType::Read);
+                            lc_new = self.r#new.get(lz_pos_new, ReadType::Read);
                         }
                     }
                 } /* if lcOrg == lcNew */
@@ -658,7 +658,7 @@ impl<'a> JDiff<'a> {
             // catches EOF, EOB (soft look-ahead past the window) and the
             // error sentinels — everything but a data byte.
             while li_scan > 0 {
-                let lc_org = match self.org.getv(self.sst.az_org, ReadType::SoftAhead) {
+                let lc_org = match self.org.get(self.sst.az_org, ReadType::SoftAhead) {
                     ByteOrEof::Byte(lc_org) => lc_org,
                     _ => break,
                 };
@@ -791,7 +791,7 @@ impl<'a> JDiff<'a> {
                 self.sst.prv_new = EOF;
                 let mut li_idx: i32 = 0;
                 while li_idx < li_bck {
-                    self.sst.val_new = self.r#new.getv(self.sst.az_new + 1, li_sft_new); // ++mzAhdNew
+                    self.sst.val_new = self.r#new.get(self.sst.az_new + 1, li_sft_new); // ++mzAhdNew
                     self.sst.az_new += 1;
                     /* `miVal <= EOF` (JDiff.cpp:531-534): EOF, EOB (soft
                      * look-ahead past the window) and the error sentinels
@@ -843,7 +843,7 @@ impl<'a> JDiff<'a> {
              */
             while li_max > 0 {
                 /* hash the new value */
-                self.sst.val_new = self.r#new.getv(self.sst.az_new + 1, li_sft_new); // ++mzAhdNew
+                self.sst.val_new = self.r#new.get(self.sst.az_new + 1, li_sft_new); // ++mzAhdNew
                 self.sst.az_new += 1;
                 /* `miVal <= EOF` (JDiff.cpp:584-587): EOF, EOB (soft
                  * look-ahead past the window) and the error sentinels end
@@ -1068,7 +1068,7 @@ impl<'a> JDiff<'a> {
         li_idx = 0;
         while li_idx < SMPSZE - 1 {
             lz_pos_org += 1; // ++lzPosOrg
-            lc_val_org = org.getv(lz_pos_org, ReadType::HardAhead);
+            lc_val_org = org.get(lz_pos_org, ReadType::HardAhead);
             /* `lcValOrg <= EOF` (JDiff.cpp:743): EOF and the error
              * sentinels end the hash initialization; the raw sentinel
              * stays in `lc_val_org` for the return check below. */
@@ -1090,7 +1090,7 @@ impl<'a> JDiff<'a> {
         while let ByteOrEof::Byte(_) = &lc_val_org {
             // lcValOrg > EOF
             lz_pos_org += 1;
-            lc_val_org = org.getv(lz_pos_org, ReadType::HardAhead);
+            lc_val_org = org.get(lz_pos_org, ReadType::HardAhead);
             /* `lcValOrg <= EOF` (JDiff.cpp:751): EOF and the error
              * sentinels end the prescan. */
             let ByteOrEof::Byte(lc_val) = &lc_val_org else {
@@ -1316,15 +1316,15 @@ mod tests {
         }
     }
 
-    /// Always-failing original file: every `get` returns `EXI_RED` (a
-    /// negative exit code at 0.8.5) — `JFile` implementations may return
-    /// negative EXI codes as hard read errors, and the engine aborts with
-    /// that code (the CLI prints "Error reading file !", exit 8).
+    /// Always-failing original file: every `get` returns `Err(EXI_RED)` (a
+    /// negative exit code at 0.8.5) — `JFile` implementations may report
+    /// hard read errors, and the engine aborts with that code (the CLI
+    /// prints "Error reading file !", exit 8).
     struct FailingJFile;
 
     impl JFile for FailingJFile {
-        fn get(&mut self, _pos: i64, _typ: ReadType) -> i32 {
-            EXI_RED
+        fn get(&mut self, _pos: i64, _typ: ReadType) -> ByteOrEof {
+            ByteOrEof::from_raw(EXI_RED)
         }
 
         fn seekcount(&self) -> i64 {

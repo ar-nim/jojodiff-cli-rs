@@ -54,11 +54,10 @@ impl<W: Write> JFileOut<W> {
     /// the result away; spec §21.14: observable in the read cursor, ported
     /// as-is).
     pub fn copyfrom(&mut self, inp: &mut dyn JFile, mut az_pos: i64, mut az_len: i64) -> i32 {
-        /* First try buffered copying (JFileOut.cpp:37-38). `lz_len` is the
-         * C++ `lzLen`: on input the requested length, on output the number
-         * of bytes the buffer can serve (possibly more than requested). */
-        let mut lz_len: i64 = az_len;
-        let mut lp_buf: Option<&[u8]> = inp.getbuf(az_pos, &mut lz_len, ReadType::Read);
+        /* First try buffered copying (JFileOut.cpp:37-38). The run length
+         * (C++ `lzLen` on output: the number of bytes the buffer can serve,
+         * possibly more than requested) is the slice length. */
+        let mut lp_buf: Option<&[u8]> = inp.getbuf(az_pos, ReadType::Read);
 
         if lp_buf.is_some() {
             while az_len > 0 {
@@ -68,9 +67,7 @@ impl<W: Write> JFileOut<W> {
                     eprintln!("Error reading source file.");
                     return EXI_RED;
                 };
-                if lz_len > az_len {
-                    lz_len = az_len;
-                }
+                let lz_len = (buf.len() as i64).min(az_len);
                 if self.out.write_all(&buf[..lz_len as usize]).is_err() {
                     eprintln!("Error writing output file.");
                     return EXI_WRI;
@@ -78,7 +75,7 @@ impl<W: Write> JFileOut<W> {
                 az_len -= lz_len;
                 az_pos += lz_len;
                 if az_len > 0 {
-                    lp_buf = inp.getbuf(az_pos, &mut lz_len, ReadType::Read);
+                    lp_buf = inp.getbuf(az_pos, ReadType::Read);
                 }
             }
             return EXI_OK;
@@ -88,7 +85,7 @@ impl<W: Write> JFileOut<W> {
         while az_len > 0 {
             /* `lcVal <= EOF` (JFileOut.cpp:59): EOF and the error sentinels
              * end the copy as a short read. */
-            let lc_val = match inp.getv(az_pos, ReadType::Read) {
+            let lc_val = match inp.get(az_pos, ReadType::Read) {
                 ByteOrEof::Byte(lc_val) => lc_val,
                 _ => break,
             };
@@ -99,7 +96,7 @@ impl<W: Write> JFileOut<W> {
             /* Stray discard read (`JFileOut.cpp:67`): the C++ zero-argument
              * `get()` reads at the advanced sequential cursor — one past the
              * byte just output — and ignores the result. */
-            let _ = inp.getv(az_pos + 1, ReadType::Read);
+            let _ = inp.get(az_pos + 1, ReadType::Read);
             az_len -= 1;
             az_pos += 1;
         }
@@ -194,7 +191,7 @@ mod tests {
         );
         // Cursor sits at 5 (after the stray get(4)): reading position 4 is
         // out of order again (4th seek) but still served.
-        assert_eq!(f.get(4, ReadType::Read), i32::from(src[4]));
+        assert_eq!(f.get(4, ReadType::Read), ByteOrEof::Byte(src[4]));
         assert_eq!(f.seekcount(), 4);
     }
 
