@@ -452,98 +452,107 @@ impl<R: Read + Seek> JFileAhead<R> {
         }
 
         match li_sek {
-            BufOpr::Reset => {
-                // JFileAhead.cpp:310-333
-                if !self.seq {
-                    // Calculate position and length
-                    self.pos_inp = (pos / self.blk_sze) * self.blk_sze;
-                } else {
-                    // In sequential mode: jump forward and then append, keep
-                    // the buffer as large as possible
-                    self.pos_inp =
-                        ((pos - self.buf_sze + self.blk_sze) / self.blk_sze) * self.blk_sze;
-                }
-
-                // Reset buffer
-                self.ptr_inp = 0; // mpInp = mpBuf
-                self.pos_bse = self.pos_inp;
-                self.buf_usd = 0;
-
-                // Seek
-                if self.jseek(self.pos_inp) != EXI_OK {
-                    return BufDone::SeekError;
-                }
-                self.seeks += 1; // mlFabSek++
-
-                // Read
-                let (inp, pos, dne) = self.readblocks(self.ptr_inp, self.pos_inp, pos);
-                self.ptr_inp = inp;
-                self.pos_inp = pos;
-                if dne == EOF {
-                    return BufDone::EndOfFile;
-                }
-            }
-
-            BufOpr::Append => {
-                // JFileAhead.cpp:335-339
-                let (inp, pos, dne) = self.readblocks(self.ptr_inp, self.pos_inp, pos);
-                self.ptr_inp = inp;
-                self.pos_inp = pos;
-                if dne == EOF {
-                    return BufDone::EndOfFile;
-                }
-            }
-
-            BufOpr::Scrollback => {
-                // JFileAhead.cpp:341-383
-                // Calculate scrollback position
-                let lz_pos = (pos / self.blk_sze) * self.blk_sze; // position to seek
-                let mut lz_len = self.pos_inp - lz_pos; // new potential buffer length
-                let mut lp_inp: i64 = self.ptr_inp as i64 - lz_len;
-                if lz_len > self.ptr_inp as i64 {
-                    lp_inp += self.buf_sze;
-                }
-
-                // Make room in the buffer for the scrollback
-                if lz_len > self.buf_sze {
-                    lz_len -= self.buf_sze;
-                    self.buf_usd -= lz_len;
-                    self.pos_inp = lz_pos + self.buf_sze;
-                    if lz_len > self.ptr_inp as i64 {
-                        lp_inp += self.buf_sze;
-                    }
-                    self.ptr_inp = lp_inp as usize; // mpInp = lpInp
-                }
-
-                // Seek
-                if self.jseek(lz_pos) != EXI_OK {
-                    return BufDone::SeekError;
-                }
-                self.seeks += 1;
-
-                // Read loop
-                let (lp_inp, lz_pos, dne) =
-                    self.readblocks(lp_inp as usize, lz_pos, self.pos_inp - self.buf_usd - 1);
-                if dne == EOF {
-                    // A scrollback cannot issue an EOF unless there's a
-                    // hardware error or the file is being truncated while
-                    // we're reading it. In both cases, the outcome will
-                    // probably be unusable. The buffer variables are set here
-                    // just for the sake of "correctness".
-                    // (JFileAhead.cpp:367-376)
-                    self.ptr_inp = lp_inp; // mpInp = lpInp
-                    self.pos_inp = lz_pos; // mzPosInp = lzPos
-                    self.buf_usd = i64::from(dne); // miBufUsd = liDne (EOF = -1)
-                    return BufDone::ReadError;
-                }
-
-                // @Seek (JFileAhead.cpp:378-381)
-                if self.jseek(self.pos_inp) != EXI_OK {
-                    return BufDone::SeekError;
-                }
-                self.seeks += 1;
-            }
+            BufOpr::Reset => self.reset_to(pos),
+            BufOpr::Append => self.append_blocks(pos),
+            BufOpr::Scrollback => self.scroll_back(pos),
         }
+    }
+
+    /// Reset the buffer to serve `pos` (`JFileAhead.cpp:310-333`): seek to
+    /// the block-aligned position and read anew.
+    fn reset_to(&mut self, pos: i64) -> BufDone {
+        if !self.seq {
+            // Calculate position and length
+            self.pos_inp = (pos / self.blk_sze) * self.blk_sze;
+        } else {
+            // In sequential mode: jump forward and then append, keep
+            // the buffer as large as possible
+            self.pos_inp = ((pos - self.buf_sze + self.blk_sze) / self.blk_sze) * self.blk_sze;
+        }
+
+        // Reset buffer
+        self.ptr_inp = 0; // mpInp = mpBuf
+        self.pos_bse = self.pos_inp;
+        self.buf_usd = 0;
+
+        // Seek
+        if self.jseek(self.pos_inp) != EXI_OK {
+            return BufDone::SeekError;
+        }
+        self.seeks += 1; // mlFabSek++
+
+        // Read
+        let (inp, pos, dne) = self.readblocks(self.ptr_inp, self.pos_inp, pos);
+        self.ptr_inp = inp;
+        self.pos_inp = pos;
+        if dne == EOF {
+            return BufDone::EndOfFile;
+        }
+
+        BufDone::Added // JFileAhead.cpp:386
+    }
+
+    /// Append blocks to the buffer to serve `pos` (`JFileAhead.cpp:335-339`).
+    fn append_blocks(&mut self, pos: i64) -> BufDone {
+        let (inp, pos, dne) = self.readblocks(self.ptr_inp, self.pos_inp, pos);
+        self.ptr_inp = inp;
+        self.pos_inp = pos;
+        if dne == EOF {
+            return BufDone::EndOfFile;
+        }
+
+        BufDone::Added // JFileAhead.cpp:386
+    }
+
+    /// Scroll the buffer back to serve `pos` (`JFileAhead.cpp:341-383`):
+    /// keep as much of the buffered data as fits and read the missing head.
+    fn scroll_back(&mut self, pos: i64) -> BufDone {
+        // Calculate scrollback position
+        let lz_pos = (pos / self.blk_sze) * self.blk_sze; // position to seek
+        let mut lz_len = self.pos_inp - lz_pos; // new potential buffer length
+        let mut lp_inp: i64 = self.ptr_inp as i64 - lz_len;
+        if lz_len > self.ptr_inp as i64 {
+            lp_inp += self.buf_sze;
+        }
+
+        // Make room in the buffer for the scrollback
+        if lz_len > self.buf_sze {
+            lz_len -= self.buf_sze;
+            self.buf_usd -= lz_len;
+            self.pos_inp = lz_pos + self.buf_sze;
+            if lz_len > self.ptr_inp as i64 {
+                lp_inp += self.buf_sze;
+            }
+            self.ptr_inp = lp_inp as usize; // mpInp = lpInp
+        }
+
+        // Seek
+        if self.jseek(lz_pos) != EXI_OK {
+            return BufDone::SeekError;
+        }
+        self.seeks += 1;
+
+        // Read loop
+        let (lp_inp, lz_pos, dne) =
+            self.readblocks(lp_inp as usize, lz_pos, self.pos_inp - self.buf_usd - 1);
+        if dne == EOF {
+            // A scrollback cannot issue an EOF unless there's a
+            // hardware error or the file is being truncated while
+            // we're reading it. In both cases, the outcome will
+            // probably be unusable. The buffer variables are set here
+            // just for the sake of "correctness".
+            // (JFileAhead.cpp:367-376)
+            self.ptr_inp = lp_inp; // mpInp = lpInp
+            self.pos_inp = lz_pos; // mzPosInp = lzPos
+            self.buf_usd = i64::from(dne); // miBufUsd = liDne (EOF = -1)
+            return BufDone::ReadError;
+        }
+
+        // @Seek (JFileAhead.cpp:378-381)
+        if self.jseek(self.pos_inp) != EXI_OK {
+            return BufDone::SeekError;
+        }
+        self.seeks += 1;
 
         BufDone::Added // JFileAhead.cpp:386
     }
