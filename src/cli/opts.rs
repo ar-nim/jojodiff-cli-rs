@@ -263,7 +263,7 @@ impl Getopt {
             if self.nextchar != 0 {
                 // None = cluster exhausted (scan_short reset nextchar; the
                 // token itself was consumed when the cluster started).
-                match self.scan_short(&self.cluster.clone()) {
+                match self.scan_cluster() {
                     Some(opt) => return opt,
                     None => continue,
                 }
@@ -292,8 +292,8 @@ impl Getopt {
                 // operand.
                 self.optind += 1;
                 self.nextchar = 1;
-                self.cluster = bytes.clone();
-                if let Some(opt) = self.scan_short(&bytes) {
+                self.cluster = bytes;
+                if let Some(opt) = self.scan_cluster() {
                     return opt;
                 }
                 continue;
@@ -303,6 +303,16 @@ impl Getopt {
             self.operands.push(tok);
             self.optind += 1;
         }
+    }
+
+    /// Scans the next option from `self.cluster` without cloning it per
+    /// character: the token is moved out so `scan_short` can borrow `&mut
+    /// self` and the cluster text simultaneously, then restored.
+    fn scan_cluster(&mut self) -> Option<Opt> {
+        let tok = std::mem::take(&mut self.cluster);
+        let opt = self.scan_short(&tok);
+        self.cluster = tok;
+        opt
     }
 
     /// Scans the short cluster starting at `self.nextchar` in `tok`.
