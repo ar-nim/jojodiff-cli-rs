@@ -366,13 +366,14 @@ mod tests {
 
     /// Dedup is accepted and exits 20 (§21.4, the EXI_ERR replacement):
     /// the inputs open (scratch files), no output is opened, the crash-path
-    /// substitute `NotPorted` crosses the boundary.
+    /// substitute `NotPorted` crosses the boundary. Scratch via the
+    /// `tempfile` dev-dependency's RAII `TempDir`, like the integration
+    /// harness.
     #[test]
     fn run_dedup_is_not_ported_exit_20() {
-        let dir = std::env::temp_dir().join(format!("jdiff-run-y-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("create scratch dir");
-        let a = dir.join("a.bin");
-        let b = dir.join("b.bin");
+        let dir = tempfile::TempDir::new().expect("create scratch dir");
+        let a = dir.path().join("a.bin");
+        let b = dir.path().join("b.bin");
         std::fs::write(&a, b"hello world hello").expect("write scratch a");
         std::fs::write(&b, b"hello world byebye").expect("write scratch b");
         let args: Vec<OsString> = [
@@ -380,11 +381,10 @@ mod tests {
             OsString::from("-y"),
             a.into_os_string(),
             b.into_os_string(),
-            dir.join("out.bin").into_os_string(),
+            dir.path().join("out.bin").into_os_string(),
         ]
         .to_vec();
         let code = run(&args);
-        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(code.unwrap(), -crate::defs::EXI_ERR);
     }
 }
