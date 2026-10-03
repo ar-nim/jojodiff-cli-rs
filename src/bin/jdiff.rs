@@ -51,6 +51,7 @@
 //!    `-c` the patch is `BufWriter`-buffered and flushed at scope end,
 //!    mirroring the C++ exit-time flush.
 
+use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
@@ -442,16 +443,7 @@ fn real_main() -> i32 {
     } else if out_is_stdout {
         Some(Sink::Stdout(std::io::stdout().lock()))
     } else {
-        match File::create(&nam_out) {
-            Ok(file) => Some(Sink::File(file)),
-            Err(_) => {
-                dbg_print(format_args!(
-                    "Could not open output file {} for writing.\n",
-                    nam_out.to_string_lossy()
-                ));
-                exit(-EXI_OUT);
-            }
-        }
+        Some(Sink::File(open_output_file(&nam_out, false)))
     };
 
     /* Execute required function (`main.cpp:776-876`). */
@@ -496,11 +488,7 @@ fn real_main() -> i32 {
          * writes and flushes at scope end, like the C++ exit-time flush. */
         let out_sink = file_out.expect("output open above guarantees a sink");
         let writer: Box<dyn Write> =
-            if out_is_stdout && DBG_TO_STDOUT.load(std::sync::atomic::Ordering::Relaxed) {
-                Box::new(IgnoringWriter { inner: out_sink })
-            } else {
-                Box::new(BufWriter::new(IgnoringWriter { inner: out_sink }))
-            };
+            wrap_buffered(IgnoringWriter { inner: out_sink }, out_is_stdout);
         let jout: Box<dyn JOut> = match out_typ {
             1 => Box::new(JOutAsc::new(writer)),
             // --compat-081 (§21.16) selects the byte-exact 0.8.1 writer
@@ -655,27 +643,9 @@ fn real_main() -> i32 {
             Sink::Stdout(std::io::stdout().lock())
         } else if li_fun == Function::Test {
             // Append to the diff output just flushed (C++: the same FILE*).
-            match File::options().append(true).open(&nam_out) {
-                Ok(file) => Sink::File(file),
-                Err(_) => {
-                    dbg_print(format_args!(
-                        "Could not open output file {} for writing.\n",
-                        nam_out.to_string_lossy()
-                    ));
-                    exit(-EXI_OUT);
-                }
-            }
+            Sink::File(open_output_file(&nam_out, true))
         } else {
-            match File::create(&nam_out) {
-                Ok(file) => Sink::File(file),
-                Err(_) => {
-                    dbg_print(format_args!(
-                        "Could not open output file {} for writing.\n",
-                        nam_out.to_string_lossy()
-                    ));
-                    exit(-EXI_OUT);
-                }
-            }
+            Sink::File(open_output_file(&nam_out, false))
         };
 
         /* The patch phase wraps its sink in a BufWriter flushed at scope
@@ -685,12 +655,7 @@ fn real_main() -> i32 {
          * exit 9. With `-c` and a stdout patch the raw lock is used so
          * patch bytes and verbose lines share one ordered buffer, like the
          * C++ single `FILE*`. */
-        let patch_writer: Box<dyn Write> =
-            if out_is_stdout && DBG_TO_STDOUT.load(std::sync::atomic::Ordering::Relaxed) {
-                Box::new(patch_sink)
-            } else {
-                Box::new(BufWriter::new(patch_sink))
-            };
+        let patch_writer: Box<dyn Write> = wrap_buffered(patch_sink, out_is_stdout);
         let lo_fil_out = JFileOut::new(patch_writer);
         let mut lo_jpatcht = JPatcht::new(
             inputs.org.as_mut(),
@@ -813,6 +778,39 @@ fn open_inputs(
     };
 
     Inputs { org, new }
+}
+
+/// Opens the output file like the C++ (`main.cpp:754-774`): on failure
+/// prints the pinned message and exits `-EXI_OUT` (5). `append` selects
+/// the `-t` reopen path (the same FILE* appended after the diff output).
+fn open_output_file(nam_out: &OsStr, append: bool) -> File {
+    let attempt = if append {
+        File::options().append(true).open(nam_out)
+    } else {
+        File::create(nam_out)
+    };
+    match attempt {
+        Ok(file) => file,
+        Err(_) => {
+            dbg_print(format_args!(
+                "Could not open output file {} for writing.\n",
+                nam_out.to_string_lossy()
+            ));
+            exit(-EXI_OUT);
+        }
+    }
+}
+
+/// The diff/patch writer-buffering decision: with `-c` and a stdout patch
+/// the raw sink is used so patch bytes and verbose lines share one ordered
+/// buffer (the C++ single `FILE*`); otherwise a `BufWriter` batches the
+/// per-byte writes and flushes at scope end (the C++ exit-time flush).
+fn wrap_buffered<W: Write + 'static>(sink: W, out_is_stdout: bool) -> Box<dyn Write> {
+    if out_is_stdout && DBG_TO_STDOUT.load(std::sync::atomic::Ordering::Relaxed) {
+        Box::new(sink)
+    } else {
+        Box::new(BufWriter::new(sink))
+    }
 }
 
 /// An input byte source: a real file or stdin (via its `/dev/stdin` re-open;
