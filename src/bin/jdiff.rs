@@ -58,11 +58,10 @@ use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::process::exit;
 
 use jojodiff_cli_rs::cli::config::{self, Function};
+use jojodiff_cli_rs::cli::error::report;
 use jojodiff_cli_rs::cli::report::{print_greeting, print_notes, print_usage};
-use jojodiff_cli_rs::defs::{
-    EXI_ARG, EXI_DIF, EXI_EQL, EXI_ERR, EXI_FRT, EXI_LRG, EXI_MEM, EXI_OK, EXI_OUT, EXI_RED,
-    EXI_SCD, EXI_SEK, EXI_WRI,
-};
+use jojodiff_cli_rs::defs::{EXI_DIF, EXI_EQL, EXI_OK};
+use jojodiff_cli_rs::error::JDiffError;
 use jojodiff_cli_rs::jdebug::{DBG_TO_STDOUT, dbg_print};
 use jojodiff_cli_rs::jdiff::JDiff;
 use jojodiff_cli_rs::jfile::{JFile, JFileAhead};
@@ -115,7 +114,10 @@ fn real_main() -> i32 {
                     "Error: Not enough arguments have been specified !\n"
                 ));
             }
-            exit(-EXI_ARG);
+            /* The boundary prints nothing for `Args`: this site's text is
+             * `liHlp`-gated (pinned by `missing_args_exit_2` and
+             * `help_exit_code_and_text`), so only the code crosses. */
+            return report(Err(JDiffError::Args), verbose);
         }
     } else if verbose > 0 {
         dbg_print(format_args!(
@@ -139,7 +141,9 @@ fn real_main() -> i32 {
             "{}",
             "Error: Original and destination files cannot both be from standard input !\n"
         ));
-        exit(-EXI_ARG);
+        /* Like above: this site's own text is pinned
+         * (`both_inputs_dash_exit_2`), the boundary carries only the code. */
+        return report(Err(JDiffError::Args), verbose);
     }
 
     // Set default values for llBlk and liBlk (`main.cpp:617-645`): the
@@ -154,7 +158,10 @@ fn real_main() -> i32 {
 
     /* Open files and create file handlers (`main.cpp:647-752`). The inputs
      * may be opened a second time for `-t`'s patch phase (deviation 2). */
-    let inputs = open_inputs(&nam_org, &nam_new, ll_buf_org, ll_buf_new, blk_sze);
+    let inputs = match open_inputs(&nam_org, &nam_new, ll_buf_org, ll_buf_new, blk_sze) {
+        Ok(inputs) => inputs,
+        Err(e) => return report(Err(e), verbose),
+    };
 
     /* Open output (`main.cpp:754-774`); Dedup does not open one (its crash
      * path is replaced by the EXI_ERR exit, §21.4). */
@@ -164,16 +171,19 @@ fn real_main() -> i32 {
     } else if out_is_stdout {
         Some(Sink::Stdout(std::io::stdout().lock()))
     } else {
-        Some(Sink::File(open_output_file(&nam_out, false)))
+        match open_output_file(&nam_out, false) {
+            Ok(file) => Some(Sink::File(file)),
+            Err(e) => return report(Err(e), verbose),
+        }
     };
 
     /* Execute required function (`main.cpp:776-876`). */
-    let mut li_ret: i32 = EXI_ARG; /* default return code */
+    let mut li_ret: Result<i32, JDiffError> = Err(JDiffError::Args); /* default return code */
 
     if li_fun == Function::Dedup {
         // Dedup is not ported (§21.4): the files opened, then the C++ crash
         // path becomes the EXI_ERR exit ("Error occurred !").
-        li_ret = EXI_ERR;
+        li_ret = Err(JDiffError::NotPorted);
     }
 
     if li_fun == Function::Diff || li_fun == Function::Test {
@@ -279,21 +289,18 @@ fn real_main() -> i32 {
 
         /* Execute... (`main.cpp:838-845`): the 0.8.5 exit swap — identical
          * files yield EXI_EQL (process exit 0), differences EXI_DIF (exit
-         * 1), decided by `out.dta > 0`. The Phase-3 shim maps the engine's
-         * `Result` back to the i32 vocabulary `exit_switch` speaks; the
-         * error TEXTS are not printed here — `exit_switch` prints the
-         * pinned family for every mapped code below (and the library-side
-         * `JFileOut` family prints at its own failure point), so a
-         * Display print in the shim would double them. */
-        li_ret = engine_code(lo_jdiff.jdiff());
+         * 1), decided by `out.dta > 0`. Engine errors flow to `report` as
+         * `Err(JDiffError)`; the error TEXTS are not printed here — the
+         * boundary prints the pinned family once (and the library-side
+         * `JFileOut` family prints at its own failure point), so a Display
+         * print here would double them. */
+        let engine = lo_jdiff.jdiff();
         let stats = lo_jdiff.out_stats();
-        if li_ret == EXI_OK {
-            if stats.dta > 0 {
-                li_ret = EXI_DIF;
-            } else {
-                li_ret = EXI_EQL;
-            }
-        }
+        li_ret = match engine {
+            Ok(()) if stats.dta > 0 => Ok(EXI_DIF),
+            Ok(()) => Ok(EXI_EQL),
+            Err(e) => Err(e),
+        };
 
         /* Write statistics (`main.cpp:847-869`). */
         if verbose > 1 {
@@ -364,14 +371,23 @@ fn real_main() -> i32 {
         // for `-u` this is their first and only open, for `-t` the C++
         // reuses its mid-cursor handles (the upstream bug — see module docs,
         // deviation 2). `-t`'s output appends to what the diff wrote.
-        let mut inputs = open_inputs(&nam_org, &nam_new, ll_buf_org, ll_buf_new, blk_sze);
+        let mut inputs = match open_inputs(&nam_org, &nam_new, ll_buf_org, ll_buf_new, blk_sze) {
+            Ok(inputs) => inputs,
+            Err(e) => return report(Err(e), verbose),
+        };
         let patch_sink = if out_is_stdout {
             Sink::Stdout(std::io::stdout().lock())
         } else if li_fun == Function::Test {
             // Append to the diff output just flushed (C++: the same FILE*).
-            Sink::File(open_output_file(&nam_out, true))
+            match open_output_file(&nam_out, true) {
+                Ok(file) => Sink::File(file),
+                Err(e) => return report(Err(e), verbose),
+            }
         } else {
-            Sink::File(open_output_file(&nam_out, false))
+            match open_output_file(&nam_out, false) {
+                Ok(file) => Sink::File(file),
+                Err(e) => return report(Err(e), verbose),
+            }
         };
 
         /* The patch phase wraps its sink in a BufWriter flushed at scope
@@ -389,87 +405,16 @@ fn real_main() -> i32 {
             lo_fil_out,
             verbose,
         );
-        li_ret = engine_code(lo_jpatcht.jpatch());
+        li_ret = lo_jpatcht.jpatch().map(|()| EXI_OK);
         // Flush the patch writer at scope end, like the C++ exit-time flush.
         drop(lo_jpatcht.into_inner());
     } /* liFun == Patch or Test */
 
     /* Cleanup: the readers and writers drop in the blocks above. */
 
-    /* Exit (`main.cpp:897-932`). */
-    exit_switch(li_ret, verbose)
-}
-
-/// Phase-3 shim: engine `Result` → the i32 vocabulary `exit_switch` still
-/// speaks (removed in Phase 4 when the boundary maps `JDiffError` directly).
-/// Pure code mapping, deliberately NO `Display` print: `exit_switch` prints
-/// the pinned error text for every code this can yield (the `EXI_SEK`/
-/// `EXI_LRG`/`EXI_RED`/`EXI_WRI`/`EXI_MEM`/`EXI_ERR` arms and the
-/// "Unknown exit code" fall-through for `Raw`'s non-`EXI_*` values), and the
-/// `JFileOut` family ("Error reading source file." / "Error writing output
-/// file." / the trailing-byte warning) prints in the library at its own
-/// failure point — printing here too would change the pinned stderr bytes.
-fn engine_code(r: Result<(), jojodiff_cli_rs::error::JDiffError>) -> i32 {
-    match r {
-        Ok(()) => EXI_OK,
-        Err(e) => e.exit_code(),
-    }
-}
-
-/// The exit-code switch (`main.cpp:897-932`): engine errors print their
-/// message and exit `-EXI_*` (the positive process code); patch success
-/// exits 0; EXI_EQL/EXI_DIF map to the swapped 0/1 with the verbose verdict
-/// lines. Every arm diverges, so the `i32` tail is never reached.
-fn exit_switch(li_ret: i32, verbose: i32) -> i32 {
-    match li_ret {
-        r if r == EXI_SEK => {
-            dbg_print(format_args!("\nSeek error !\n"));
-            exit(-EXI_SEK);
-        }
-        r if r == EXI_LRG => {
-            dbg_print(format_args!("\nError: 64-bit offsets not supported !\n"));
-            exit(-EXI_LRG);
-        }
-        r if r == EXI_RED => {
-            dbg_print(format_args!("\nError reading file !\n"));
-            exit(-EXI_RED);
-        }
-        r if r == EXI_WRI => {
-            dbg_print(format_args!("\nError writing file !\n"));
-            exit(-EXI_WRI);
-        }
-        r if r == EXI_MEM => {
-            dbg_print(format_args!("\nError allocating memory !\n"));
-            exit(-EXI_MEM);
-        }
-        r if r == EXI_ARG => {
-            dbg_print(format_args!("\nError in arguments !\n"));
-            exit(-EXI_ARG);
-        }
-        r if r == EXI_ERR => {
-            dbg_print(format_args!("\nError occurred !\n"));
-            exit(-EXI_ERR);
-        }
-        EXI_OK => exit(EXI_OK),
-        EXI_EQL => {
-            if verbose > 1 {
-                dbg_print(format_args!("\nFound all data within source file.\n"));
-            }
-            exit(EXI_OK);
-        }
-        EXI_DIF => {
-            if verbose > 1 {
-                dbg_print(format_args!(
-                    "\nNot all data has been found in source file.\n"
-                ));
-            }
-            exit(EXI_DIF);
-        }
-        _ => {
-            dbg_print(format_args!("\nUnknown exit code {}\n", li_ret));
-            exit(-EXI_ERR);
-        }
-    }
+    /* Exit (`main.cpp:897-932`): the single boundary prints the pinned error
+     * text (if any) and yields the positive process exit code. */
+    report(li_ret, verbose)
 }
 
 /// The two input readers (`lpJflOrg`/`lpJflNew`).
@@ -480,26 +425,26 @@ struct Inputs {
 
 /// Opens both input files as buffered look-ahead readers
 /// (`main.cpp:647-752`): `-` re-opens `/dev/stdin` (deviation 1), anything
-/// else opens the named file; failures print the `main.cpp` messages and
-/// exit 3/4.
+/// else opens the named file; failures return `OpenFirst`/`OpenSecond` with
+/// the name moved in — the boundary (`cli::error::report`) prints the
+/// `main.cpp` messages and exits 3/4.
 fn open_inputs(
     nam_org: &OsString,
     nam_new: &OsString,
     buf_org: i64,
     buf_new: i64,
     blk_sze: i32,
-) -> Inputs {
+) -> Result<Inputs, JDiffError> {
     let org: Box<dyn JFile> = if *nam_org == *"-" {
         Box::new(JFileAhead::new(open_dash(), "Org", buf_org, blk_sze))
     } else {
         match File::open(nam_org) {
             Ok(file) => Box::new(JFileAhead::new(file, "Org", buf_org, blk_sze)),
-            Err(_) => {
-                dbg_print(format_args!(
-                    "Could not open first file {} for reading.\n",
-                    nam_org.to_string_lossy()
-                ));
-                exit(-EXI_FRT);
+            Err(source) => {
+                return Err(JDiffError::OpenFirst {
+                    name: nam_org.clone(),
+                    source,
+                });
             }
         }
     };
@@ -509,38 +454,34 @@ fn open_inputs(
     } else {
         match File::open(nam_new) {
             Ok(file) => Box::new(JFileAhead::new(file, "New", buf_new, blk_sze)),
-            Err(_) => {
-                dbg_print(format_args!(
-                    "Could not open second file {} for reading.\n",
-                    nam_new.to_string_lossy()
-                ));
-                exit(-EXI_SCD);
+            Err(source) => {
+                return Err(JDiffError::OpenSecond {
+                    name: nam_new.clone(),
+                    source,
+                });
             }
         }
     };
 
-    Inputs { org, new }
+    Ok(Inputs { org, new })
 }
 
-/// Opens the output file like the C++ (`main.cpp:754-774`): on failure
-/// prints the pinned message and exits `-EXI_OUT` (5). `append` selects
-/// the `-t` reopen path (the same FILE* appended after the diff output).
-fn open_output_file(nam_out: &OsStr, append: bool) -> File {
+/// Opens the output file like the C++ (`main.cpp:754-774`); on failure
+/// returns `OpenOutput` with the name and the `append` mode moved in — the
+/// boundary (`cli::error::report`) prints the pinned message and exits
+/// `-EXI_OUT` (5). `append` selects the `-t` reopen path (the same FILE*
+/// appended after the diff output).
+fn open_output_file(nam_out: &OsStr, append: bool) -> Result<File, JDiffError> {
     let attempt = if append {
         File::options().append(true).open(nam_out)
     } else {
         File::create(nam_out)
     };
-    match attempt {
-        Ok(file) => file,
-        Err(_) => {
-            dbg_print(format_args!(
-                "Could not open output file {} for writing.\n",
-                nam_out.to_string_lossy()
-            ));
-            exit(-EXI_OUT);
-        }
-    }
+    attempt.map_err(|source| JDiffError::OpenOutput {
+        name: nam_out.to_os_string(),
+        append,
+        source,
+    })
 }
 
 /// The diff/patch writer-buffering decision: with `-c` and a stdout patch

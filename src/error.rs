@@ -3,9 +3,11 @@
 //! [`JDiffError::exit_code`] to the process exit code (negating, like
 //! `exit(-EXI_*)`) and prints the pinned texts.
 
-/// Engine error (`EXI_*`, `JDefs.h:146-158`).
+use std::ffi::OsString;
+
+/// Engine and CLI error (`EXI_*`, `JDefs.h:146-158`).
 #[derive(Debug, thiserror::Error)]
-#[non_exhaustive] // API-07: CLI variants arrive in Phase 4; downstream must not match exhaustively
+#[non_exhaustive] // API-07: open vocabulary — downstream must not match exhaustively
 pub enum JDiffError {
     /// `EXI_SEK` — seek error (`JFileAhead.h:115`).
     #[error("Seek error !")]
@@ -30,6 +32,41 @@ pub enum JDiffError {
     /// is pinned to this variant; the boundary prints the message.
     #[error("Unknown exit code {0}")]
     Raw(i32),
+    /// `EXI_ARG` — not enough arguments, or both inputs from stdin. The two
+    /// binary call sites print their own distinct, gated texts (the
+    /// "Error: Not enough arguments…" line only when `liHlp == 0`), so the
+    /// boundary itself prints nothing for this variant; its `Display` text
+    /// is the legacy `exit_switch` `EXI_ARG` arm.
+    #[error("Error in arguments !")]
+    Args,
+    /// `EXI_FRT` — could not open the first (source) file. The name prints
+    /// lossily, like the old `to_string_lossy` sites.
+    #[error("Could not open first file {} for reading.", name.to_string_lossy())]
+    OpenFirst {
+        name: OsString,
+        #[source]
+        source: std::io::Error,
+    },
+    /// `EXI_SCD` — could not open the second (destination/patch) file.
+    #[error("Could not open second file {} for reading.", name.to_string_lossy())]
+    OpenSecond {
+        name: OsString,
+        #[source]
+        source: std::io::Error,
+    },
+    /// `EXI_OUT` — could not open the output file (create or, for `-t`'s
+    /// patch phase, append); `append` records which open failed.
+    #[error("Could not open output file {} for writing.", name.to_string_lossy())]
+    OpenOutput {
+        name: OsString,
+        append: bool,
+        #[source]
+        source: std::io::Error,
+    },
+    /// `EXI_ERR` — the un-ported dedup route (§21.4): the files open, then
+    /// the C++ crash path becomes this error ("Error occurred !").
+    #[error("Error occurred !")]
+    NotPorted,
 }
 
 impl JDiffError {
@@ -43,6 +80,11 @@ impl JDiffError {
             JDiffError::Memory => crate::defs::EXI_MEM,
             JDiffError::Large => crate::defs::EXI_LRG,
             JDiffError::Raw(code) => *code,
+            JDiffError::Args => crate::defs::EXI_ARG,
+            JDiffError::OpenFirst { .. } => crate::defs::EXI_FRT,
+            JDiffError::OpenSecond { .. } => crate::defs::EXI_SCD,
+            JDiffError::OpenOutput { .. } => crate::defs::EXI_OUT,
+            JDiffError::NotPorted => crate::defs::EXI_ERR,
         }
     }
 }
@@ -104,6 +146,97 @@ mod tests {
         assert_eq!(
             JDiffError::Raw(crate::defs::EXI_ERR).exit_code(),
             crate::defs::EXI_ERR
+        );
+    }
+
+    /// The CLI variants map to their `EXI_*` codes (`EXI_ARG`/`EXI_FRT`/
+    /// `EXI_SCD`/`EXI_OUT`/`EXI_ERR`); the process exit code is the negation.
+    #[test]
+    fn cli_exit_codes_match_exi() {
+        fn src() -> std::io::Error {
+            std::io::Error::other("x")
+        }
+        assert_eq!(JDiffError::Args.exit_code(), crate::defs::EXI_ARG);
+        assert_eq!(
+            JDiffError::OpenFirst {
+                name: OsString::new(),
+                source: src(),
+            }
+            .exit_code(),
+            crate::defs::EXI_FRT
+        );
+        assert_eq!(
+            JDiffError::OpenSecond {
+                name: OsString::new(),
+                source: src(),
+            }
+            .exit_code(),
+            crate::defs::EXI_SCD
+        );
+        assert_eq!(
+            JDiffError::OpenOutput {
+                name: OsString::new(),
+                append: true,
+                source: src(),
+            }
+            .exit_code(),
+            crate::defs::EXI_OUT
+        );
+        assert_eq!(JDiffError::NotPorted.exit_code(), crate::defs::EXI_ERR);
+    }
+
+    /// The CLI `#[error]` texts are byte-pinned from the `main.cpp` print
+    /// sites (verbatim including the " !" spacing); file names render
+    /// lossily, like the old `to_string_lossy` print sites. The boundary
+    /// adds the surrounding newlines (`cli::error`).
+    #[test]
+    fn cli_display_texts_are_byte_pinned() {
+        fn src() -> std::io::Error {
+            std::io::Error::other("x")
+        }
+        assert_eq!(JDiffError::Args.to_string(), "Error in arguments !");
+        assert_eq!(
+            JDiffError::OpenFirst {
+                name: OsString::from("no/such"),
+                source: src(),
+            }
+            .to_string(),
+            "Could not open first file no/such for reading."
+        );
+        assert_eq!(
+            JDiffError::OpenSecond {
+                name: OsString::from("no/such"),
+                source: src(),
+            }
+            .to_string(),
+            "Could not open second file no/such for reading."
+        );
+        assert_eq!(
+            JDiffError::OpenOutput {
+                name: OsString::from("no/such"),
+                append: true,
+                source: src(),
+            }
+            .to_string(),
+            "Could not open output file no/such for writing."
+        );
+        assert_eq!(JDiffError::NotPorted.to_string(), "Error occurred !");
+    }
+
+    /// Non-UTF-8 names print lossily (U+FFFD), exactly like the superseded
+    /// `to_string_lossy` sites in the binary.
+    #[cfg(unix)]
+    #[test]
+    fn open_failure_names_print_lossily() {
+        use std::os::unix::ffi::OsStrExt;
+        let name = OsString::from(std::ffi::OsStr::from_bytes(b"bad\xffname"));
+        assert_eq!(
+            JDiffError::OpenFirst {
+                name,
+                source: std::io::Error::other("x"),
+            }
+            .to_string(),
+            "Could not open first file bad\u{FFFD}name for reading."
         );
     }
 }
