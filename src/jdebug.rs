@@ -49,7 +49,7 @@ pub const DBGRED: usize = 8; // Debug ufFabGet                 -dred
 pub const DBGMCH: usize = 9; // Debug ufMch...                 -dmch
 pub const DBGDST: usize = 10; // Debug Hashtable distribution   -ddst
 
-/// Port of the C++ `JDebug` class; the `gbDbg` flags live in [`GB_DBG`].
+/// Port of the C++ `JDebug` class; the `gbDbg` flags live in `GB_DBG`.
 pub struct JDebug;
 
 /// Returns the debug/verbose stream (`JDebug::stddbg`): stderr, or stdout

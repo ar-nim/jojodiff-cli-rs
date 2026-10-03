@@ -7,15 +7,15 @@
 //! (spec §18.D).
 //!
 //! `jdiff` CLI — 1:1 port of the 0.8.5 `main.cpp` (spec §18.A/§18.D/§18.F):
-//! the `getopt_long` option surface (`src/cli/opts.rs`), argv[0] dispatch,
+//! the `getopt_long` option surface (`src/cli/opts.rs`), `argv[0]` dispatch,
 //! greeting/help, file handling (stdin via `-`, sequential auto-detection),
 //! engine wiring, pre-run echo + post-run statistics and the swapped exit
 //! codes (differences → 1, identical → 0).
 //!
-//! One binary (spec §21.2): the basename of argv[0] starting `jpatch` routes
+//! One binary (spec §21.2): the basename of `argv[0]` starting `jpatch` routes
 //! to Patch (upstream `main.cpp:303-315`, case-insensitive) and — as a port
 //! extension — so does a basename starting `jptch`, making a symlink/copy
-//! named `jptch` behave exactly like `jdiff -u`. The `jdedup`/`jtst` argv[0]
+//! named `jptch` behave exactly like `jdiff -u`. The `jdedup`/`jtst` `argv[0]`
 //! routes are NOT ported (spec §21.3/§21.4): such names fall through to the
 //! default Diff function. Function options: `-j` Diff, `-u` Patch, `-t` Test
 //! (ported faithfully although broken upstream, §21.3), `-y` Dedup (accepted,

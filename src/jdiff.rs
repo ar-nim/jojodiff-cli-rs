@@ -2,8 +2,8 @@
 //! `src/JDiff.cpp` + `src/JDiff.h` (spec §18.E).
 //!
 //! [`JDiff::jdiff`] compares both files byte by byte and, on a mismatch,
-//! calls [`JDiff::search`] to find the nearest equal region ahead:
-//! [`JDiff::build_full_index`] (or the incremental scan with `src_scn == 0`,
+//! calls `JDiff::search` to find the nearest equal region ahead:
+//! `JDiff::build_full_index` (or the incremental scan with `src_scn == 0`,
 //! `-ff`/`-p`) fills a [`JHashPos`] hashtable with 32-byte samples of the
 //! original file, `search` probes it with samples of the new file and hands
 //! the hits to a [`JMatchTable`], whose best verified match is turned into
@@ -39,7 +39,7 @@
 //!   backtracking is disabled (`:491,704-712`) and `mzAhdOrg` is **not**
 //!   reset on backtrack anymore.
 //! * `buildFullIndex` (`:726-793`) replaces the 0.8.1 prescan: no OpenMP,
-//!   32 MiB progress marks ([`PGSMRK`]/[`PGSMSK`]) and a verbose>2
+//!   32 MiB progress marks (`PGSMRK`/`PGSMSK`) and a verbose>2
 //!   hashtable distribution.
 //! * Constructor (`:103-125`): `hsh_sze` in MB,
 //!   `mch_min = mch_min > mch_max ? mch_max - 1 : mch_min`,
@@ -162,7 +162,7 @@ impl<'a> JDiff<'a> {
     /// `ahd_max` is raised to at least 1024 (`miAhdMax(aiAhdMax<1024?1024:
     /// aiAhdMax)`, `:120`) after the CLI-facing `i64` narrows like the C++
     /// int constructor parameter would. `src_scn` becomes the C++ `miSrcScn`
-    /// int (false = 0, true = 1) and is set to 2 by [`JDiff::search`] after
+    /// int (false = 0, true = 1) and is set to 2 by `JDiff::search` after
     /// the full index build. The matching table receives the **unclamped**
     /// `ahd_max`, like the C++ passes the raw `aiAhdMax` to JMatchTable
     /// (`:124`).

@@ -1,7 +1,7 @@
 //! `jojodiff-cli-rs` — an independent Rust port of JojoDiff 0.8.5.
 //!
 //! Provides the `jdiff` tool as a reusable library and a single CLI: patching
-//! is `jdiff -u` or an argv[0] dispatch (copies/links named `jpatch*`/`jptch*`
+//! is `jdiff -u` or an `argv[0]` dispatch (copies/links named `jpatch*`/`jptch*`
 //! patch; spec §21.2). Patches, listings, verbose output and exit codes are
 //! held byte-identical to the original C++ implementation, which serves as
 //! the verification oracle.

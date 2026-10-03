@@ -35,7 +35,8 @@ pub enum ByteOrEof {
 }
 
 /// Structural equality: `Err` payloads compare by their engine code
-/// (`std::io::Error` is not `PartialEq`, so [`JDiffError`] cannot derive it;
+/// (`std::io::Error` is not `PartialEq`, so
+/// [`crate::error::JDiffError`] cannot derive it;
 /// the `EXI_*` codes are pairwise distinct, so the discriminant determines
 /// equality exactly).
 impl PartialEq for ByteOrEof {

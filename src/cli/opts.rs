@@ -29,7 +29,7 @@
 //! permutation state — `optind` (index of the first operand in the permuted
 //! argv) = `1 + (number of argv slots held by options and their detached
 //! arguments)`, and `liOptArgCnt = optind - 1`, so `nargs = argc -
-//! liOptArgCnt` counts the operands plus argv[0]. [`Getopt::optind`] reports
+//! liOptArgCnt` counts the operands plus `argv[0]`. [`Getopt::optind`] reports
 //! exactly that; the operands themselves come from [`Getopt::operands`].
 
 use std::ffi::OsString;
@@ -195,7 +195,7 @@ pub enum Opt {
     End,
 }
 
-/// glibc-style scanner over the full argv (argv[0] included, like `main`).
+/// glibc-style scanner over the full argv (`argv[0]` included, like `main`).
 pub struct Getopt {
     args: Vec<OsString>,
     /// `argv[0]` as passed, used verbatim in the error messages.

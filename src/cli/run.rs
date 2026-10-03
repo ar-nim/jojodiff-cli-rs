@@ -18,15 +18,27 @@ use crate::jdebug::{DBG_TO_STDOUT, dbg_print};
 use crate::jfile::{JFile, JFileAhead};
 
 /// Full CLI execution (`main.cpp`): returns the process exit code —
-/// never exits itself. `main.cpp`'s structure: argv[0] dispatch, parse,
+/// never exits itself. `main.cpp`'s structure: `argv[0]` dispatch, parse,
 /// greeting/usage gate, operand extraction, buffer sizing, input/output
 /// open, function dispatch, boundary report.
 ///
-/// Pinned errors are printed and coded here, at the single
-/// [`crate::cli::error::report`] boundary, and every pinned path returns
-/// `Ok(process exit code)`; the `Err` half is reserved for truly unexpected
-/// failures (none today) so the thin binary can wrap `run` in `anyhow`
-/// without touching the pinned stderr bytes or exit codes.
+/// # Contract
+///
+/// `args` must include `argv[0]` (the process name), exactly as `main`
+/// receives `argv`: its basename selects the default function (`jpatch*`/
+/// `jptch*` patch, everything else diffs) and the option scanner consumes
+/// the slot. An empty slice underflows the `optind` arithmetic
+/// ([`crate::cli::Getopt::optind`] reports 0, `config::parse` subtracts 1):
+/// debug builds panic on the subtraction, release builds wrap and land in
+/// the usage path (exit 2).
+///
+/// # Errors
+///
+/// All pinned paths print and code themselves at the single
+/// [`crate::cli::error::report`] boundary and return `Ok(process exit
+/// code)`; the `Err` half is reserved for truly unexpected failures (none
+/// today) so the thin binary can wrap `run` in `anyhow` without touching
+/// the pinned stderr bytes or exit codes.
 pub fn run(args: &[OsString]) -> Result<i32, JDiffError> {
     let ai_arg_cnt = args.len(); /* aiArgCnt */
 

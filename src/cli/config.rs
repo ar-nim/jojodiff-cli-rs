@@ -1,5 +1,5 @@
 //! Option parsing and buffer sizing out of the `jdiff` binary
-//! (`main.cpp:276-476` and `main.cpp:617-645`): the argv[0] function
+//! (`main.cpp:276-476` and `main.cpp:617-645`): the `argv[0]` function
 //! dispatch, the `getopt_long` option loop (GNU permutation; `?` sets
 //! liHlp=1 and parsing continues) and the effective buffer geometry with
 //! its byte-pinned misalignment warnings. The recorded-but-unread knobs
@@ -26,7 +26,7 @@ pub enum Function {
     Test,
 }
 
-/// Read the function from argv[0] (`main.cpp:303-315`): the basename
+/// Read the function from `argv[0]` (`main.cpp:303-315`): the basename
 /// after the last '/' or '\\', case-insensitively. `jpatch*` → Patch;
 /// `jptch*` → Patch is the port extension (spec §21.2). `jdedup`/`jtst`
 /// routes are not ported and fall through to Diff.

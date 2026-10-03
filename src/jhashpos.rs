@@ -41,7 +41,7 @@
 //! The `#if debug` sites are ported with their exact C++ format strings:
 //! the constructor's "Hash Ini" line (`JHashPos.cpp:70-76`), the per-store
 //! "Hash Add" lines (`JHashPos.cpp:127-132`) and the audit helpers
-//! [`JHashPos::print`] / [`JHashPos::dist`] (`JHashPos.cpp:176-238`;
+//! `JHashPos::print` / [`JHashPos::dist`] (`JHashPos.cpp:176-238`;
 //! `print` has no call site in the C++ — dead-code parity). The "Hash Ini"
 //! addresses are printed from the two vectors' allocations like the C++
 //! `mzHshTblPos`/`mkHshTblHsh` bounds; as everywhere `%p` values are

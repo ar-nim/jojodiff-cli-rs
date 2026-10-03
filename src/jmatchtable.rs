@@ -6,8 +6,8 @@
 //! (`miMchSze = max(13, aiMchSze)`; the bucket prime derives from the
 //! UNCLAMPED value, `getLowerPrime(aiMchSze * 2)`), elements are never freed
 //! but live on the `mpNew`/`mpOld` aging lists and are reused when
-//! [`JMatchTable::is_old2_reuse`] says so ("full" = no reusable element), and
-//! the best match is tracked **incrementally** by [`JMatchTable::is_best`]
+//! `JMatchTable::is_old2_reuse` says so ("full" = no reusable element), and
+//! the best match is tracked **incrementally** by `JMatchTable::is_best`
 //! during `add`/`cleanup` instead of being rescanned on demand.
 //!
 //! Two bucket tables detect candidate joins: `mpCol` on `|delta| % pme`
@@ -381,7 +381,7 @@ impl JMatchTable {
     /// - Add to a colliding (equal delta) or gliding (equal org) match if
     ///   possible, or
     /// - Add at the end of the list from the free counter, or
-    /// - Reuse (override) an old match if [`JMatchTable::is_old2_reuse`]
+    /// - Reuse (override) an old match if `JMatchTable::is_old2_reuse`
     ///   allows it.
     ///
     /// `red_new` is the current read position. The file readers back
@@ -646,7 +646,7 @@ impl JMatchTable {
     ///
     /// Returns the tracked best `(org, new)` positions, or `None` when no
     /// solution has been found — the best was elected incrementally by
-    /// [`JMatchTable::is_best`] during `add`/`cleanup`; no rescanning happens
+    /// `JMatchTable::is_best` during `add`/`cleanup`; no rescanning happens
     /// here. With `cmp_all` off, enlarged EOB elements are re-evaluated first
     /// (`:124-145`).
     pub fn getbest(&mut self, red_org: i64, red_new: i64) -> Option<(i64, i64)> {
