@@ -454,27 +454,6 @@ fn unopenable_out_exit_5() {
             bad_out.display()
         )
     );
-    fs::remove_dir_all(&dir).unwrap();
-}
-
-/// Output-open failure on a path under a non-existent directory: the pinned
-/// message fragments and exit 5 (`-EXI_OUT`, `main.cpp:770-773`), pinned at
-/// substring level so the message survives helper extraction.
-#[test]
-fn output_open_failure_message_and_exit_code() {
-    let dir = temp_dir("outfail");
-    let a = write_file(&dir.join("a.bin"), ORG_A);
-    let b = write_file(&dir.join("b.bin"), NEW_B);
-    // A path under a directory that does not exist: File::create must fail.
-    let bad_out = dir.join("no").join("out.jdf");
-
-    let out = run(&[a.as_os_str(), b.as_os_str(), bad_out.as_os_str()]);
-    let stderr = stderr_str(&out);
-    assert!(
-        stderr.contains("Could not open output file ") && stderr.contains(" for writing."),
-        "unexpected stderr: {stderr:?}"
-    );
-    assert_eq!(out.status.code(), Some(5));
     assert!(!bad_out.exists(), "output must not be created");
     fs::remove_dir_all(&dir).unwrap();
 }
