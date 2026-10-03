@@ -74,8 +74,12 @@ impl<'a, W: Write> JPatcht<'a, W> {
     /// Read)`): the file's cursor advances by one on every successful read
     /// and is reset to -1 on EOF/error (`JFile.h:73-81`,
     /// `JFileAhead.cpp:142-147`).
+    ///
+    /// One patch byte or `EOF` (`JPatcht.cpp`). The decoder's length
+    /// arithmetic computes with `EOF` like the C, so this is deliberately
+    /// the i32 representation boundary of the typed reader.
     fn pch_get(&mut self) -> i32 {
-        let li_inp = self.fil_pch.get(self.pos_pch, ReadType::Read);
+        let li_inp = self.fil_pch.getv(self.pos_pch, ReadType::Read).to_i32();
         if li_inp < 0 {
             self.pos_pch = -1;
         } else {
