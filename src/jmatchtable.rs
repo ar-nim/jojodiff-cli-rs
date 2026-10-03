@@ -685,23 +685,7 @@ impl JMatchTable {
         // sanity checks (:387-397)
         #[cfg(feature = "debug")]
         if dbg(DBGMCH) {
-            let (mut li_new, mut li_old) = (0, 0);
-            let mut p = self.mp_new;
-            while let Some(ci) = p {
-                li_new += 1;
-                p = self.nodes[ci].nxt;
-            }
-            p = self.mp_old;
-            while let Some(ci) = p {
-                li_old += 1;
-                p = self.nodes[ci].nxt;
-            }
-            if self.mch_fre + li_old + li_new != self.mch_sze {
-                dbg_print(format_args!(
-                    "Mch Cln Wrong table size {}+{}+{} != {} !\n",
-                    li_new, li_old, self.mch_fre, self.mch_sze
-                ));
-            }
+            self.dbg_check_table_size(false);
         }
 
         // evaluate existing entries (:399-407)
@@ -724,29 +708,7 @@ impl JMatchTable {
         // redo sanity checks (:413-423)
         #[cfg(feature = "debug")]
         if dbg(DBGMCH) {
-            let (mut li_new, mut li_old) = (0, 0);
-            // The C++ walks the new list with the extra bound
-            // lpCur != mpLst->ipNxt (short-circuited away when mpNew is null).
-            let lst_nxt = self.mp_lst.and_then(|l| self.nodes[l].nxt);
-            let mut p = self.mp_new;
-            while let Some(ci) = p {
-                if Some(ci) == lst_nxt {
-                    break;
-                }
-                li_new += 1;
-                p = self.nodes[ci].nxt;
-            }
-            p = self.mp_old;
-            while let Some(ci) = p {
-                li_old += 1;
-                p = self.nodes[ci].nxt;
-            }
-            if self.mch_fre + li_new + li_old != self.mch_sze {
-                dbg_print(format_args!(
-                    "Mch Cln Wrong table size {}+{}+{} != {} !\n",
-                    li_new, li_old, self.mch_fre, self.mch_sze
-                ));
-            }
+            self.dbg_check_table_size(true);
         }
 
         // issue return value (:425-437)
@@ -764,6 +726,35 @@ impl JMatchTable {
             MchRet::Valid //
         }
     } /* cleanup() */
+
+    /// Debug sanity walk (JMatchTable.cpp:387-397): counts the new and old
+    /// lists and reports when free + old + new != table size.
+    #[cfg(feature = "debug")]
+    fn dbg_check_table_size(&self, bounded: bool) {
+        let (mut li_new, mut li_old) = (0, 0);
+        // The redo pass (bounded) walks the new list with the extra bound
+        // lpCur != mpLst->ipNxt (short-circuited away when mpNew is null).
+        let lst_nxt = self.mp_lst.and_then(|l| self.nodes[l].nxt);
+        let mut p = self.mp_new;
+        while let Some(ci) = p {
+            if bounded && Some(ci) == lst_nxt {
+                break;
+            }
+            li_new += 1;
+            p = self.nodes[ci].nxt;
+        }
+        p = self.mp_old;
+        while let Some(ci) = p {
+            li_old += 1;
+            p = self.nodes[ci].nxt;
+        }
+        if self.mch_fre + li_new + li_old != self.mch_sze {
+            dbg_print(format_args!(
+                "Mch Cln Wrong table size {}+{}+{} != {} !\n",
+                li_new, li_old, self.mch_fre, self.mch_sze
+            ));
+        }
+    }
 
     /// Evaluate a match (`JMatchTable::isGoodOrBest`,
     /// `JMatchTable.cpp:443-538`).
