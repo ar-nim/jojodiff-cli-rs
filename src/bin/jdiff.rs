@@ -57,31 +57,17 @@ use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::process::exit;
 
-use jojodiff_cli_rs::cli::opts::{Getopt, Opt, VAL_COMPAT_081};
+use jojodiff_cli_rs::cli::config::{self, Function};
 use jojodiff_cli_rs::defs::{
     EXI_ARG, EXI_DIF, EXI_EQL, EXI_ERR, EXI_FRT, EXI_LRG, EXI_MEM, EXI_OK, EXI_OUT, EXI_RED,
-    EXI_SCD, EXI_SEK, EXI_WRI, JDIFF_COPYRIGHT, JDIFF_VERSION, MAX_OFF_T, SMPSZE, c_atoi,
+    EXI_SCD, EXI_SEK, EXI_WRI, JDIFF_COPYRIGHT, JDIFF_VERSION, MAX_OFF_T, SMPSZE,
 };
 use jojodiff_cli_rs::jdebug::{DBG_TO_STDOUT, dbg_print};
-#[cfg(feature = "debug")]
-use jojodiff_cli_rs::jdebug::{
-    DBGAHD, DBGAHH, DBGBKT, DBGBUF, DBGCMP, DBGDST, DBGHSH, DBGHSK, DBGMCH, DBGPRG, DBGRED, dbg_set,
-};
 use jojodiff_cli_rs::jdiff::JDiff;
 use jojodiff_cli_rs::jfile::{JFile, JFileAhead};
 use jojodiff_cli_rs::jfileout::JFileOut;
 use jojodiff_cli_rs::jout::{JOut, JOutAsc, JOutBin, JOutRgn};
 use jojodiff_cli_rs::jpatcht::JPatcht;
-
-/// Function to execute (`enum {Diff, Patch, Dedup, Test} liFun`,
-/// `main.cpp:293`). Dedup/Test are ported per rulings §21.4/§21.3.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Function {
-    Diff,
-    Patch,
-    Dedup,
-    Test,
-}
 
 fn main() {
     exit(real_main());
@@ -91,250 +77,27 @@ fn real_main() -> i32 {
     let args: Vec<OsString> = std::env::args_os().collect();
     let ai_arg_cnt = args.len(); /* aiArgCnt */
 
-    /* Read the function from argv[0] (`main.cpp:303-315`): the basename
-     * after the last '/' or '\', case-insensitively. `jpatch*` → Patch;
-     * `jptch*` → Patch is the port extension (spec §21.2). The `jdedup` and
-     * `jtst` routes are not ported (§21.3/§21.4) and fall through to Diff. */
-    let mut li_fun = Function::Diff;
-    {
-        let cmd = args
-            .first()
-            .map(|a| a.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let base = cmd.rsplit(['/', '\\']).next().unwrap_or("").to_lowercase();
-        if base.starts_with("jpatch") || base.starts_with("jptch") {
-            li_fun = Function::Patch;
-        }
-    }
-
-    /* Default settings (`main.cpp:276-293`). */
-    let mut out_typ: i32 = 0; /* 0 = JOutBin, 1 = JOutAsc, 2 = JOutRgn */
-    let mut verbose: i32 = 0; /* 0=no, 1=normal, 2=high */
-    let mut src_bkt: bool = true; /* Backtrace on sourcefile allowed? */
-    let mut cmp_all: bool = true; /* Compare even if data not in buffer? */
-    let mut src_scn: i32 = 1; /* Prescan source file: 0=no, 1=do, 2=done */
-    let mut mch_max: i32 = 128; /* Maximum entries in matching table. */
-    let mut mch_min: i32 = 2; /* Minimum entries in matching table. */
-    let mut hsh_mbt: i32 = 32; /* Hashtable size in MB (* 1024 * 1024) */
-    let mut buf_org: i64 = 0; /* Default source-file buffer in MB */
-    let mut buf_new: i64 = 0; /* Default destin-file buffer in MB */
-    let mut blk_sze: i32 = 32 * 1024; /* Default block size (in bytes) */
-    let mut ahd_max: i32 = 0; /* Lookahead range (0=same as llBufSze) */
-    let mut li_hlp: i32 = 0; /* -h/--help flag: 0=no, 1=-h, 2=-hh, 3=error */
-    let mut lb_stdio: bool = false; /* use stdio */
-    let mut li_tst: i32 = 0; /* test to execute : 0 = normal, 1 etc... see JTest */
-    let mut seq_org: bool = false; /* Sequential source file? */
-    let mut seq_new: bool = false; /* Sequential destination file? */
-    let mut compat_081 = false; /* --compat-081: 0.8.1-format patch output (§21.16) */
-
-    /* Parse option-switches (`main.cpp:318-476`): getopt_long with GNU
-     * permutation; `?` (unknown option or argument error) sets liHlp=1 and
-     * parsing CONTINUES. */
-    let mut opt = Getopt::new(args);
-    loop {
-        let code = match opt.next_opt() {
-            Opt::End => break,
-            Opt::Unknown => {
-                li_hlp = 1;
-                continue;
-            }
-            Opt::Code(c) => c,
-        };
-        let optarg = opt.optarg.take();
-        match code {
-            'b' => {
-                // try-harder: increase hashtable size and more searching
-                cmp_all = true; // verify all hashtable matches
-                src_bkt = true; // allow going back on source file
-                src_scn = 1; // create full index on source file
-                mch_min = mch_min.wrapping_mul(2); // increase minimum number of matches to search
-                mch_max = mch_max.wrapping_mul(4); // increase maximum number of matches to search
-                hsh_mbt = hsh_mbt.wrapping_mul(4); // Increase index table size
-
-                // larger buffers (more soft-ahead searching)
-                buf_org = (if buf_org <= 0 { 1 } else { buf_org }) * 4;
-            }
-            'f' => {
-                // faster (or rather: lazier)
-                if cmp_all {
-                    cmp_all = false; // No compares out-of-buffer
-                    src_bkt = true;
-                    src_scn = 1;
-                    mch_min = mch_min.wrapping_mul(2);
-                    mch_max /= 2;
-
-                    // increase buffer size to have more lookahead indexing
-                    buf_org = (if buf_org <= 0 { 1 } else { buf_org }) * 16;
-                } else {
-                    // even faster (lazier)
-                    src_scn = 0; // No indexing scan
-                    mch_min /= 2; // Reduce lookahead
-                    mch_max /= 2;
-                }
-                hsh_mbt /= 2; // Reduce index table by 2
-            }
-            'p' => {
-                // sequential source file
-                seq_org = true;
-                cmp_all = false; // only compare data within the buffer
-                src_bkt = false; // only backtrack on source file in buffer
-                src_scn = 0; // no pre-scan indexing
-            }
-            'q' => {
-                // sequential destination file
-                seq_new = true;
-                mch_min = 0; // only search within the buffer
-            }
-
-            'c' => {
-                // verbose-stdout
-                DBG_TO_STDOUT.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-            'h' => {
-                // help
-                li_hlp += 1;
-            }
-            'j' => {
-                // jdiff
-                li_fun = Function::Diff;
-            }
-            'l' => {
-                // "list-details"
-                out_typ = 1;
-            }
-            'r' => {
-                // "list-groups"
-                out_typ = 2;
-            }
-            's' => {
-                // use stdio: accepted and recorded; nothing observable in the
-                // port (one buffered engine over both backends, §21.11)
-                lb_stdio = true;
-            }
-            't' => {
-                // test: patch and unpatch in one go (broken upstream, §21.3)
-                li_fun = Function::Test;
-                li_tst = optarg.as_ref().map_or(0, |a| c_atoi(a)); // test number
-            }
-            'u' => {
-                // unpatch
-                li_fun = Function::Patch;
-            }
-            'v' => {
-                // "verbose"
-                verbose += 1;
-            }
-            'y' => {
-                // deduplicate (compiled out upstream; §21.4)
-                li_fun = Function::Dedup;
-                out_typ = 3;
-                lb_stdio = true;
-                li_tst = optarg.as_ref().map_or(0, |a| c_atoi(a)); // never used
-            }
-
-            VAL_COMPAT_081 => {
-                // --compat-081 (port-only, §21.16): 0.8.1-format patch
-                // output on the diff side; accepted and ignored when
-                // patching (and for the `-l`/`-r` listings, which are
-                // diagnostic formats no patcher applies).
-                compat_081 = true;
-            }
-
-            'a' => {
-                // search-ahead-size
-                ahd_max = match optarg {
-                    Some(arg) => c_atoi(&arg).wrapping_mul(1024),
-                    None => 0,
-                };
-            }
-
-            'i' => {
-                // index-size
-                hsh_mbt = optarg.as_ref().map_or(0, |a| c_atoi(a));
-                if hsh_mbt <= 0 {
-                    hsh_mbt = 1;
-                    dbg_print(format_args!(
-                        "Warning: invalid --index-size/-i specified, set to 1.\n"
-                    ));
-                }
-            }
-            'k' => {
-                // "block-size"
-                blk_sze = optarg.as_ref().map_or(0, |a| c_atoi(a));
-                if blk_sze <= 0 {
-                    blk_sze = 1;
-                    dbg_print(format_args!(
-                        "Warning: invalid --block-size/-k specified, set to 1.\n"
-                    ));
-                }
-            }
-            'm' => {
-                // "buffer-size": MB total, split evenly (`main.cpp:422-434`).
-                let val = i64::from(optarg.as_ref().map_or(0, |a| c_atoi(a)));
-                if buf_new == 0 {
-                    // first -m
-                    buf_new = val / 2;
-                    buf_org = buf_new; // first -m specifies source and destination buffer
-                } else if buf_org == buf_new {
-                    // second -m
-                    buf_org *= 2;
-                    buf_new = val;
-                } else {
-                    // third and subsequent -m: do nothing
-                }
-            }
-            'n' => {
-                // "search-min"
-                mch_min = optarg.as_ref().map_or(0, |a| c_atoi(a));
-                if mch_min < 0 {
-                    mch_min = 0;
-                }
-            }
-            'x' => {
-                // "search-max": floored 1024; the unclamped value reaches
-                // JMatchTable's bucket prime via JDiff's ctor (§21.15)
-                mch_max = optarg.as_ref().map_or(0, |a| c_atoi(a));
-                if mch_max <= 0 {
-                    mch_max = 1024;
-                }
-            }
-
-            'd' => {
-                // debug flag by name (`main.cpp:446-472`); unknown names are
-                // silently ignored, like the release C++ build whose strcmp
-                // arms are compiled out.
-                #[cfg(feature = "debug")]
-                if let Some(name) = optarg.as_ref().map(|a| a.to_string_lossy().into_owned()) {
-                    let flag = match name.as_str() {
-                        "hsh" => Some(DBGHSH),
-                        "ahd" => Some(DBGAHD),
-                        "cmp" => Some(DBGCMP),
-                        "prg" => Some(DBGPRG),
-                        "buf" => Some(DBGBUF),
-                        "hsk" => Some(DBGHSK),
-                        "ahh" => Some(DBGAHH),
-                        "bkt" => Some(DBGBKT),
-                        "red" => Some(DBGRED),
-                        "mch" => Some(DBGMCH),
-                        "dst" => Some(DBGDST),
-                        _ => None,
-                    };
-                    if let Some(idx) = flag {
-                        dbg_set(idx, true);
-                    }
-                }
-            }
-            _ => unreachable!("Getopt only returns codes from the option table"),
-        }
-    }
-    let li_opt_arg_cnt = opt.optind() - 1;
-    // The recorded-but-unread knobs (§21.11/§21.3): `-s` picks the file
-    // backend in C++ (one engine here); `liTst` is parsed and never used.
-    let _ = lb_stdio;
-    let _ = li_tst;
+    /* Parse option-switches (`main.cpp:276-476`): argv[0] dispatch, default
+     * settings and the getopt_long loop with GNU permutation moved to
+     * `cli::config::parse` (unit-tested there); `?` (unknown option or
+     * argument error) sets liHlp=1 and parsing CONTINUES. */
+    let opts = config::parse(&args);
+    let li_fun = opts.fun;
+    let out_typ = opts.out_typ; /* 0 = JOutBin, 1 = JOutAsc, 2 = JOutRgn */
+    let verbose = opts.verbose;
+    let mut src_bkt = opts.src_bkt; /* Backtrace on sourcefile allowed? */
+    let mut cmp_all = opts.cmp_all; /* Compare even if data not in buffer? */
+    let mut src_scn = opts.src_scn; /* Prescan source file: 0=no, 1=do, 2=done */
+    let mch_max = opts.mch_max; /* Maximum entries in matching table. */
+    let mut mch_min = opts.mch_min; /* Minimum entries in matching table. */
+    let hsh_mbt = opts.hsh_mbt; /* Hashtable size in MB (* 1024 * 1024) */
+    let compat_081 = opts.compat_081; /* --compat-081 (§21.16) */
+    let mut seq_org = opts.seq_org; /* Sequential source file? */
+    let mut seq_new = opts.seq_new; /* Sequential destination file? */
+    let li_hlp = opts.li_hlp; /* -h/--help flag: 0=no, 1=-h, 2=-hh, 3=error */
 
     /* Output greetings (`main.cpp:480-509`). */
-    let nargs = ai_arg_cnt - li_opt_arg_cnt;
+    let nargs = ai_arg_cnt - opts.opt_arg_cnt;
     if verbose > 0 || li_hlp > 0 || nargs < 3 {
         print_greeting();
     }
@@ -361,7 +124,7 @@ fn real_main() -> i32 {
 
     /* Read filenames (`main.cpp:604-610`); the operand indexes are in range
      * because the exit above guarantees nargs >= 3. */
-    let operands = opt.operands();
+    let operands = &opts.operands;
     let nam_org = operands[0].clone();
     let nam_new = operands[1].clone();
     let nam_out: OsString = if operands.len() >= 3 {
@@ -378,58 +141,15 @@ fn real_main() -> i32 {
         exit(-EXI_ARG);
     }
 
-    // Set default values for llBlk and liBlk (`main.cpp:617-621`).
-    let mut ll_buf_org: i64 = if buf_org > 0 {
-        buf_org
-    } else if seq_org {
-        32
-    } else {
-        1
-    };
-    let mut ll_buf_new: i64 = (if buf_new > 0 {
-        buf_new
-    } else if seq_new {
-        16
-    } else {
-        ll_buf_org
-    }) * 1024
-        * 1024;
-    ll_buf_org *= 1024 * 1024;
-    let blk_sze = if blk_sze < 4096 { 4096 } else { blk_sze };
-
-    // Buffer size cannot be zero and must be aligned on block size
-    // Block size  cannot be larger than buffer size (`main.cpp:623-636`)
-    if ll_buf_org % i64::from(blk_sze) != 0 {
-        ll_buf_org -= ll_buf_org % i64::from(blk_sze);
-        if ll_buf_org <= 0 {
-            ll_buf_org = i64::from(blk_sze);
-        }
-        dbg_print(format_args!(
-            "Warning: Source buffer size misaligned with block size: set to {}.\n",
-            ll_buf_org
-        ));
-    }
-    if ll_buf_new % i64::from(blk_sze) != 0 {
-        ll_buf_new -= ll_buf_new % i64::from(blk_sze);
-        if ll_buf_new <= 0 {
-            ll_buf_new = i64::from(blk_sze);
-        }
-        dbg_print(format_args!(
-            "Warning: Destination buffer size misaligned with block size: set to {}.\n",
-            ll_buf_new
-        ));
-    }
-
-    // Default search ahead window (`main.cpp:638-645`): the C++ narrows the
-    // long difference to int (wrapping for absurd -m values, like the C++
-    // int conversion).
-    if ahd_max == 0 {
-        let diff = ll_buf_new - i64::from(blk_sze);
-        ahd_max = diff as i32;
-        if ahd_max < 4096 {
-            ahd_max = 4096;
-        }
-    }
+    // Set default values for llBlk and liBlk (`main.cpp:617-645`): the
+    // computation — including the two misalignment warnings and the ahd_max
+    // default — moved to `cli::config::size_buffers` (unit-tested there).
+    let config::Buffers {
+        ll_buf_org,
+        ll_buf_new,
+        blk_sze,
+        ahd_max,
+    } = config::size_buffers(&opts);
 
     /* Open files and create file handlers (`main.cpp:647-752`). The inputs
      * may be opened a second time for `-t`'s patch phase (deviation 2). */
