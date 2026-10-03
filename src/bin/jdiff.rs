@@ -558,8 +558,13 @@ fn real_main() -> i32 {
 
         /* Execute... (`main.cpp:838-845`): the 0.8.5 exit swap — identical
          * files yield EXI_EQL (process exit 0), differences EXI_DIF (exit
-         * 1), decided by `out.dta > 0`. */
-        li_ret = lo_jdiff.jdiff();
+         * 1), decided by `out.dta > 0`. The Phase-3 shim maps the engine's
+         * `Result` back to the i32 vocabulary `exit_switch` speaks; the
+         * error TEXTS are not printed here — `exit_switch` prints the
+         * pinned family for every mapped code below (and the library-side
+         * `JFileOut` family prints at its own failure point), so a
+         * Display print in the shim would double them. */
+        li_ret = engine_code(lo_jdiff.jdiff());
         let stats = lo_jdiff.out_stats();
         if li_ret == EXI_OK {
             if stats.dta > 0 {
@@ -663,7 +668,7 @@ fn real_main() -> i32 {
             lo_fil_out,
             verbose,
         );
-        li_ret = lo_jpatcht.jpatch();
+        li_ret = engine_code(lo_jpatcht.jpatch());
         // Flush the patch writer at scope end, like the C++ exit-time flush.
         drop(lo_jpatcht.into_inner());
     } /* liFun == Patch or Test */
@@ -672,6 +677,22 @@ fn real_main() -> i32 {
 
     /* Exit (`main.cpp:897-932`). */
     exit_switch(li_ret, verbose)
+}
+
+/// Phase-3 shim: engine `Result` → the i32 vocabulary `exit_switch` still
+/// speaks (removed in Phase 4 when the boundary maps `JDiffError` directly).
+/// Pure code mapping, deliberately NO `Display` print: `exit_switch` prints
+/// the pinned error text for every code this can yield (the `EXI_SEK`/
+/// `EXI_LRG`/`EXI_RED`/`EXI_WRI`/`EXI_MEM`/`EXI_ERR` arms and the
+/// "Unknown exit code" fall-through for `Raw`'s non-`EXI_*` values), and the
+/// `JFileOut` family ("Error reading source file." / "Error writing output
+/// file." / the trailing-byte warning) prints in the library at its own
+/// failure point — printing here too would change the pinned stderr bytes.
+fn engine_code(r: Result<(), jojodiff_cli_rs::error::JDiffError>) -> i32 {
+    match r {
+        Ok(()) => EXI_OK,
+        Err(e) => e.exit_code(),
+    }
 }
 
 /// The exit-code switch (`main.cpp:897-932`): engine errors print their

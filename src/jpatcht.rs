@@ -20,7 +20,8 @@
 
 use std::io::Write;
 
-use crate::defs::{EOF, EXI_ERR, EXI_OK, Op, ReadType, p8, print_char};
+use crate::defs::{EOF, EXI_ERR, Op, ReadType, p8, print_char};
+use crate::error::JDiffError;
 use crate::jdebug::dbg_print;
 use crate::jfile::JFile;
 use crate::jfileout::JFileOut;
@@ -148,7 +149,10 @@ impl<'a, W: Write> JPatcht<'a, W> {
         ai_dta: i32,
         az_off: i64,
     ) -> i32 {
-        self.fil_out.putc(ai_dta);
+        // The C++ `fputc` result is never checked here (unlike copyfrom's
+        // checked writes): the always-1 return below is the port of that
+        // behavior, so a write error on the MOD/INS path is swallowed.
+        let _ = self.fil_out.putc(ai_dta);
         if self.verbse > 1 {
             dbg_print(format_args!(
                 "{} {} {} {:02x} {}\n",
@@ -277,17 +281,19 @@ impl<'a, W: Write> JPatcht<'a, W> {
 
     /// Patch function (`JPatcht::jpatch`, `JPatcht.cpp:209-338`).
     ///
-    /// Returns [`EXI_OK`] on success and the raw negative `EXI_*`/length
-    /// sentinels on errors (`EXI_ERR` on the trailing-ESC warning, the
-    /// truncated negative lengths from `uf_get_int`, `EXI_RED`/`EXI_WRI`
-    /// from the EQL copy).
+    /// Returns `Ok(())` on success and the mapped errors otherwise:
+    /// [`JDiffError::Raw`] carries the raw negative sentinels (`EXI_ERR` on
+    /// the trailing-ESC warning and the truncated negative lengths from
+    /// `uf_get_int` — arbitrary values the exit switch dispatches by code),
+    /// `EXI_RED`/`EXI_WRI` arrive as [`JDiffError::Read`]/[`JDiffError::Write`]
+    /// from the EQL copy's `copyfrom`.
     ///
     /// The C++ clears the pending-byte mirrors (`liDbl = EOF`, `liInp = EOF`,
     /// `:238-239`, `:254`, `:257-258`) in branches where nothing reads them
     /// anymore; the stores are ported as written, so the dead-store lint is
     /// silenced for this function.
     #[allow(unused_assignments)]
-    pub fn jpatch(&mut self) -> i32 {
+    pub fn jpatch(&mut self) -> Result<(), JDiffError> {
         let mut li_inp: i32; /* 1st Pending byte (EOF = no pending byte) */
         let mut li_dbl: i32 = EOF; /* 2nd Pending byte (EOF = no pending byte) */
         let mut li_opr: Option<Op>; /* Current operand (None = read next from input) */
@@ -325,7 +331,7 @@ impl<'a, W: Write> JPatcht<'a, W> {
                                 "Warning: unexpected trailing byte at end of file, \
                                  patch file may be corrupted."
                             );
-                            return EXI_ERR;
+                            return Err(JDiffError::Raw(EXI_ERR));
                         }
                         // ESC ESC or ESC <unknown> at the start of a sequence:
                         // resolve by double pending bytes: liInp and liDbl
@@ -383,7 +389,7 @@ impl<'a, W: Write> JPatcht<'a, W> {
                 Op::Del => {
                     lz_off = self.uf_get_int();
                     if lz_off < 0 {
-                        return lz_off as i32;
+                        return Err(JDiffError::Raw(lz_off as i32));
                     }
                     if self.verbse >= 1 {
                         dbg_print(format_args!(
@@ -401,7 +407,7 @@ impl<'a, W: Write> JPatcht<'a, W> {
                     /* get length of operation */
                     lz_off = self.uf_get_int();
                     if lz_off < 0 {
-                        return lz_off as i32;
+                        return Err(JDiffError::Raw(lz_off as i32));
                     }
 
                     /* show feedback */
@@ -415,10 +421,7 @@ impl<'a, W: Write> JPatcht<'a, W> {
                     }
 
                     /* execute operation */
-                    let li_ret = self.fil_out.copyfrom(self.fil_org, lz_pos_org, lz_off);
-                    if li_ret != EXI_OK {
-                        return li_ret;
-                    }
+                    self.fil_out.copyfrom(self.fil_org, lz_pos_org, lz_off)?;
                     lz_pos_org += lz_off;
                     lz_pos_out += lz_off;
 
@@ -429,7 +432,7 @@ impl<'a, W: Write> JPatcht<'a, W> {
                 Op::Bkt => {
                     lz_off = self.uf_get_int();
                     if lz_off < 0 {
-                        return lz_off as i32;
+                        return Err(JDiffError::Raw(lz_off as i32));
                     }
                     if self.verbse >= 1 {
                         dbg_print(format_args!(
@@ -454,14 +457,14 @@ impl<'a, W: Write> JPatcht<'a, W> {
             dbg_print(format_args!("{} {} EOF\n", p8(lz_pos_org), p8(lz_pos_out)));
         }
 
-        EXI_OK
+        Ok(())
     } /* jpatch */
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::defs::{EXI_ERR, EXI_OK, EXI_RED};
+    use crate::defs::{EXI_ERR, EXI_RED};
     use crate::jfile::JFileMem;
 
     /// u8 wire bytes of the opcodes (patch byte arrays are u8, the `Op`
@@ -494,7 +497,7 @@ mod tests {
     ];
 
     /// Applies `patch` to `org` at verbosity `v`; returns (rc, output).
-    fn apply(org: &[u8], patch: &[u8], v: i32) -> (i32, Vec<u8>) {
+    fn apply(org: &[u8], patch: &[u8], v: i32) -> (Result<(), JDiffError>, Vec<u8>) {
         let mut org_f = JFileMem::new(org.to_vec());
         let mut pch_f = JFileMem::new(patch.to_vec());
         let out = JFileOut::new(Vec::new());
@@ -508,7 +511,7 @@ mod tests {
     #[test]
     fn applies_085_implicit_mod_patch() {
         let (rc, out) = apply(ORG_A, PATCH_AB, 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out, NEW_B);
     }
 
@@ -518,7 +521,7 @@ mod tests {
     #[test]
     fn applies_081_explicit_mod_patch() {
         let (rc, out) = apply(ORG_A, PATCH_AB_081, 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out, NEW_B);
     }
 
@@ -527,7 +530,7 @@ mod tests {
     #[test]
     fn empty_patch_succeeds() {
         let (rc, out) = apply(ORG_A, &[], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert!(out.is_empty());
     }
 
@@ -538,7 +541,7 @@ mod tests {
     #[test]
     fn esc_esc_at_sequence_start_is_mod_data() {
         let (rc, out) = apply(b"0123456789", &[ESC, ESC, b'A', b'B'], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out, [0xA7, b'A', b'B']);
     }
 
@@ -547,7 +550,7 @@ mod tests {
     #[test]
     fn esc_unknown_at_sequence_start_is_mod_data() {
         let (rc, out) = apply(b"0123456789", &[ESC, b'x', b'y'], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out, [0xA7, b'x', b'y']);
     }
 
@@ -559,7 +562,7 @@ mod tests {
     #[test]
     fn plain_byte_at_sequence_start_is_implicit_mod_data() {
         let (rc, out) = apply(b"0123456789", &[b'X', ESC, EQL, 0x03], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         // 'X' as MOD data (pos_org 0 -> 1), then EQL 4 copies org[1..5].
         assert_eq!(out, b"X1234");
     }
@@ -569,7 +572,7 @@ mod tests {
     #[test]
     fn esc_same_opr_inside_run_is_data() {
         let (rc, out) = apply(b"0123456789", &[ESC, MOD, b'A', ESC, MOD, b'B'], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out, [b'A', 0xA7, 0xA6, b'B']);
     }
 
@@ -578,7 +581,7 @@ mod tests {
     #[test]
     fn esc_other_opr_switches_operator() {
         let (rc, out) = apply(b"0123456789", &[ESC, MOD, b'A', ESC, INS, b'B'], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out, b"AB");
     }
 
@@ -586,7 +589,7 @@ mod tests {
     #[test]
     fn esc_esc_inside_run_yields_one_esc() {
         let (rc, out) = apply(b"0123456789", &[ESC, MOD, b'A', ESC, ESC, b'B'], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out, [b'A', 0xA7, b'B']);
     }
 
@@ -599,7 +602,7 @@ mod tests {
             ESC, EQL, 0x03, ESC, INS, b'X', ESC, BKT, 0x03, ESC, INS, b'Y',
         ];
         let (rc, out) = apply(b"0123456789", &patch, 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out, b"0123XY");
     }
 
@@ -609,28 +612,29 @@ mod tests {
     fn length_tiers_decode() {
         // 1-byte tier: 0x03 -> 4 bytes.
         let (rc, out) = apply(b"0123456789", &[ESC, EQL, 0x03], 0);
-        assert_eq!((rc, out.as_slice()), (EXI_OK, &b"0123"[..]));
+        assert!(rc.is_ok());
+        assert_eq!(out.as_slice(), &b"0123"[..]);
 
         // 2-byte tier: 252-marker, x=97 -> 253+97 = 350 bytes (org padded).
         let org = vec![0x5Au8; 400];
         let (rc, out) = apply(&org, &[ESC, EQL, 252, 97], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out.len(), 350);
 
         // 16-bit tier: 253-marker, 0x0100 -> 256 bytes.
         let (rc, out) = apply(&org, &[ESC, EQL, 253, 0x01, 0x00], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out.len(), 256);
 
         // 32-bit tier: 254-marker, 0x0000012C -> 300 bytes.
         let (rc, out) = apply(&org, &[ESC, EQL, 254, 0, 0, 1, 0x2C], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out.len(), 300);
 
         // 64-bit tier: 255-marker, 0x000000000000012C -> 300 bytes.
         let patch = [ESC, EQL, 255, 0, 0, 0, 0, 0, 0, 1, 0x2C];
         let (rc, out) = apply(&org, &patch, 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out.len(), 300);
     }
 
@@ -641,19 +645,19 @@ mod tests {
     fn truncated_length_eof_arithmetic() {
         // [ESC DEL 252] at EOF: 253 + (-1) = 252 -> DEL 252, success, empty.
         let (rc, out) = apply(ORG_A, &[ESC, DEL, 252], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert!(out.is_empty());
 
         // First length byte at EOF: -1 < 252 -> -1 + 1 = 0 -> EQL 0.
         let (rc, out) = apply(ORG_A, &[ESC, EQL], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert!(out.is_empty());
 
         // 8-byte form truncated after 7 bytes: (0xFF..FF << 8) + (-1) =
         // -257 -> negative length, jpatch returns it truncated to int.
         let patch = [ESC, DEL, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
         let (rc, out) = apply(ORG_A, &patch, 0);
-        assert_eq!(rc, -257);
+        assert_eq!(rc.unwrap_err().exit_code(), -257);
         assert!(out.is_empty());
     }
 
@@ -664,7 +668,7 @@ mod tests {
     #[test]
     fn trailing_esc_at_sequence_start_is_exi_err() {
         let (rc, out) = apply(ORG_A, &[ESC], 0);
-        assert_eq!(rc, EXI_ERR);
+        assert_eq!(rc.unwrap_err().exit_code(), EXI_ERR);
         assert!(out.is_empty());
     }
 
@@ -674,7 +678,7 @@ mod tests {
     #[test]
     fn trailing_esc_after_data_appends_esc_and_ff() {
         let (rc, out) = apply(b"0123456789", &[ESC, MOD, b'x', ESC], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out, [b'x', 0xA7, 0xFF]);
     }
 
@@ -683,7 +687,7 @@ mod tests {
     #[test]
     fn eql_past_source_end_is_exi_red() {
         let (rc, out) = apply(ORG_A, &[ESC, EQL, 99], 0); // len 100 > 17
-        assert_eq!(rc, EXI_RED);
+        assert_eq!(rc.unwrap_err().exit_code(), EXI_RED);
         assert_eq!(out, ORG_A); // everything readable was copied first
     }
 
@@ -692,7 +696,7 @@ mod tests {
     #[test]
     fn identical_pair_single_eql_restores() {
         let (rc, out) = apply(ORG_A, &[ESC, EQL, 0x10], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out, ORG_A);
     }
 
@@ -705,13 +709,13 @@ mod tests {
     fn bkt_before_start_succeeds_until_next_copy() {
         // BKT 4 alone: position -4 is never read, plain success.
         let (rc, out) = apply(b"0123456789", &[ESC, BKT, 0x03], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert!(out.is_empty());
 
         // BKT 4 followed by EQL 4: the copy reads at -4 -> EXI_RED.
         let patch = [ESC, BKT, 0x03, ESC, EQL, 0x03];
         let (rc, out) = apply(b"0123456789", &patch, 0);
-        assert_eq!(rc, EXI_RED);
+        assert_eq!(rc.unwrap_err().exit_code(), EXI_RED);
         assert!(out.is_empty());
     }
 

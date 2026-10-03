@@ -60,6 +60,7 @@
 //! included) — `-d dst` has zero sites (spec §18.G).
 
 use crate::defs::{EOF, MAX_OFF_T, Op, ReadType, SMPSZE};
+use crate::error::JDiffError;
 use crate::jdebug::dbg_print;
 #[cfg(feature = "debug")]
 use crate::jdebug::{DBGAHD, DBGAHH, DBGMCH, DBGPRG, dbg};
@@ -313,11 +314,11 @@ impl<'a> JDiff<'a> {
     /// both files byte by byte and writes the differences to the output
     /// handler.
     ///
-    /// Returns 0 on success or a negative `EXI_*` read-error code, which
+    /// Returns `Ok(())` on success or the read-error `JDiffError`, which
     /// reaches the return statement either through the **live** `liFnd`
     /// check after `search` (`:277-279`) or through the final EOB check
     /// (`:330-332`).
-    pub fn jdiff(&mut self) -> i32 {
+    pub fn jdiff(&mut self) -> Result<(), JDiffError> {
         let mut lc_org: ByteOrEof; /* byte from original file */
         let mut lc_new: ByteOrEof; /* byte from new file */
         let mut lz_pos_org: i64 = 0;
@@ -497,10 +498,7 @@ impl<'a> JDiff<'a> {
                         &mut lz_skp_org,
                         &mut lz_skp_new,
                         &mut lz_ahd,
-                    );
-                    if li_fnd < 0 {
-                        return li_fnd;
-                    }
+                    )?;
 
                     /* Debug: find-ahead result and progress traces
                      * (JDiff.cpp:280-286). */
@@ -576,11 +574,20 @@ impl<'a> JDiff<'a> {
 
         /* Return code (JDiff.cpp:329-334): `lcNew < EOB || lcOrg < EOB`
          * holds exactly for the error sentinels (EOF and EOB are not
-         * `< EOB`); the lower of the two channel values is the error code. */
-        match (&lc_new, &lc_org) {
-            (ByteOrEof::Err(e), ByteOrEof::Err(f)) => e.exit_code().min(f.exit_code()),
-            (ByteOrEof::Err(e), _) | (_, ByteOrEof::Err(e)) => e.exit_code(),
-            _ => 0,
+         * `< EOB`); the lower of the two channel values is the error code.
+         * Both locals are owned here and dead after this match, so the
+         * error itself is moved out — the SAME error the reader produced,
+         * not a re-wrapping. */
+        match (lc_new, lc_org) {
+            (ByteOrEof::Err(e), ByteOrEof::Err(f)) => {
+                if e.exit_code() <= f.exit_code() {
+                    Err(e)
+                } else {
+                    Err(f)
+                }
+            }
+            (ByteOrEof::Err(e), _) | (_, ByteOrEof::Err(e)) => Err(e),
+            _ => Ok(()),
         }
     } /* jdiff */
 
@@ -604,8 +611,9 @@ impl<'a> JDiff<'a> {
     /// if characters need to be inserted in the original file, negative if
     /// they need to be removed from it.
     ///
-    /// Returns 0 = no solution found, 1 = solution found, < 0 = EXI error
-    /// code (propagated live by [`JDiff::jdiff`]).
+    /// Returns `Ok(0)` = no solution found, `Ok(1)` = solution found, or
+    /// the `JDiffError` (propagated live by [`JDiff::jdiff`]). The 0/1
+    /// payload stays: jdiff's "inaccurate solution" arm consumes it.
     fn search(
         &mut self,
         red_org: i64,
@@ -613,7 +621,7 @@ impl<'a> JDiff<'a> {
         skp_org: &mut i64,
         skp_new: &mut i64,
         ahd: &mut i64,
-    ) -> i32 {
+    ) -> Result<i32, JDiffError> {
         let mut lz_fnd_org: i64 = 0; /* Found position within original file;
          * the C++ also declares lzFndNew (out
          * parameter of gpMch->getbest), which the
@@ -632,10 +640,7 @@ impl<'a> JDiff<'a> {
          * (switch miSrcScn, JDiff.cpp:407-448) */
         if self.src_scn == 1 {
             /* do a full prescan */
-            let li_ret = self.build_full_index();
-            if li_ret < 0 {
-                return li_ret;
-            }
+            self.build_full_index()?;
             self.src_scn = 2;
             self.sst.rlb = self.hsh.reliability();
         } else if self.src_scn == 0 {
@@ -961,9 +966,12 @@ impl<'a> JDiff<'a> {
 
         /* Check for errors (JDiff.cpp:649-652): `miValNew < EOB` holds
          * exactly for the error sentinels — EOF and EOB are not `< EOB`
-         * and end the scan normally. */
-        if let ByteOrEof::Err(e) = &self.sst.val_new {
-            return e.exit_code();
+         * and end the scan normally. The error is moved out of the state
+         * (the field is never read again on this path: a failed search
+         * aborts jdiff immediately); the SAME error the reader produced
+         * propagates, not a re-wrapping. */
+        if let ByteOrEof::Err(e) = std::mem::replace(&mut self.sst.val_new, ByteOrEof::Eof) {
+            return Err(e);
         }
 
         /* show progress (JDiff.cpp:654-657) */
@@ -1007,7 +1015,7 @@ impl<'a> JDiff<'a> {
                     }
                     *ahd = i64::from(SMPSZE);
                 }
-                0
+                Ok(0)
             }
             Some((lz_fnd_org, lz_fnd_new)) => {
                 if lz_fnd_org >= red_org {
@@ -1038,7 +1046,7 @@ impl<'a> JDiff<'a> {
                     /* 0.8.5: mzAhdOrg is NOT reset on backtrack anymore. */
                 }
 
-                1
+                Ok(1)
             }
         }
     } /* search */
@@ -1048,7 +1056,7 @@ impl<'a> JDiff<'a> {
     /// in the source file and stores them with their position in the
     /// hashtable. Serial port of the 0.8.1 OpenMP block (the pragma was only
     /// active in the never-used `make parallel` target and is gone at 0.8.5).
-    fn build_full_index(&mut self) -> i32 {
+    fn build_full_index(&mut self) -> Result<(), JDiffError> {
         let Self {
             org, hsh, verbose, ..
         } = self;
@@ -1141,10 +1149,11 @@ impl<'a> JDiff<'a> {
         }
 
         /* (JDiff.cpp:789-792): `lcValOrg < EOB` holds exactly for the
-         * error sentinels — EOF and EOB end the prescan normally. */
+         * error sentinels — EOF and EOB end the prescan normally. The
+         * owned local moves the SAME error the reader produced out. */
         match lc_val_org {
-            ByteOrEof::Err(e) => e.exit_code(),
-            _ => 0,
+            ByteOrEof::Err(e) => Err(e),
+            _ => Ok(()),
         }
     } /* buildFullIndex */
 }
@@ -1359,7 +1368,7 @@ mod tests {
     }
 
     /// Drives the engine over the given file pair and returns (ret, ops).
-    fn run(org: Vec<u8>, new: Vec<u8>) -> (i32, OpLog) {
+    fn run(org: Vec<u8>, new: Vec<u8>) -> (Result<(), JDiffError>, OpLog) {
         let ops = Ops::default();
         let rec = RecordingOut::new(ops.clone());
         let mut jd = engine(
@@ -1387,7 +1396,7 @@ mod tests {
     fn identical_files_emit_nothing() {
         let data = b"hello world\n".to_vec();
         let (ret, ops) = run(data.clone(), data);
-        assert_eq!(ret, 0);
+        assert!(ret.is_ok());
         assert_eq!(
             ops,
             vec![
@@ -1410,7 +1419,7 @@ mod tests {
     #[test]
     fn pure_insert() {
         let (ret, ops) = run(Vec::new(), b"abc".to_vec());
-        assert_eq!(ret, 0);
+        assert!(ret.is_ok());
         assert_eq!(
             ops,
             vec![
@@ -1430,7 +1439,7 @@ mod tests {
     #[test]
     fn pure_delete() {
         let (ret, ops) = run(b"abc".to_vec(), Vec::new());
-        assert_eq!(ret, 0);
+        assert!(ret.is_ok());
         assert_eq!(ops, vec![op(X, 0, 0, 0)]);
     }
 
@@ -1447,7 +1456,7 @@ mod tests {
         let org = b"hello world hello world hello world\n".to_vec();
         let new = b"hello world hello XYZlo world hello\n".to_vec();
         let (ret, ops) = run(org, new);
-        assert_eq!(ret, 0);
+        assert!(ret.is_ok());
 
         // Exact C++-pinned operand sequence (oracle2, fixture 3, scn=1;
         // re-verified against the 0.8.5 engine — identical match decisions;
@@ -1511,7 +1520,7 @@ mod tests {
         new.extend_from_slice(&org[300..800]);
         new.extend_from_slice(&org[800..1000]);
         let (ret, ops) = run(org, new);
-        assert_eq!(ret, 0);
+        assert!(ret.is_ok());
         assert_eq!(
             ops,
             vec![
@@ -1539,7 +1548,7 @@ mod tests {
         new.extend_from_slice(&org[0..500]);
         new.extend_from_slice(&org[600..1000]);
         let (ret, ops) = run(org, new);
-        assert_eq!(ret, 0);
+        assert!(ret.is_ok());
         assert_eq!(
             ops,
             vec![
@@ -1577,7 +1586,7 @@ mod tests {
             Box::new(JFileMem::new(b"hello world\n".to_vec())),
             Box::new(rec),
         );
-        assert_eq!(jd.jdiff(), EXI_RED);
+        assert_eq!(jd.jdiff().unwrap_err().exit_code(), EXI_RED);
         assert!(
             ops.0.borrow().is_empty(),
             "no operands may be emitted once liFnd goes negative: {:?}",
@@ -1593,7 +1602,7 @@ mod tests {
             Box::new(FailingJFile),
             Box::new(rec),
         );
-        assert_eq!(jd.jdiff(), EXI_RED);
+        assert_eq!(jd.jdiff().unwrap_err().exit_code(), EXI_RED);
         assert_eq!(ops.0.borrow().clone(), vec![op(X, 0, 0, 0)]);
     }
 
@@ -1629,7 +1638,7 @@ mod tests {
             256 * 1024,
             true, // cmp_all
         );
-        assert_eq!(jd.jdiff(), 0);
+        assert!(jd.jdiff().is_ok());
         assert_eq!(
             ops.0.borrow().clone(),
             vec![
@@ -1675,7 +1684,7 @@ mod tests {
         assert_eq!(jd.mch_min, 31, "mch_min clamps to mch_max - 1");
         assert_eq!(jd.ahd_max, 1024, "ahd_max is raised to 1024");
         assert_eq!(jd.hash().hash_prime(), 2_796_181, "hsh_sze=32 MB wiring");
-        assert_eq!(jd.jdiff(), 0);
+        assert!(jd.jdiff().is_ok());
     }
 
     /// Two separated single-byte edits exercise two full search rounds, the
@@ -1691,7 +1700,7 @@ mod tests {
         new[750] = org[750] ^ 0xff;
         org[0] = 89; // guard the LCG against accidental drift (see oracle)
         let (ret, ops) = run(org, new);
-        assert_eq!(ret, 0);
+        assert!(ret.is_ok());
         assert_eq!(
             ops,
             vec![
@@ -1736,7 +1745,7 @@ mod tests {
             Box::new(JFileMem::new(new)),
             Box::new(rec),
         );
-        assert_eq!(jd.jdiff(), 0);
+        assert!(jd.jdiff().is_ok());
         assert_eq!(jd.hash().hash_hits(), 196);
         assert_eq!(jd.hsh_err(), 0);
         assert_eq!(jd.hsh_rpr(), 0);

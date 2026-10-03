@@ -22,6 +22,14 @@ pub enum JDiffError {
     /// `EXI_LRG` — 64-bit number rejected.
     #[error("Error: 64-bit offsets not supported !")]
     Large,
+    /// A raw non-`EXI_*` sentinel that the exit switch dispatches by its
+    /// value: `JPatcht::jpatch`'s truncated 64-bit-length returns (arbitrary
+    /// negative numbers — the exit switch's fall-through arm prints
+    /// `"Unknown exit code <n>"` and exits `-EXI_ERR`) and `EXI_ERR` itself
+    /// (its own arm prints `"Error occurred !"`). No library `Display` text
+    /// is pinned to this variant; the boundary prints the message.
+    #[error("Unknown exit code {0}")]
+    Raw(i32),
 }
 
 impl JDiffError {
@@ -34,6 +42,7 @@ impl JDiffError {
             JDiffError::Write(_) => crate::defs::EXI_WRI,
             JDiffError::Memory => crate::defs::EXI_MEM,
             JDiffError::Large => crate::defs::EXI_LRG,
+            JDiffError::Raw(code) => *code,
         }
     }
 }
@@ -83,5 +92,18 @@ mod tests {
         let err: JDiffError = std::io::Error::other("boom").into();
         assert!(matches!(err, JDiffError::Write(_)));
         assert_eq!(err.exit_code(), crate::defs::EXI_WRI);
+    }
+
+    /// `Raw` carries the raw sentinel value through `exit_code` untouched:
+    /// the truncated-length returns (`tests/roundtrip.rs`: "Unknown exit
+    /// code -257") and `EXI_ERR` ("Error occurred !") are dispatched by the
+    /// boundary's exit switch on the code value itself.
+    #[test]
+    fn raw_carries_the_sentinel_value() {
+        assert_eq!(JDiffError::Raw(-257).exit_code(), -257);
+        assert_eq!(
+            JDiffError::Raw(crate::defs::EXI_ERR).exit_code(),
+            crate::defs::EXI_ERR
+        );
     }
 }
