@@ -341,58 +341,12 @@ impl JMatchTable {
         // Join colliding matches (:195-210)
         let dlt = fnd_org - fnd_new; // lzDlt: delta key of the match
         let idx_dlt = (dlt.abs() % i64::from(self.mch_pme)) as usize; // abs(lzDlt) % miMchPme (:197)
-        let mut cur = self.col_tbl[idx_dlt];
-        while let Some(ci) = cur {
-            if self.nodes[ci].dlt == dlt {
-                // remove from gliding matches if single-counted (:201-202)
-                if self.nodes[ci].cnt == 1 {
-                    self.del_gld(ci);
-                }
-
-                // add to colliding match (:205-206)
-                self.nodes[ci].cnt += 1;
-                self.nodes[ci].r#new = fnd_new;
-
-                break;
-            } /* if colliding */
-            cur = self.nodes[ci].col;
-        } /* for colliding */
+        let mut cur = self.join_colliding(dlt, fnd_new);
 
         // Join gliding matches (:212-237)
-        // liIdxGld is assigned whenever the gliding scan runs (lpCur == null),
-        // which is also the only case the new-element linking below reads it.
-        let mut idx_gld: usize = 0;
         if cur.is_none() {
-            // C++ `%` on a negative org yields a negative index (UB); the
-            // engine only adds matches at non-negative org positions.
-            idx_gld = (fnd_org % i64::from(self.mch_pme)) as usize;
-            cur = self.gld_tbl[idx_gld];
-            while let Some(gi) = cur {
-                if self.nodes[gi].org == fnd_org {
-                    // remove from colliding matches (:219-220)
-                    if self.nodes[gi].cnt == 1 {
-                        self.del_col(gi);
-                    }
-
-                    // add to gliding match (:223-224)
-                    self.nodes[gi].cnt += 1;
-                    self.nodes[gi].r#new = fnd_new;
-
-                    // set gliding recurrence (:227-232)
-                    if self.nodes[gi].gldcnt == 0 {
-                        if fnd_new <= self.nodes[gi].beg + i64::from(SMPSZE) {
-                            // C++: int assignment of an off_t difference.
-                            self.nodes[gi].gldcnt = (fnd_new - self.nodes[gi].beg) as i32;
-                        } else {
-                            self.nodes[gi].gldcnt = SMPSZE;
-                        }
-                    }
-
-                    break;
-                } /* if gliding */
-                cur = self.nodes[gi].gld;
-            } /* for gliding */
-        } /* join gliding */
+            cur = self.join_gliding(fnd_org, fnd_new);
+        }
 
         // remove first renewed item from the oldlist (:239-244)
         if let Some(ci) = cur {
@@ -482,6 +436,12 @@ impl JMatchTable {
             self.nodes[ci].col = self.col_tbl[idx_dlt];
             self.col_tbl[idx_dlt] = Some(ci);
 
+            // liIdxGld: the gliding scan in `join_gliding` always ran when
+            // this allocation branch is reached (cur was null after both
+            // joins), so the slot index is recomputed here with the same
+            // expression.
+            let idx_gld = (fnd_org % i64::from(self.mch_pme)) as usize;
+
             // add to gliding hashtable (:303-305)
             self.nodes[ci].gld = self.gld_tbl[idx_gld];
             self.gld_tbl[idx_gld] = Some(ci);
@@ -554,6 +514,68 @@ impl JMatchTable {
             ret // Good, bad or ugly :-)
         }
     } /* add() */
+
+    /// Join colliding matches (`JMatchTable.cpp:195-210`): walk the delta
+    /// bucket for a match with the same delta and merge into it. Returns the
+    /// found node index, or `None` when the walk exhausts.
+    fn join_colliding(&mut self, dlt: i64, fnd_new: i64) -> Option<usize> {
+        let idx_dlt = (dlt.abs() % i64::from(self.mch_pme)) as usize; // abs(lzDlt) % miMchPme (:197)
+        let mut cur = self.col_tbl[idx_dlt];
+        while let Some(ci) = cur {
+            if self.nodes[ci].dlt == dlt {
+                // remove from gliding matches if single-counted (:201-202)
+                if self.nodes[ci].cnt == 1 {
+                    self.del_gld(ci);
+                }
+
+                // add to colliding match (:205-206)
+                self.nodes[ci].cnt += 1;
+                self.nodes[ci].r#new = fnd_new;
+
+                return Some(ci);
+            } /* if colliding */
+            cur = self.nodes[ci].col;
+        } /* for colliding */
+        None
+    }
+
+    /// Join gliding matches (`JMatchTable.cpp:212-237`): walk the org slot
+    /// for a match at the same org position and merge into it. Returns the
+    /// found node index, or `None` when the walk exhausts.
+    fn join_gliding(&mut self, fnd_org: i64, fnd_new: i64) -> Option<usize> {
+        // liIdxGld is assigned whenever the gliding scan runs (lpCur == null),
+        // which is also the only case the new-element linking below reads it.
+        // C++ `%` on a negative org yields a negative index (UB); the
+        // engine only adds matches at non-negative org positions.
+        let idx_gld = (fnd_org % i64::from(self.mch_pme)) as usize;
+        let mut cur = self.gld_tbl[idx_gld];
+        while let Some(gi) = cur {
+            if self.nodes[gi].org == fnd_org {
+                // remove from colliding matches (:219-220)
+                if self.nodes[gi].cnt == 1 {
+                    self.del_col(gi);
+                }
+
+                // add to gliding match (:223-224)
+                self.nodes[gi].cnt += 1;
+                self.nodes[gi].r#new = fnd_new;
+
+                // set gliding recurrence (:227-232)
+                if self.nodes[gi].gldcnt == 0 {
+                    if fnd_new <= self.nodes[gi].beg + i64::from(SMPSZE) {
+                        // C++: int assignment of an off_t difference.
+                        self.nodes[gi].gldcnt = (fnd_new - self.nodes[gi].beg) as i32;
+                    } else {
+                        self.nodes[gi].gldcnt = SMPSZE;
+                    }
+                }
+
+                return Some(gi);
+            } /* if gliding */
+            cur = self.nodes[gi].gld;
+        } /* for gliding */
+        None
+    }
 
     /// Get the best (=nearest) optimized and valid match from the array of
     /// matches (`JMatchTable::getbest`, `JMatchTable.cpp:117-171`).
