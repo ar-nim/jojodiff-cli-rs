@@ -38,6 +38,7 @@
 
 /// Engine error (`EXI_*`, `JDefs.h:146-158`).
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive] // API-07: CLI variants arrive in Phase 4; downstream must not match exhaustively
 pub enum JDiffError {
     /// `EXI_SEK` — seek error (`JFileAhead.h:115`).
     #[error("Seek error !")]
@@ -94,6 +95,15 @@ thiserror = "2"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ERRORS-12 / API-15: the error type crosses `anyhow` and thread
+    /// boundaries in the binary — lock `Send + Sync + 'static` at compile time.
+    #[test]
+    fn jdiff_error_is_send_sync_static() {
+        fn assert_bounds<T: Send + Sync + 'static>() {}
+        assert_bounds::<JDiffError>();
+    }
+
     #[test]
     fn exit_codes_match_exi() {
         assert_eq!(JDiffError::Seek.exit_code(), -crate::defs::EXI_SEK);
@@ -125,6 +135,7 @@ git commit -m "feat: JDiffError (thiserror) as the typed engine error vocabulary
 /// (`0..=255` / `EOF` / `EOB` / `EXI_SEK` / `EXI_RED`) — same information,
 /// typed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive] // API-07; crate-internal matches stay exhaustive
 pub enum ByteOrEof {
     /// A data byte.
     Byte(u8),
@@ -269,6 +280,7 @@ git commit -m "refactor: jmatchtable/jfileout read ByteOrEof"
 (Check `JFileMem`'s actual gating today — its tests pin negative→EOF; preserve exactly.)
   3. `JFileAhead::get` (ahead.rs): `fn get(&mut self, pos: i64, typ: ReadType) -> ByteOrEof { ByteOrEof::from_raw(self.get_frombuffer(pos, typ)) }` — the internal `get_frombuffer`/`getbuf` sentinel machinery (including the §21.17 gate and the two cfg(debug) parity asserts) stays i32-shaped internally; `from_raw` is the rim.
   4. Update the remaining in-crate callers' imports; `rg -n '\.getv\(' src/` must return zero hits.
+  5. **API-26 verify-then-change on `getbuf`:** audit whether the `&mut i64` out-parameter is redundant — the run "never wraps the ring", so at every return site check whether `len == slice.len()`. If yes at all sites, change `getbuf` to return `Option<&[u8]>` alone and delete the out-param (callers derive `len` from the slice). If any site differs, keep the out-param and record the site in the commit body. Either way the §21.13 dead-parity surface does not grow.
 
 - [ ] **Step 2: Full gate + commit**
 
@@ -296,6 +308,7 @@ git commit -m "refactor!: JFile::get returns ByteOrEof (bridge removed)"
 /// yet" seed of `opr_cur`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
+#[non_exhaustive] // API-07; crate-internal matches stay exhaustive
 pub enum Op {
     /// `ESC` 0xA7 — escape.
     Esc = 0xA7,

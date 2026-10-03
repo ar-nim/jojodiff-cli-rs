@@ -310,3 +310,40 @@ Considered and rejected:
 - Replacing `Getopt` behavior; new features; performance work beyond
   removing the audited redundant clones.
 - Fuzzing infrastructure beyond the optional `proptest` follow-up.
+
+## 15. Rust 1.98 standard alignment (audit 2026-10-03)
+
+The rust-best-practices skill's AlphaOne 1.98 standard (180 rules) was
+audited against the codebase and plans. MSRV is **1.85**, which gates the
+1.91+/1.96+/1.97+/1.98-only rules.
+
+**Adopted now:** `[lints]` table with `future-incompatible = deny` and
+`clippy::cast_lossless = deny` (P1 Task 0); `#[non_exhaustive]` on the
+public growable enums `JDiffError`/`ByteOrEof`/`Op` (API-07, in P3); a
+`Send + Sync + 'static` compile-time assertion on `JDiffError`
+(ERRORS-12/API-15, in P3); `getbuf`'s out-parameter audited for removal
+(API-26, P3 Task 4 verify-then-change).
+
+**Deferred until an MSRV bump:** `strict_*` arithmetic (PERF-06, 1.91) —
+and see the do-not-fix ruling below; `assert_matches!` (1.96) — tests keep
+`assert!(matches!(..))`; `[build] warnings = "deny"` (TOOL-06, 1.97) —
+CI's `-D warnings` is the equivalent today; the STDNEW family (1.97/1.98):
+integer bit helpers, `substr_range`, `algebraic_*`, **`NumBuffer::format_into`
+for `p8()` — the one with real value here, killing the per-byte `String`
+allocation in `-u -vv` traces**, `NonZero::from_str_radix`,
+`String::from_utf16le`, `Atomic::from_mut`.
+
+**Do-not-fix (byte-contract / port-policy rulings):**
+
+- `wrapping_*` arithmetic (PERF-01/04): the §21.6 inaccurate-solutions
+  counter wraps because the C++ `int` wraps; the `-b`/`-f` knob
+  multiplications likewise. `strict_*`/`checked_*` would panic where the
+  oracle wraps — wrapping is the replicated behavior, not a bug.
+- ERRORS-14 (lowercase Display, no trailing punctuation): the pinned C++
+  texts ("Error writing file !") override the style rule; error text is
+  wire-format here.
+- Iterator-conversion of ported engine loops (ITER-01): the engine's
+  manual loops are the C++ shape with anchors; new code (cli) uses
+  idiomatic iterator forms.
+- Truncation cast lints (`cast_possible_truncation` etc.): the labeled
+  "C++: int assignment of the off_t difference" narrowings are pinned.

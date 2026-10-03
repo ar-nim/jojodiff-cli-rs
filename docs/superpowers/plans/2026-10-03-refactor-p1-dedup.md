@@ -24,6 +24,39 @@
 
 ---
 
+### Task 0: Preflight — centralized lint policy (AlphaOne 1.98 standard, TOOL-04)
+
+**Files:**
+- Modify: `Cargo.toml` (add `[lints]`), plus every file a newly-denied lint fires on
+
+**Interfaces:**
+- Produces: a `[lints]` table locking the standards the whole refactor will live under; no behavior change.
+
+- [ ] **Step 1: Add the lint table**
+
+```toml
+[lints.rust]
+future-incompatible = "deny"
+
+[lints.clippy]
+cast_lossless = "deny"
+```
+
+- [ ] **Step 2: Fix every `cast_lossless` firing**
+
+Run `cargo clippy --all-targets --all-features --locked`. Each `cast_lossless` hit (lossless widenings written as `as` — e.g. `x as i64` where `x: i32`) becomes `i64::from(x)` / `u32::from(x)` etc. Bounded wave; **do not** touch lossy narrowings (`as u8`, `as i32` from i64) — those are pinned C++ narrowing sites, several labeled with "C++: int assignment of the off_t difference" comments, and stay exactly as they are.
+
+- [ ] **Step 3: Full gate + commit**
+
+```bash
+git add Cargo.toml src/
+git commit -m "build: centralized lints (future-incompatible, cast_lossless) per 1.98 standard TOOL-04"
+```
+
+Deliberately NOT enabled (recorded in the spec §15): `cast_possible_truncation`/`cast_sign_loss`/`cast_possible_wrap` (the port's narrowing arithmetic is byte-pinned) and pedantic-at-large.
+
+---
+
 ### Task 1: Consolidate the printable-ASCII char filter into `defs::print_char`
 
 **Files:**
