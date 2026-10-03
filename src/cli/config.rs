@@ -326,7 +326,7 @@ pub fn parse(args: &[OsString]) -> Options {
 }
 
 /// Effective buffer geometry (`main.cpp:617-645`).
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Buffers {
     pub ll_buf_org: i64,
     pub ll_buf_new: i64,
