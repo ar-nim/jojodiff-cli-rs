@@ -17,7 +17,8 @@ pub(crate) enum LenTier {
     /// 32-bit tier — marker 254 plus four bytes.
     L32,
     /// 64-bit tier (`JDIFF_LARGEFILE`, live in the oracle and the port) —
-    /// marker 255 plus eight bytes.
+    /// marker 255 plus eight bytes. The oracle build enables it unconditionally
+    /// via `-D_FILE_OFFSET_BITS=64` (`JDefs.h:64-67`).
     L64,
 }
 

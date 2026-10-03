@@ -91,7 +91,7 @@ impl<'a, W: Write> JPatcht<'a, W> {
     fn uf_get_int(&mut self) -> i64 {
         let mut li_val: i64 = i64::from(self.pch_get());
 
-        match crate::jout::wire::LenTier::from_lead(li_val) {
+        match LenTier::from_lead(li_val) {
             /* `li_val + 1` uses the original `li_val` (EOF/-1 → 0): the C
              * arithmetic computes with the read result, no error path. */
             LenTier::L252 => li_val + 1,
