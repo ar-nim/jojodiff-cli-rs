@@ -438,9 +438,8 @@ impl JMatchTable {
 
             // liIdxGld: the gliding scan in `join_gliding` always ran when
             // this allocation branch is reached (cur was null after both
-            // joins), so the slot index is recomputed here with the same
-            // expression.
-            let idx_gld = (fnd_org % i64::from(self.mch_pme)) as usize;
+            // joins), so the slot index is recomputed here via `gld_slot`.
+            let idx_gld = self.gld_slot(fnd_org);
 
             // add to gliding hashtable (:303-305)
             self.nodes[ci].gld = self.gld_tbl[idx_gld];
@@ -547,7 +546,7 @@ impl JMatchTable {
         // which is also the only case the new-element linking below reads it.
         // C++ `%` on a negative org yields a negative index (UB); the
         // engine only adds matches at non-negative org positions.
-        let idx_gld = (fnd_org % i64::from(self.mch_pme)) as usize;
+        let idx_gld = self.gld_slot(fnd_org);
         let mut cur = self.gld_tbl[idx_gld];
         while let Some(gi) = cur {
             if self.nodes[gi].org == fnd_org {
@@ -727,7 +726,8 @@ impl JMatchTable {
         }
     } /* cleanup() */
 
-    /// Debug sanity walk (JMatchTable.cpp:387-397): counts the new and old
+    /// Debug sanity walk (JMatchTable.cpp:387-397, also `:413-423`, bounded
+    /// redo pass): counts the new and old
     /// lists and reports when free + old + new != table size.
     #[cfg(feature = "debug")]
     fn dbg_check_table_size(&self, bounded: bool) {
@@ -1250,6 +1250,13 @@ impl JMatchTable {
             self.nodes[lst].nxt = Some(cur);
         }
         self.mp_lst = Some(cur);
+    }
+
+    /// Gliding-hashtable slot for `fnd_org`. The C++ computes this inline at
+    /// both the gliding walk and the node insert (`JMatchTable.cpp:212-237`,
+    /// `:308+`); one definition here keeps the two sites from drifting.
+    fn gld_slot(&self, fnd_org: i64) -> usize {
+        (fnd_org % i64::from(self.mch_pme)) as usize
     }
 
     /// Delete element from gliding hashtable (`delGld`,

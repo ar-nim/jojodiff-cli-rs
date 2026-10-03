@@ -82,7 +82,8 @@ const PGSMSK: i64 = 0x1ffffff;
 /// members through pointer aliasing, which the two field-disjoint
 /// destructures used to emulate.
 struct SearchState {
-    /// Current ahead position on the original file (`mzAhdOrg`).
+    /// Current ahead position on the original file (`mzAhdOrg`). Not reset on
+    /// backtrack anymore (0.8.5).
     az_org: i64,
     /// Current ahead position on the new file (`mzAhdNew`).
     az_new: i64,
@@ -609,8 +610,6 @@ impl<'a> JDiff<'a> {
             }
             self.sst.rlb = self.hsh.reliability();
         } /* switch scan source file - build hashtable */
-
-        /* mzAhdOrg is not reset on backtrack anymore (0.8.5). */
 
         /*
          * How many bytes to look ahead (search) ? (JDiff.cpp:450-470)
