@@ -155,6 +155,7 @@ The highest-leverage idiomatic change, enabled by the byte-contract ruling:
    order/content verified against the oracle goldens. cfg(debug)
    `process::exit` parity asserts (ahead.rs:391,403) are re-expressed as
    debug asserts or error returns with identical observable behavior.
+   (Amended in Phase 3: kept as-is — see the §11 criterion 3 carve-out.)
 4. **`Node.cmp` sentinel field** becomes an enum with payload
    (`Run(i32)` / the CMPINV/CMPSKP/CMPEOB sentinels / the negated EOB
    estimates `is_best` stores), making `is_old2_skip`/`is_old2_reuse`
@@ -257,7 +258,9 @@ comment citing the oracle rows.
 2. Goldens and all byte-parity checks unmodified and passing — no golden
    file changes in the diff.
 3. `src/bin/jdiff.rs` ≤ 80 lines, no `exit()` outside `main`; no
-   `process::exit` in library code.
+   `process::exit` in library code — except the two `cfg(debug)`
+   oracle-parity asserts in `src/jfile/ahead.rs` (debug-build exit 6 is
+   pinned by the debug oracle tests; a `Result` cannot reproduce it).
 4. `JDiff::search` contains zero `let Self {...} = self` destructures.
 5. The audit's duplication inventory (§5) fully consolidated; §5.9 dead
    code removed with reachability arguments.

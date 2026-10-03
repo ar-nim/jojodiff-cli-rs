@@ -6,12 +6,31 @@
 //! held byte-identical to the original C++ implementation, which serves as
 //! the verification oracle.
 //!
-//! The library is std-only apart from one compile-time dependency,
-//! [`thiserror`](https://docs.rs/thiserror) (spec §13): it derives the
-//! `Display`/`std::error::Error` impls of the library-wide
-//! [`error::JDiffError`] — no runtime code beyond the generated impls. There
-//! is no `unsafe`. See the repository README for project status and the docs
-//! in `docs/superpowers/` for the port plan and functional specification.
+//! Module map:
+//!
+//! - **Engine** (the ported C++ classes): [`defs`], [`jdebug`], [`jdiff`],
+//!   [`jfile`], [`jfileout`], [`jhashpos`], [`jmatchtable`], [`jout`],
+//!   [`jpatcht`].
+//! - **CLI** ([`cli`]): option parsing and buffer sizing ([`cli::config`],
+//!   [`cli::opts`]), the phase functions and orchestrator
+//!   ([`cli::diff_phase`], [`cli::patch_phase`], [`cli::run()`]), the
+//!   byte-pinned greeting/usage/report texts ([`cli::report`]) and the error
+//!   boundary ([`cli::error`]).
+//! - **Errors** ([`error`]): the library-wide [`error::JDiffError`].
+//!
+//! Error model: the engine's status APIs return `Result<T, JDiffError>` (the
+//! legacy exit-code vocabulary survives as [`error::JDiffError::exit_code`]
+//! and the `Raw` variant). [`cli::error::report`] is the single
+//! text/exit-code boundary — the one place an error becomes pinned stderr
+//! bytes and a process exit code; the library never exits the process.
+//!
+//! Dependencies (spec §13): [`thiserror`](https://docs.rs/thiserror) derives
+//! the `Display`/`std::error::Error` impls of [`error::JDiffError`] (compile-
+//! time only, no runtime code beyond the generated impls), and
+//! [`anyhow`](https://docs.rs/anyhow) wraps `cli::run` in the thin `jdiff`
+//! binary — no `anyhow` types cross into the library. There is no `unsafe`.
+//! See the repository README for project status and the docs in
+//! `docs/superpowers/` for the port plan and functional specification.
 
 pub mod cli;
 pub mod defs;
