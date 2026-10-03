@@ -1001,49 +1001,37 @@ impl<'a> JDiff<'a> {
             li_idx += 1;
         }
 
-        /* Build hashtable (JDiff.cpp:748-778) */
-        if *verbose > 1 {
-            /* slow version with user feedback (JDiff.cpp:749-768) */
-            while lc_val_org > EOF {
-                lz_pos_org += 1;
-                lc_val_org = org.get(lz_pos_org, ReadType::HardAhead);
-                if lc_val_org <= EOF {
-                    break;
-                }
-                lk_hsh_org = hash_key(lk_hsh_org, &mut lc_val_prv, lc_val_org, &mut li_eql_org);
-                hsh.add(lk_hsh_org, lz_pos_org, li_eql_org);
-
-                /* Debug: hash trace (JDiff.cpp:758-762); the trailing field
-                 * is `%8d` of the literal 0 here, not a P8zd position. */
-                #[cfg(feature = "debug")]
-                if dbg(DBGAHH) {
-                    dbg_print(format_args!(
-                        "ufHshAdd({:2x} -> {:8x}, {}, {:8})\n",
-                        lc_val_org as u32,
-                        lk_hsh_org,
-                        crate::defs::p8(lz_pos_org),
-                        0,
-                    ));
-                }
-
-                /* output position every 32MB (JDiff.cpp:764-767) */
-                if (lz_pos_org & PGSMSK) == 0 {
-                    dbg_print(format_args!(
-                        "\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}{:>12}Mb",
-                        lz_pos_org / PGSMRK
-                    ));
-                }
+        /* Build hashtable (JDiff.cpp:748-778): one loop; the user-feedback
+         * extras run only under verbose>1 (the C++ slow version). */
+        let feedback = *verbose > 1;
+        while lc_val_org > EOF {
+            lz_pos_org += 1;
+            lc_val_org = org.get(lz_pos_org, ReadType::HardAhead);
+            if lc_val_org <= EOF {
+                break;
             }
-        } else {
-            /* fast version, no user feedback nor debug (JDiff.cpp:769-778) */
-            while lc_val_org > EOF {
-                lz_pos_org += 1;
-                lc_val_org = org.get(lz_pos_org, ReadType::HardAhead);
-                if lc_val_org <= EOF {
-                    break;
-                }
-                lk_hsh_org = hash_key(lk_hsh_org, &mut lc_val_prv, lc_val_org, &mut li_eql_org);
-                hsh.add(lk_hsh_org, lz_pos_org, li_eql_org);
+            lk_hsh_org = hash_key(lk_hsh_org, &mut lc_val_prv, lc_val_org, &mut li_eql_org);
+            hsh.add(lk_hsh_org, lz_pos_org, li_eql_org);
+
+            /* Debug: hash trace (JDiff.cpp:758-762); the trailing field
+             * is `%8d` of the literal 0 here, not a P8zd position. */
+            #[cfg(feature = "debug")]
+            if feedback && dbg(DBGAHH) {
+                dbg_print(format_args!(
+                    "ufHshAdd({:2x} -> {:8x}, {}, {:8})\n",
+                    lc_val_org as u32,
+                    lk_hsh_org,
+                    crate::defs::p8(lz_pos_org),
+                    0,
+                ));
+            }
+
+            /* output position every 32MB (JDiff.cpp:764-767) */
+            if feedback && (lz_pos_org & PGSMSK) == 0 {
+                dbg_print(format_args!(
+                    "\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}{:>12}Mb",
+                    lz_pos_org / PGSMRK
+                ));
             }
         }
 
