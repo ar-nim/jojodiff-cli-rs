@@ -1,6 +1,6 @@
 [package]
 name = "jojodiff-cli-rs"
-version = "0.8.5"
+version = "0.9.0"
 edition = "2024"
 rust-version = "1.85"
 license = "GPL-3.0-or-later"
@@ -37,20 +37,19 @@ cast_lossless = "deny"
 # byte-pinned to JojoDiff 0.8.5 C++ behavior — and pedantic-at-large.
 
 [dependencies]
-# First runtime dependency (spec §13 dependency record): `thiserror` derives
+# Runtime dependency 1 of 2 (spec §13 dependency record): `thiserror` derives
 # the `Display`/`std::error::Error` impls of the library-wide `JDiffError`
-# (src/error.rs). Compile-time (derive) only — the port stays otherwise
-# std-only, and every diagnostic byte remains hand-pinned.
+# (src/error.rs). Compile-time (derive) only — no runtime code beyond the
+# generated impls — and every diagnostic byte remains hand-pinned.
 thiserror = "2"
 
-# Second runtime dependency: the thin `jdiff` binary (src/bin/jdiff.rs) wraps
-# `cli::run`'s `Result` in `anyhow` (spec §8.1). The library itself stays
-# std-only apart from `thiserror`; `JDiffError` crosses into `anyhow::Error`
-# via its `std::error::Error + Send + Sync + 'static` impls.
+# Runtime dependency 2 of 2: the thin `jdiff` binary (src/bin/jdiff.rs) wraps
+# `cli::run`'s `Result` in `anyhow` (spec §8.1). The library itself depends on
+# nothing but `thiserror`; `JDiffError` crosses into `anyhow::Error` via its
+# `std::error::Error + Send + Sync + 'static` impls.
 anyhow = "1"
 
 [dev-dependencies]
-pretty_assertions = "1.4"
 jojodiff = "0.1.2"   # francisdb crate, cross-validation only (tests/oracle.rs)
 # Test-harness modernization (spec §8.4): tempfile-backed RAII scratch dirs
 # and the assert_cmd/predicates spawn+assert layer (tests/common/mod.rs).

@@ -21,12 +21,23 @@ links or aliases of the binary named `jpatch`/`jptch` patch via argv[0] dispatch
 > including dropping implicit-MOD bytes. See [Version history](#version-history) for what
 > changed between the 0.8.1 and 0.8.5 lines.
 
+## Versioning
+
+The crate version tracks the **upstream compatibility lineage**, not this
+project's age: `0.8.x` mirrors JojoDiff 0.8.5 byte-for-byte (the port-parity
+era), and `0.9.x` is the same behavior on an idiomatic-Rust internals
+refactor. `1.0.0` is reserved for a stable library API. The version the
+tool prints (`0.8.5 (beta) 2020`) is JojoDiff's own banner, replicated
+byte-exactly and never bumped by this project.
+
 ## What is JojoDiff?
 
 JojoDiff is a binary diff/patch tool: `jdiff` compares two files and writes a small patch
 file, and `jdiff -u` applies that patch to the original file to reproduce the new file
 byte-for-byte. It works on any data (no line-oriented assumptions), finds shifted and
-repeated blocks via backtracking, and has no external dependencies.
+repeated blocks via backtracking, and upstream itself needs no external libraries.
+(This port's own crate dependencies are listed under
+[Dependencies](#dependencies).)
 
 This project ports the 0.8.5 algorithms **exactly**: patch files, listings, verbose
 output and exit codes are verified byte-for-byte against a fixed build of the original
@@ -164,7 +175,8 @@ release behave identically. Do not use `-t`; it exists for fidelity only.
 
 ## Building
 
-Rust 1.85 or newer (edition 2024); no runtime dependencies beyond `std`:
+Rust 1.85 or newer (edition 2024); the dependencies are listed under
+[Dependencies](#dependencies):
 
 ```
 cargo build --release
@@ -183,6 +195,23 @@ The library crate (`jojodiff_cli_rs`) exposes the same building blocks as the C+
 classes (readers, hash table, match table, output writers, diff engine). With the
 non-default `debug` feature, the `-d*` diagnostic flags of the `_DEBUG` builds are
 available too.
+
+## Dependencies
+
+The dependency set is deliberately minimal; the full decision record — including
+every candidate considered and rejected (`clap`, `log`/`tracing`, `primal`,
+`memmap2`, `insta`) — lives in
+[spec §13](docs/superpowers/specs/2026-10-03-idiomatic-rust-refactor-design.md#13-dependency-decision-record).
+
+| Crate | Role | Why |
+|---|---|---|
+| [`thiserror`](https://crates.io/crates/thiserror) | runtime (library) | Derives the `Display`/`Error` impls of the engine-wide `JDiffError`; compile-time only, no runtime code beyond the generated impls. |
+| [`anyhow`](https://crates.io/crates/anyhow) | runtime (binary only) | Context around `cli::run` in the thin `jdiff` wrapper; no `anyhow` types cross into the library. |
+| [`jojodiff`](https://crates.io/crates/jojodiff) | dev | The francisdb patcher crate, used as an independent cross-validation oracle (`tests/oracle.rs`). |
+| [`tempfile`](https://crates.io/crates/tempfile) | dev | tempfile-backed RAII scratch directories in the test harness. |
+| [`assert_cmd`](https://crates.io/crates/assert_cmd) / [`predicates`](https://crates.io/crates/predicates) | dev | The spawn-and-assert layer for the CLI subprocess tests. |
+
+There is no `unsafe` anywhere in the crate.
 
 ## Testing
 
