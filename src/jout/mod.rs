@@ -7,6 +7,7 @@
 pub mod asc;
 pub mod bin;
 pub mod rgn;
+pub mod wire;
 
 pub use asc::JOutAsc;
 pub use bin::JOutBin;

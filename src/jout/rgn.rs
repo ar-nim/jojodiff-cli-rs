@@ -69,20 +69,14 @@ impl<W: Write> JOutRgn<W> {
     }
 
     /// `JOutRgn::ufPutLen` (`JOutRgn.cpp:120-139`): length-encoding size.
-    /// Unlike the real encoding tiers (1/2/3/5/9, cf. `JOutAsc::ufPutSze`)
-    /// the 32/64-bit tiers here return **4** and **8** — an upstream
-    /// inconsistency ported as written (spec §21.14).
+    /// Unlike the real encoding tiers (1/2/3/5/9) the 32/64-bit tiers here
+    /// return **4** and **8** — an upstream inconsistency ported as written
+    /// (spec §21.14), deliberately kept local to this quirk site.
     fn put_len(len: i64) -> i64 {
-        if len <= 252 {
-            1
-        } else if len <= 508 {
-            2
-        } else if len <= 0xffff {
-            3
-        } else if len <= 0xffff_ffff {
-            4
-        } else {
-            8
+        match super::wire::len_tier(len) {
+            super::wire::LenTier::L32 => 4,
+            super::wire::LenTier::L64 => 8,
+            tier => tier.size(),
         }
     }
 }

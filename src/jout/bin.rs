@@ -35,6 +35,7 @@
 
 use std::io::Write;
 
+use super::wire::LenTier;
 use super::{JOut, OutStats};
 use crate::defs::{BKT, DEL, EQL, ESC, INS, MINEQL, MOD};
 
@@ -129,36 +130,43 @@ impl<W: Write> JOutBin<W> {
     /// The 9-byte tier is always enabled: the oracle build defines
     /// `JDIFF_LARGEFILE` (`JOutBin.cpp:77,89-102`).
     fn put_len(&mut self, len: i64) {
-        if len <= 252 {
-            self.raw((len - 1) as u8);
-            self.stats.ctl += 1;
-        } else if len <= 508 {
-            self.raw(252);
-            self.raw((len - 253) as u8);
-            self.stats.ctl += 2;
-        } else if len <= 0xffff {
-            self.raw(253);
-            self.raw((len >> 8) as u8);
-            self.raw(len as u8);
-            self.stats.ctl += 3;
-        } else if len <= 0xffff_ffff {
-            self.raw(254);
-            self.raw((len >> 24) as u8);
-            self.raw((len >> 16) as u8);
-            self.raw((len >> 8) as u8);
-            self.raw(len as u8);
-            self.stats.ctl += 5;
-        } else {
-            self.raw(255);
-            self.raw((len >> 56) as u8);
-            self.raw((len >> 48) as u8);
-            self.raw((len >> 40) as u8);
-            self.raw((len >> 32) as u8);
-            self.raw((len >> 24) as u8);
-            self.raw((len >> 16) as u8);
-            self.raw((len >> 8) as u8);
-            self.raw(len as u8);
-            self.stats.ctl += 9;
+        let tier = super::wire::len_tier(len);
+        match tier {
+            LenTier::L252 => {
+                self.raw((len - 1) as u8);
+                self.stats.ctl += tier.size();
+            }
+            LenTier::L508 => {
+                self.raw(tier.marker().unwrap());
+                self.raw((len - 253) as u8);
+                self.stats.ctl += tier.size();
+            }
+            LenTier::L16 => {
+                self.raw(tier.marker().unwrap());
+                self.raw((len >> 8) as u8);
+                self.raw(len as u8);
+                self.stats.ctl += tier.size();
+            }
+            LenTier::L32 => {
+                self.raw(tier.marker().unwrap());
+                self.raw((len >> 24) as u8);
+                self.raw((len >> 16) as u8);
+                self.raw((len >> 8) as u8);
+                self.raw(len as u8);
+                self.stats.ctl += tier.size();
+            }
+            LenTier::L64 => {
+                self.raw(tier.marker().unwrap());
+                self.raw((len >> 56) as u8);
+                self.raw((len >> 48) as u8);
+                self.raw((len >> 40) as u8);
+                self.raw((len >> 32) as u8);
+                self.raw((len >> 24) as u8);
+                self.raw((len >> 16) as u8);
+                self.raw((len >> 8) as u8);
+                self.raw(len as u8);
+                self.stats.ctl += tier.size();
+            }
         }
     }
 

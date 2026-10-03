@@ -55,21 +55,9 @@ impl<W: Write> JOutAsc<W> {
     }
 
     /// Length encoding size in the binary format (`JOutAsc::ufPutSze`,
-    /// `JOutAsc.cpp:107-126`): 1/2/3/5/9 bytes. The 9-byte tier is always
-    /// enabled: the oracle build defines `JDIFF_LARGEFILE`
-    /// (`JDefs.h:64-67` via `-D_FILE_OFFSET_BITS=64`).
+    /// `JOutAsc.cpp:107-126`): 1/2/3/5/9 bytes.
     fn put_sze(len: i64) -> i64 {
-        if len <= 252 {
-            1
-        } else if len <= 508 {
-            2
-        } else if len <= 0xffff {
-            3
-        } else if len <= 0xffff_ffff {
-            5
-        } else {
-            9
-        }
+        super::wire::len_tier(len).size()
     }
 
     /// Writes a formatted fragment, panicking on I/O errors (the C++ never

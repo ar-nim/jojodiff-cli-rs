@@ -24,6 +24,7 @@ use crate::defs::{BKT, DEL, EOF, EQL, ESC, EXI_ERR, EXI_OK, INS, MOD, ReadType, 
 use crate::jdebug::dbg_print;
 use crate::jfile::JFile;
 use crate::jfileout::JFileOut;
+use crate::jout::wire::LenTier;
 
 /// Patch applier (`JPatcht`, `JPatcht.h:34-114`): holds the source file, the
 /// patch file, the output file and the verbosity level.
@@ -90,36 +91,40 @@ impl<'a, W: Write> JPatcht<'a, W> {
     fn uf_get_int(&mut self) -> i64 {
         let mut li_val: i64 = i64::from(self.pch_get());
 
-        if li_val < 252 {
-            li_val + 1
-        } else if li_val == 252 {
-            253 + i64::from(self.pch_get())
-        } else if li_val == 253 {
-            li_val = i64::from(self.pch_get());
-            li_val = (li_val << 8) + i64::from(self.pch_get());
-            li_val
-        } else if li_val == 254 {
-            li_val = i64::from(self.pch_get());
-            li_val = (li_val << 8) + i64::from(self.pch_get());
-            li_val = (li_val << 8) + i64::from(self.pch_get());
-            li_val = (li_val << 8) + i64::from(self.pch_get());
-            li_val
-        } else {
-            /* 64-bit form (`JDIFF_LARGEFILE`, live in the oracle build and
-             * in this port). The non-LARGEFILE branch
-             * (`fprintf(stderr, "64-bit length numbers not supported!\n");
-             * return EXI_LRG;`, `JPatcht.cpp:80-83`) is unreachable here and
-             * is ported as dead code by omission of the `#else` body
-             * (spec §21.13). */
-            li_val = i64::from(self.pch_get());
-            li_val = (li_val << 8) + i64::from(self.pch_get());
-            li_val = (li_val << 8) + i64::from(self.pch_get());
-            li_val = (li_val << 8) + i64::from(self.pch_get());
-            li_val = (li_val << 8) + i64::from(self.pch_get());
-            li_val = (li_val << 8) + i64::from(self.pch_get());
-            li_val = (li_val << 8) + i64::from(self.pch_get());
-            li_val = (li_val << 8) + i64::from(self.pch_get());
-            li_val
+        match crate::jout::wire::LenTier::from_lead(li_val) {
+            /* `li_val + 1` uses the original `li_val` (EOF/-1 → 0): the C
+             * arithmetic computes with the read result, no error path. */
+            LenTier::L252 => li_val + 1,
+            LenTier::L508 => 253 + i64::from(self.pch_get()),
+            LenTier::L16 => {
+                li_val = i64::from(self.pch_get());
+                li_val = (li_val << 8) + i64::from(self.pch_get());
+                li_val
+            }
+            LenTier::L32 => {
+                li_val = i64::from(self.pch_get());
+                li_val = (li_val << 8) + i64::from(self.pch_get());
+                li_val = (li_val << 8) + i64::from(self.pch_get());
+                li_val = (li_val << 8) + i64::from(self.pch_get());
+                li_val
+            }
+            LenTier::L64 => {
+                /* 64-bit form (`JDIFF_LARGEFILE`, live in the oracle build and
+                 * in this port). The non-LARGEFILE branch
+                 * (`fprintf(stderr, "64-bit length numbers not supported!\n");
+                 * return EXI_LRG;`, `JPatcht.cpp:80-83`) is unreachable here and
+                 * is ported as dead code by omission of the `#else` body
+                 * (spec §21.13). */
+                li_val = i64::from(self.pch_get());
+                li_val = (li_val << 8) + i64::from(self.pch_get());
+                li_val = (li_val << 8) + i64::from(self.pch_get());
+                li_val = (li_val << 8) + i64::from(self.pch_get());
+                li_val = (li_val << 8) + i64::from(self.pch_get());
+                li_val = (li_val << 8) + i64::from(self.pch_get());
+                li_val = (li_val << 8) + i64::from(self.pch_get());
+                li_val = (li_val << 8) + i64::from(self.pch_get());
+                li_val
+            }
         }
     }
 
