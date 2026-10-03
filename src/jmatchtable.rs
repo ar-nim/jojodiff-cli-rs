@@ -28,8 +28,8 @@
 //!   every field of a node before anyone reads it, and the "stale `ipNxt`"
 //!   walks (`addNew` deliberately leaves the last node's next dangling) read
 //!   values the C++ also wrote earlier, so behavior is identical.
-//! * The ctor parameters `miAhdMax` (stored, never read) and `MAXGLD` are
-//!   dead at 0.8.5 and ported as dead code (spec §21.13).
+//! * The ctor parameter `miAhdMax` (stored, never read) is dead at 0.8.5 and
+//!   ported as dead code (spec §21.13).
 //!
 //! Debug prints (`DBGMCH`/`DBGCMP` sites) live behind the `debug` feature
 //! with their exact C++ format strings (`JMatchTable.cpp:154,278,350,391,
@@ -83,12 +83,6 @@ pub const MAXDST: i64 = 2 * 1024 * 1024;
 /// Min compare distance (`MINDST`, `JMatchTable.cpp:41`) — on SSD +/- 4ms at
 /// 1Gb/s + 1ms seek time.
 pub const MINDST: i64 = 1024;
-/// Max distance for gliding matches (`MAXGLD`, `JMatchTable.cpp:42`).
-///
-/// Dead code: no reference to this macro remains in the 0.8.5 sources —
-/// ported as a dead constant for parity (spec §21.13).
-#[allow(dead_code)]
-pub const MAXGLD: i32 = 128;
 
 /// Fuzzy factor (`FZY`, `JMatchTable.cpp:46`): for differences smaller than
 /// this number of bytes, take the longest looking sequence. Reason: control

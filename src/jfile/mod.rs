@@ -53,12 +53,6 @@ pub trait JFile {
         -1
     }
 
-    /// Size of the buffer, `-1` = no buffering (C++ virtual with a `-1`
-    /// default, `JFile.h:133`).
-    fn get_buf_sze(&self) -> i64 {
-        -1
-    }
-
     /// Get access to the (fast) buffered read (C++ virtual with a null
     /// default, `JFile.h:144-146`).
     ///

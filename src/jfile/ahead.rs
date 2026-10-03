@@ -655,11 +655,6 @@ impl<R: Read + Seek> JFile for JFileAhead<R> {
         self.pos_inp - self.buf_usd
     }
 
-    /// Size of the buffer (JFileAhead.cpp:111-113).
-    fn get_buf_sze(&self) -> i64 {
-        self.buf_sze
-    }
-
     /// Get access to buffered read (JFileAhead.cpp:210-254); the run never
     /// wraps the ring, so a slice can represent it.
     fn getbuf(&mut self, pos: i64, len: &mut i64, typ: ReadType) -> Option<&[u8]> {
@@ -901,7 +896,6 @@ mod tests {
         assert_eq!(f.seekcount(), 1);
         assert_eq!(f.get_buf_pos() % 64, 0, "reset lands on a block boundary");
         assert_eq!(f.get_buf_pos(), 4992);
-        assert_eq!(f.get_buf_sze(), 1024);
         // A second reset from a far-before position (3000 + 1024 - 64 = 3960
         // <= 4992: reset, not scrollback) aligns the same way.
         assert_eq!(f.get(3000, ReadType::Read), pat(3000));
