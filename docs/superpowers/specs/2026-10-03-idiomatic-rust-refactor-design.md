@@ -155,8 +155,12 @@ src/cli/
 
 ### 7.2 Error model
 
+- Dependencies (verified against crates.io / Context7, 2026-10-03):
+  `thiserror = "2"` (latest 2.0.21) and `anyhow = "1"` (latest 1.0.104);
+  both are dtolnay-maintained with MSRVs well below the crate's 1.85 floor.
 - `#[derive(Debug, thiserror::Error)] pub enum CliError` — variants carry
-  `std::io::Error` plus which-file context (first/second/output/patch).
+  `std::io::Error` via `#[from]` plus which-file context fields
+  (first/second/output/patch), with `#[error("...")]` Display messages.
 - Engine return codes stay `i32` (layered ruling); the CLI boundary wraps
   them. One function maps `Result<i32, CliError>` → process exit code +
   byte-pinned stderr text — the single place error text lives.
