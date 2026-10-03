@@ -1,6 +1,7 @@
 # Idiomatic-Rust Refactor — Design Specification (0.8.5 → 0.9.0)
 
-Status: approved design, 2026-10-03
+Status: approved design, revised 2026-10-03 (fidelity upgraded from
+"layered" to "byte-contract only" by user ruling mid-design)
 Companion to: [`2026-10-01-jojodiff-1to1-port-spec.md`](2026-10-01-jojodiff-1to1-port-spec.md)
 (the port spec remains the behavioral authority; this spec governs internal structure only)
 
@@ -26,24 +27,27 @@ refactoring-patterns quick diagnostic. The drivers:
 
 ## 2. Ratified decisions
 
-Four decisions were made interactively and bind this design:
-
-1. **Fidelity: layered.** The CLI layer receives the full idiomatic
-   treatment; the engine core receives conservative surgery only —
-   de-duplication and state extraction with the i32 sentinel protocol and
-   per-function C++ anchors intact.
-2. **Dependencies: `thiserror` (lib) + `anyhow` (binary).** The std-only
-   property is retired. `Getopt` stays hand-rolled: upstream's option
-   grammar (lossy `c_atoi` parsing, stale usage text, argv[0] dispatch)
-   cannot be expressed by clap without behavior drift.
+1. **Fidelity: byte-contract only.** The observable behavior — patch,
+   listing and verbose **bytes**, CLI stdout/stderr **bytes**, **exit
+   codes** — is the sole contract, pinned by the golden/oracle suites.
+   Internals become freely idiomatic Rust wherever an idiomatic form can
+   still pass every pinned test. The C++ implementation is reference
+   material for *behavior*, not a template for *structure*. (Amended
+   2026-10-03 from the original "layered" ruling; all breaking internal
+   changes land in the single 0.9.0 release.)
+2. **Dependencies: `thiserror` (lib, engine-wide) + `anyhow` (binary) +
+   test trio (`tempfile`, `assert_cmd`, `predicates`) as dev-deps.** The
+   std-only property is retired. `Getopt` stays hand-rolled — no arg-parsing
+   crate can tokenize the pinned grammar (lossy `c_atoi`, byte-exact
+   errors, argv[0] dispatch). See §13 for the full decision record.
 3. **Version: 0.9.0** continuing the mirror lineage (0.8.x = port-parity
    era, 0.9.x = idiomatic-Rust era, 1.0.0 reserved for lib-API stability).
    The printed tool version `"0.8.5 (beta) 2020"` is a byte-pinned upstream
    constant and never moves.
-4. **Sequencing: bottom-up.** Phase 1 de-dup → Phase 2 engine surgery →
-   Phase 3 CLI idiomatic treatment → Phase 4 docs/version. Each phase
-   shrinks the surface the next touches; the riskiest change (CLI) lands on
-   a stabilized base.
+4. **Sequencing: bottom-up, five phases.** P1 de-dup → P2 engine surgery →
+   P3 engine type modernization → P4 CLI idiomatic treatment → P5
+   docs/version. Each phase shrinks the surface the next touches; all
+   breaking changes land once, in 0.9.0.
 
 ## 3. Invariants (what never changes)
 
@@ -51,31 +55,30 @@ Every phase is behavior-preserving, pinned by the existing suites:
 
 - Patch/listing/verbose **bytes**, CLI stdout/stderr **bytes**, and **exit
   codes** are identical. Goldens are never regenerated.
-- The engine's i32 sentinel protocol (`EXI_*` codes, `EOF`/`EOB` from
-  `JFile::get`) is untouched (layered ruling).
-- `Getopt` behavior, `c_atoi` quirks, stale user-visible text (§21.10),
-  dead code ported as dead (§21.13), stats quirks (§21.14), and every other
-  §21 do-not-fix marker remain as-is.
+- The port spec §21 rulings remain the behavioral authority, including the
+  do-not-fix markers (§21.3 broken `-t`, §21.4 `-y` → exit 20, §21.10 stale
+  text replicated verbatim, §21.14 stats quirks, §21.17 negative-position
+  EOF gate, §21.16 `--compat-081`). Behavior follows the code, text
+  follows the text.
+- `Getopt` parsing behavior and `c_atoi` semantics are pinned (they parse
+  the CLI contract).
 - The write-error policy is oracle-pinned, not accidental: diff path
   silently ignores write errors (`jdiff A B /dev/full` → exit 0, matching
   the C++ unchecked `putc`s); patch path checks writes → `EXI_WRI`
   (exit 9). The refactor makes this explicit; it does not change it.
-- Engine modules keep their upstream-mirroring names and ported identifier
-  names.
+- **No longer invariant** (revoked by the byte-contract ruling): the
+  engine's internal i32 sentinel protocol. It is modernized in Phase 3;
+  the `EXI_*` constants survive as the exit-code vocabulary at the CLI
+  boundary.
 
 ## 4. Anchor policy
 
-C++ traceability comments (`JDiff.cpp:389`) are load-bearing while the port
-is the verification artifact. When code moves during extraction, its anchors
-travel with it under a greppable tag convention:
-
-```rust
-// port:JDiff.cpp:389-718 — extracted into SearchState::run_scan
-```
-
-Quirk/do-not-fix comments (§21.13, §21.14, and the per-module quirk
-censuses) are relocated verbatim, never deleted. Phase 4 documents the
-convention in CONTRIBUTING.md.
+C++ traceability comments (`JDiff.cpp:389`) are **verification metadata,
+not a constraint**. They travel with code that moves when convenient, and
+new idiomatic code does not owe them anything. Quirk/do-not-fix comments
+(§21 markers, per-module quirk censuses) are behavioral documentation and
+are relocated verbatim, never deleted. Phase 5 documents the `// port:`
+tag convention in CONTRIBUTING.md as optional archaeology.
 
 ## 5. Phase 1 — mechanical de-duplication (zero behavior risk)
 
@@ -90,9 +93,7 @@ Each item lands as its own green-to-green commit:
    (jout/asc.rs:71-83) and `JOutRgn::put_len` (jout/rgn.rs:75-87), decoder
    `JPatcht::uf_get_int` (jpatcht.rs:90-124). One module holds the tier
    constants and boundary math; JOutRgn's deliberate 4/8 return values
-   (§21.14) remain a documented local deviation at its call site. Decoder
-   and encoder now share one definition — closing the sync gap that only
-   tests previously protected.
+   (§21.14) remain a documented local deviation at its call site.
 3. `open_output` helper — the identical output-open + error + `exit(-EXI_OUT)`
    blocks ×3 (bin/jdiff.rs:445-454, 658-667, 669-678).
 4. `make_writer` helper — the `out_is_stdout && DBG_TO_STDOUT` raw-lock vs
@@ -108,142 +109,204 @@ Each item lands as its own green-to-green commit:
 8. `cli/opts.rs` short-cluster restructure — removes the `String` clone per
    short-option character (opts.rs:266, 295) via `mem::take` or
    index-based scanning.
+9. **Dead-code removal where provably unreachable** (permitted by the
+   byte-contract ruling; §21.13 remains the inventory): `get_buf_sze`
+   (zero non-test callers), the COLLISION_LOW branch, `MAXGLD`. Each
+   removal requires a reachability argument in the commit message.
 
 Rule-of-Three discipline applies in reverse: nothing here is extracted
 "for symmetry"; every item above is a repeated *decision* (audit §5).
 
-## 6. Phase 2 — engine conservative surgery
+## 6. Phase 2 — engine structural surgery
 
 1. **`SearchState` extraction (jdiff.rs).** The 13-field rolling search
    state (`az_org` … `hsh_err`) becomes a private sub-struct; the scan
    methods take `&mut SearchState` (+ `&mut dyn JFile` as needed). This
    ends the double `let Self {...} = self` destructure workaround in
-   `search`. Field names unchanged (port discipline).
+   `search`. Field names unchanged.
 2. **`JFileAhead::get_fromfile` arm split (ahead.rs:412-549).** The
    Reset/Append/Scrollback strategy blocks become private functions; the
    three-way dispatch stays a readable match.
 3. **`JMatchTable::add` (224 L)** splits into join/allocate/evaluate steps
-   *only where anchor-clean* — if a step boundary would split a C++ line
-   anchor's span, it stays inline. `cleanup`'s duplicated cfg(debug)
+   where the boundaries are clean. `cleanup`'s duplicated cfg(debug)
    sanity walks move behind `#[cfg(feature = "debug")]` helpers.
 4. **`build_full_index` slow/fast loops (jdiff.rs:982-1011 vs 1014-1022)**
    are unified **only after verification** that they encode the same
    decision; if they differ subtly (a ported quirk), they stay separate
    with a comment saying why.
-5. No protocol, signature-shape, or identifier renames in engine code.
 
-## 7. Phase 3 — CLI idiomatic treatment
+## 7. Phase 3 — engine type modernization
 
-### 7.1 Module layout
+The highest-leverage idiomatic change, enabled by the byte-contract ruling:
+
+1. **`ByteOrEof` for `JFile::get`.** The i32 sentinel channel (0-255 /
+   `EOF` / `EOB` / `EXI_SEK` / `EXI_RED`) becomes an enum —
+   `Byte(u8) / Eof / Eob / Err(JDiffError)`. Every `< 0` / `<= EOF` /
+   `< EOB` comparison site becomes a match. The §21.17 negative-position
+   gate must survive the reshape as `Eof` (it is pinned by unit tests).
+2. **`Op` opcode enum.** `ESC/MOD/INS/DEL/EQL/BKT` i32 consts become a
+   `#[repr(u8)]` enum (byte values 0xA2-0xA7 stay the wire truth); the 23
+   `as u8` casts in `JOutBin` and friends disappear. The decoder keeps
+   accepting arbitrary bytes as "not an opcode" exactly as today.
+3. **`Result` engine-wide.** The 27 `-> i32` status APIs become
+   `Result<T, JDiffError>`; the thiserror enum is defined once in the lib
+   (engine + CLI phases share it). The five pinned `eprintln!` error texts
+   move into the error's Display, printed at the CLI boundary — byte
+   order/content verified against the oracle goldens. cfg(debug)
+   `process::exit` parity asserts (ahead.rs:391,403) are re-expressed as
+   debug asserts or error returns with identical observable behavior.
+4. **`Node.cmp` sentinel field** becomes an enum with payload
+   (`Run(i32)` / the CMPINV/CMPSKP/CMPEOB sentinels / the negated EOB
+   estimates `is_best` stores), making `is_old2_skip`/`is_old2_reuse`
+   self-documenting. The negated-estimate encoding trick must be
+   represented faithfully — it is algorithm, not accident.
+
+## 8. Phase 4 — CLI idiomatic treatment
+
+### 8.1 Module layout
 
 ```
-src/bin/jdiff.rs    ~60 lines: argv → cli::run(argv) → exit-code + stderr
+src/bin/jdiff.rs    ≤80 lines: argv → cli::run(argv) → exit-code + stderr
 src/cli/
   mod.rs            module re-exports (exists; gains the new items)
   run.rs            orchestrator (real_main's control flow, no exits)
   config.rs         pure option/buffer-sizing math
-  diff_phase.rs     run_diff_phase(inputs, config) -> i32
+  diff_phase.rs     run_diff_phase(inputs, config) -> Result<i32, JDiffError>
   patch_phase.rs    run_patch_phase (also the -t test mode)
   report.rs         greeting/usage/notes/echo/statistics text fns
-  error.rs          CliError + the single error→(code, stderr) boundary
-  opts.rs           Getopt (moved logic lands around it)
+  error.rs          JDiffError boundary: error → (exit code, stderr bytes)
+  opts.rs           Getopt (behavior pinned; internals may modernize)
 ```
 
 `Function` (Diff/Patch/Dedup/Test) moves from the binary into `cli`.
 `print_usage`/`print_notes` stay byte-pinned text blocks, relocated to
-`report.rs` with their anchors.
+`report.rs`.
 
-### 7.2 Error model
+### 8.2 Error model
 
 - Dependencies (verified against crates.io / Context7, 2026-10-03):
   `thiserror = "2"` (latest 2.0.21) and `anyhow = "1"` (latest 1.0.104);
-  both are dtolnay-maintained with MSRVs well below the crate's 1.85 floor.
-- `#[derive(Debug, thiserror::Error)] pub enum CliError` — variants carry
-  `std::io::Error` via `#[from]` plus which-file context fields
-  (first/second/output/patch), with `#[error("...")]` Display messages.
-- Engine return codes stay `i32` (layered ruling); the CLI boundary wraps
-  them. One function maps `Result<i32, CliError>` → process exit code +
-  byte-pinned stderr text — the single place error text lives.
-- All 19 inline `exit()` sites in the current binary become returned codes
-  or `CliError`; the library's cli module never exits the process.
+  both MSRVs sit well below the crate's 1.85 floor.
+- One lib-wide `#[derive(Debug, thiserror::Error)] pub enum JDiffError`
+  (Phase 3 introduces it engine-side; Phase 4 the CLI phases use it):
+  variants carry `std::io::Error` via `#[from]` plus which-file context,
+  with `#[error("...")]` Display messages that reproduce the pinned texts.
+- One boundary function maps `Result<i32, JDiffError>` → process exit
+  code + byte-pinned stderr — the single place error text is printed.
+- All 19 inline `exit()` sites become returned codes or `JDiffError`; the
+  library never exits the process.
 - `anyhow` is used in the binary wrapper only, for context around
   `cli::run`; no `anyhow` types cross into the lib.
 
-### 7.3 Write-error policy (explicit)
+### 8.3 Write-error policy (explicit)
 
-`IgnoringWriter` is retained and renamed/documented as the diff-path
-policy (oracle: `/dev/full` → exit 0). The patch path's checked writes →
-`EXI_WRI` (oracle: exit 9). The JOut panicking write helpers become
-infallible-by-policy with a policy comment citing the oracle rows — not
-removed.
+`IgnoringWriter` is retained and documented as the diff-path policy
+(oracle: `/dev/full` → exit 0). The patch path's checked writes → `EXI_WRI`
+(oracle: exit 9). With Phase 3's `Result` plumbing, the JOut panicking
+write helpers become properly checked-or-explicitly-ignored with a policy
+comment citing the oracle rows.
 
-### 7.4 New unit tests
+### 8.4 Test modernization (dev-deps adopted)
 
-As phases become in-process callable, unit tests land for: argv[0]
-dispatch, option parsing edge cases beyond Getopt's existing tests,
-buffer-sizing math, each phase function's return codes, and the
-error→(code, stderr) mapping. These are additions; the subprocess
-round-trip suite remains the byte-parity authority.
+- `tempfile` (3.x): replaces the hand-rolled `temp_dir`/`DirGuard` helpers
+  (193 pattern matches across 5 test files, two competing conventions).
+  RAII auto-delete structurally mitigates the tmpfs-leak failure mode.
+- `assert_cmd` (2.x) + `predicates` (3.x): simplify the 13 `Command::new`
+  sites — cargo-bin resolution, stdin writing, output assertions.
+- Kept hand-rolled where behavior demands it: seekable-stdin tests keep
+  `Stdio::from(File)` (a real file is the behavior under test); argv[0]
+  dispatch tests keep the copy-binary-under-new-name step (no crate does
+  this); the francisdb `jojodiff` cross-validation dev-dep stays.
+- New unit tests land for: argv[0] dispatch, buffer-sizing math, each
+  phase function, and the error→(code, stderr) mapping. The subprocess
+  round-trip suite remains the byte-parity authority.
 
-## 8. Phase 4 — docs, versioning, polish
+## 9. Phase 5 — docs, versioning, polish
 
 - `version = "0.9.0"` + README versioning-policy paragraph (mirror
   lineage; printed version constant unaffected).
-- lib.rs and README drop the "std-only" claim; state the two dependencies
-  and why.
-- CONTRIBUTING.md: the `// port:` anchor convention, the do-not-fix
-  pointer to port spec §21, and the green-to-green refactoring rule.
-- `//!` module docs on all new cli modules; `///` on new public items
-  (Errors/Panics sections where relevant).
-- MSRV stays 1.85 (thiserror/anyhow both support it; CI msrv job guards).
+- lib.rs and README drop the "std-only" claim; document the dependency
+  set and rationale (§13).
+- CONTRIBUTING.md: the `// port:` anchor convention (optional metadata),
+  the do-not-fix pointer to port spec §21, and the green-to-green
+  refactoring rule.
+- `//!` module docs on all new/changed modules; `///` on public items.
+- MSRV stays 1.85 (all deps support it; dev-dep MSRVs cannot regress the
+  gate because the CI msrv job runs plain `cargo check`).
 
-## 9. Verification and safety rails
+## 10. Verification and safety rails
 
 - Per-commit gate: `cargo fmt --all --check`,
   `cargo clippy --all-targets --all-features --locked -- -D warnings`,
   `cargo test --all-features` — all green before and after every
-  transformation; one transformation per commit (refactoring-patterns
-  green-to-green discipline).
-- Goldens byte-compare on every run; the CI oracle job (ubuntu) guards
-  live byte-parity; crossver guards 0.8.1 patch applicability.
+  transformation; one transformation per commit.
+- Goldens byte-compare on every run; the CI oracle job guards live
+  byte-parity; crossver guards 0.8.1 patch applicability.
 - **Bounded loops only** in any test writing under temp dirs: this
   project's history includes a runaway `jdiff -u` test loop filling the
   7.8 GB tmpfs `/tmp` and killing the session via disk-quota cascade. No
-  unbounded retries; every generated artifact has a size cap.
+  unbounded retries; every generated artifact has a size cap; `tempfile`'s
+  drop-cleanup is the default, never `keep()`.
 - Branch `refactor/idiomatic-rust` off main; task-granular conventional
-  commits (`refactor:`, `test:`, `docs:`); merge to main when fully green.
+  commits; merge to main when fully green.
 
-## 10. Acceptance criteria
+## 11. Acceptance criteria
 
-1. Full suite green (194 existing tests + new CLI unit tests), CI matrix
+1. Full suite green (194 existing tests + new unit tests), CI matrix
    including the oracle job.
 2. Goldens and all byte-parity checks unmodified and passing — no golden
    file changes in the diff.
 3. `src/bin/jdiff.rs` ≤ 80 lines, no `exit()` outside `main`; no
-   `process::exit` in library code except existing cfg(debug) oracle-parity
-   asserts.
+   `process::exit` in library code.
 4. `JDiff::search` contains zero `let Self {...} = self` destructures.
-5. The audit's duplication inventory (§5 above) fully consolidated.
-6. clippy clean at `-D warnings`; rustfmt clean.
-7. Re-scored quick diagnostic ≥ 8/10 (methods <10 lines and duplication
-   rows are the expected movers; the i32 sentinel row stays by design).
-8. Version 0.9.0, docs updated, anchors greppable via `// port:`.
+5. The audit's duplication inventory (§5) fully consolidated; §5.9 dead
+   code removed with reachability arguments.
+6. `JFile::get` returns `ByteOrEof`; opcode values flow as `Op` through
+   writers and decoder (zero opcode `as u8` casts); engine public APIs are
+   `Result`-based.
+7. clippy clean at `-D warnings`; rustfmt clean.
+8. Re-scored quick diagnostic ≥ 8/10.
+9. Version 0.9.0, docs updated, dependency record (§13) reflected in
+   README.
 
-## 11. Risks and mitigations
+## 12. Risks and mitigations
 
 | Risk | Mitigation |
 |---|---|
-| Subtle engine behavior drift on extraction | Goldens + oracle job pin bytes; anchors travel; quirk comments relocate verbatim |
-| Extraction splits a C++ anchor span | Step boundaries yield to anchor spans (Phase 2 rule 3) |
+| Subtle engine behavior drift on extraction/re-typing | Goldens + oracle job pin bytes; §21 quirk markers relocate verbatim |
+| Sentinel-reshape loses a pinned edge (EOB soft-ahead-only, §21.17 EOF gate, `is_best` negated estimates) | Each has a pinning test today; the enum arms are named after the sentinels so mismatches fail loudly |
 | CLI text drift (usage/greeting/errors) | Byte-pinned blocks move whole into `report.rs`; round-trip suite asserts exact bytes |
-| Wrong abstraction from over-dedup | Rule-of-Three in reverse: only audit-listed same-decision duplicates merge |
-| tmpfs fill from test loops | §9 bounded-loops constraint carried into the implementation plan |
+| Wrong abstraction from over-dedup | Only audit-listed same-decision duplicates merge |
+| Dead-code removal that was not actually dead | Reachability argument required per item (§5.9); full-suite gate |
+| tmpfs fill from test loops | §10 bounded-loops constraint; tempfile RAII default |
 
-## 12. Out of scope
+## 13. Dependency decision record
+
+Adopted:
+
+| Crate | Role | Why |
+|---|---|---|
+| `thiserror = "2"` | lib, engine-wide error enum | Idiomatic typed errors; replaces 27 `-> i32` APIs |
+| `anyhow = "1"` | binary wrapper only | Ergonomic context at the top level |
+| `tempfile = "3"` | dev | Replaces 193 hand-rolled temp-dir sites; RAII cleanup |
+| `assert_cmd = "2"`, `predicates = "3"` | dev | Standard CLI-test ergonomics for 13 subprocess sites |
+| `proptest = "1"` (optional, post-refactor) | dev | Property-based round-trip fuzzing, size-capped |
+
+Considered and rejected:
+
+| Candidate | Ruling |
+|---|---|
+| `log` / `tracing` | Every diagnostic byte is golden-pinned (`.vv.stderr` files, debug oracle); a framework needs a custom formatter that writes the same hand-written strings — DRY-negative. Verbosity gates code paths, not levels. |
+| `clap` / `pico-args` / any parser | Cannot express the pinned grammar (lossy `c_atoi`, byte-exact errors, argv[0] dispatch). Getopt internals may modernize; its behavior cannot. |
+| `primal` | ~30 pinned, tested lines vs a dependency — cost/benefit fails. |
+| `memmap2` | Perf change with pipe-semantics implications; excluded from this refactor. |
+| `insta` | Binary goldens + exact stderr compare well with `fs::read` + `pretty_assertions`. |
+| `exitcode`/`sysexits`, `serde`, bitflags | Exit codes upstream-pinned; no config surface; flag arrays are behavior. |
+
+## 14. Out of scope
 
 - Any behavioral change, including fixing upstream bugs already deviated
   from per §21 (the negative-position EOF gate stays).
-- `ByteOrEof`/`Op` enum type overhaul of the engine (deferred; would
-  revisit at 1.0 planning).
-- Replacing `Getopt` with clap; new features; performance work beyond
+- Replacing `Getopt` behavior; new features; performance work beyond
   removing the audited redundant clones.
+- Fuzzing infrastructure beyond the optional `proptest` follow-up.
