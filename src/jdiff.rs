@@ -254,6 +254,33 @@ impl<'a> JDiff<'a> {
         self.az_org += 1;
     }
 
+    /// The equal-run fast loop (`JDiff.cpp:201-224`): counts and consumes
+    /// equal bytes up to the small-lap limit. `index_src` is the
+    /// `src_scn == 0` mode's incremental source indexing — the only
+    /// difference between the C++'s two loops.
+    fn scan_equal_run(
+        &mut self,
+        pos_org: &mut i64,
+        val_org: &mut i32,
+        pos_new: &mut i64,
+        val_new: &mut i32,
+        lap_sml: i64,
+        index_src: bool,
+    ) -> i64 {
+        let mut cnt: i64 = 0;
+        while *val_org == *val_new && *val_new >= 0 && *pos_new < lap_sml {
+            cnt += 1;
+            if index_src && *pos_org == self.az_org {
+                self.hash_add_org(*val_org);
+            }
+            *pos_org += 1;
+            *val_org = self.org.get(*pos_org, ReadType::Read);
+            *pos_new += 1;
+            *val_new = self.r#new.get(*pos_new, ReadType::Read);
+        }
+        cnt
+    }
+
     /// Difference function (`JDiff::jdiff`, `JDiff.cpp:150-335`): compares
     /// both files byte by byte and writes the differences to the output
     /// handler.
@@ -270,7 +297,6 @@ impl<'a> JDiff<'a> {
 
         let mut lb_eql = false; /* accumulate equal bytes? */
         let mut lz_eql: i64 = 0; /* accumulated equal bytes */
-        let mut lz_cnt: i64; /* counter */
 
         let mut li_fnd: i32 = 0; /* offsets are pointing to a valid solution (= equal regions)? */
         let mut lz_ahd: i64 = 0; /* number of bytes to advance on both files to reach the solution */
@@ -321,32 +347,17 @@ impl<'a> JDiff<'a> {
                     lc_org = self.org.get(lz_pos_org, ReadType::Read);
                     lz_pos_new += 1;
                     lc_new = self.r#new.get(lz_pos_new, ReadType::Read);
-                } else if self.src_scn == 0 {
-                    /* fast loop with incremental source indexing
-                     * (JDiff.cpp:201-214) */
-                    lz_cnt = 0;
-                    while lc_org == lc_new && lc_new >= 0 && lz_pos_new < lz_lap_sml {
-                        lz_cnt += 1;
-                        if lz_pos_org == self.az_org {
-                            self.hash_add_org(lc_org);
-                        }
-                        lz_pos_org += 1;
-                        lc_org = self.org.get(lz_pos_org, ReadType::Read);
-                        lz_pos_new += 1;
-                        lc_new = self.r#new.get(lz_pos_new, ReadType::Read);
-                    }
-                    lz_eql += lz_cnt; // increase equal counter
-                    lz_ahd -= lz_cnt; // decrease ahead counter
                 } else {
-                    /* fast loop (JDiff.cpp:215-224) */
-                    lz_cnt = 0;
-                    while lc_org == lc_new && lc_new >= 0 && lz_pos_new < lz_lap_sml {
-                        lz_cnt += 1;
-                        lz_pos_org += 1;
-                        lc_org = self.org.get(lz_pos_org, ReadType::Read);
-                        lz_pos_new += 1;
-                        lc_new = self.r#new.get(lz_pos_new, ReadType::Read);
-                    }
+                    /* fast loop (JDiff.cpp:201-224): the src_scn==0 variant
+                     * incrementally indexes the source. */
+                    let lz_cnt = self.scan_equal_run(
+                        &mut lz_pos_org,
+                        &mut lc_org,
+                        &mut lz_pos_new,
+                        &mut lc_new,
+                        lz_lap_sml,
+                        self.src_scn == 0,
+                    );
                     lz_eql += lz_cnt; // increase equal counter
                     lz_ahd -= lz_cnt; // decrease ahead counter
                 }
