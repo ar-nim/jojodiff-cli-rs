@@ -39,7 +39,7 @@ impl JFile for JFileMem {
         if pos < 0 || pos as usize >= self.data.len() {
             EOF
         } else {
-            self.data[pos as usize] as i32
+            i32::from(self.data[pos as usize])
         }
     }
 

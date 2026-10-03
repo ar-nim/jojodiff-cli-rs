@@ -253,7 +253,7 @@ impl<R: Read + Seek> JFileAhead<R> {
                 }
 
                 // return data at current position (JFileAhead.cpp:197)
-                self.buf[off] as i32
+                i32::from(self.buf[off])
             }
         }
     }
@@ -280,7 +280,7 @@ impl<R: Read + Seek> JFileAhead<R> {
                 p8(pos),
                 typ as i32,
                 byte as char,
-                byte as u32,
+                u32::from(byte),
                 self.buf.as_ptr().wrapping_add(off),
             ));
         }
@@ -301,7 +301,7 @@ impl<R: Read + Seek> JFileAhead<R> {
                 p8(pos),
                 typ as i32,
                 byte as char,
-                byte as u32,
+                u32::from(byte),
                 self.buf.as_ptr().wrapping_add(off),
             ));
         }
@@ -312,7 +312,7 @@ impl<R: Read + Seek> JFileAhead<R> {
                 p8(pos),
                 typ as i32,
                 byte as char,
-                byte as u32,
+                u32::from(byte),
                 self.buf.as_ptr().wrapping_add(off),
             ));
         }
@@ -397,7 +397,7 @@ impl<R: Read + Seek> JFileAhead<R> {
                     pos,
                     az_len,
                     typ as i32,
-                    self.buf[off as usize] as u32,
+                    u32::from(self.buf[off as usize]),
                     self.buf.as_ptr().wrapping_add(off as usize),
                 ));
                 process::exit(-EXI_SEK);
@@ -611,7 +611,7 @@ impl<R: Read + Seek> JFile for JFileAhead<R> {
             // mzPosRed++; miRedSze--; return *mpRed++;
             self.pos_red += 1;
             self.red_sze -= 1;
-            let byte = self.buf[self.ptr_red] as i32;
+            let byte = i32::from(self.buf[self.ptr_red]);
             self.ptr_red += 1;
             if self.ptr_red == self.buf.len() {
                 self.ptr_red = 0;
@@ -1034,8 +1034,8 @@ mod tests {
         let mut len: i64 = -999;
         let run = f.getbuf(50, &mut len, ReadType::Read).expect("buffered");
         assert_eq!(len, 62, "bytes available from pos to the input position");
-        assert_eq!(run[0] as i32, pat(50));
-        assert_eq!(run[61] as i32, pat(111));
+        assert_eq!(i32::from(run[0]), pat(50));
+        assert_eq!(i32::from(run[61]), pat(111));
         assert_eq!(f.seekcount(), 0, "in-buffer getbuf does no I/O");
         let mut len = 0;
         assert!(f.getbuf(2048, &mut len, ReadType::Read).is_none());
@@ -1073,19 +1073,19 @@ mod tests {
         let mut len: i64 = -999;
         let run = f.getbuf(192, &mut len, ReadType::Read).expect("buffered");
         assert_eq!(len, 64, "full window available from the oldest byte");
-        assert_eq!(run[0] as i32, pat(192));
+        assert_eq!(i32::from(run[0]), pat(192));
         // Newest buffered byte: off lands on buf_sze - 1 (assert 1's
         // `off >= buf.len()` boundary).
         let mut len: i64 = -999;
         let run = f.getbuf(255, &mut len, ReadType::Read).expect("buffered");
         assert_eq!(len, 1);
-        assert_eq!(run[0] as i32, pat(255));
+        assert_eq!(i32::from(run[0]), pat(255));
         // Mid-window byte across the ring seam (ptr_inp == 0): off wraps.
         let mut len: i64 = -999;
         let run = f.getbuf(224, &mut len, ReadType::Read).expect("buffered");
         assert_eq!(len, 32);
-        assert_eq!(run[0] as i32, pat(224));
-        assert_eq!(run[31] as i32, pat(255));
+        assert_eq!(i32::from(run[0]), pat(224));
+        assert_eq!(i32::from(run[31]), pat(255));
         // The EOF gate precedes the asserts: a negative position returns
         // EOF (§21.17) rather than reaching the `pos < pos_inp - buf_usd`
         // assert arm that the C++ debug build dies on (exit 6).

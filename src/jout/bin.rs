@@ -597,22 +597,22 @@ mod tests {
             (EQL, 1, 0x63, 0x63),
             (EQL, 1, 0x64, 0x64),
             (EQL, 21, 0, 0), // pending equal run: 25 bytes
-            (MOD, 1, 0x00, b'M' as i32),
-            (MOD, 1, 0x00, b'O' as i32),
-            (MOD, 1, 0x00, b'D' as i32),
-            (MOD, 1, 0x00, b'I' as i32),
-            (MOD, 1, 0x00, b'F' as i32),
-            (MOD, 1, 0x00, b'I' as i32),
-            (MOD, 1, 0x00, b'E' as i32),
-            (MOD, 1, 0x00, b'D' as i32),
+            (MOD, 1, 0x00, i32::from(b'M')),
+            (MOD, 1, 0x00, i32::from(b'O')),
+            (MOD, 1, 0x00, i32::from(b'D')),
+            (MOD, 1, 0x00, i32::from(b'I')),
+            (MOD, 1, 0x00, i32::from(b'F')),
+            (MOD, 1, 0x00, i32::from(b'I')),
+            (MOD, 1, 0x00, i32::from(b'E')),
+            (MOD, 1, 0x00, i32::from(b'D')),
             (EQL, 1, 0x63, 0x63),
             (EQL, 1, 0x64, 0x64),
             (EQL, 1, 0x65, 0x65),
             (EQL, 1, 0x66, 0x66),
             (EQL, 7, 0, 0), // pending equal run: 11 bytes
-            (MOD, 1, 0x00, b'X' as i32),
-            (MOD, 1, 0x00, b'Y' as i32),
-            (MOD, 1, 0x00, b'Z' as i32),
+            (MOD, 1, 0x00, i32::from(b'X')),
+            (MOD, 1, 0x00, i32::from(b'Y')),
+            (MOD, 1, 0x00, i32::from(b'Z')),
         ]
         .to_vec();
 

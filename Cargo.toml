@@ -26,6 +26,16 @@ path = "src/bin/jdiff.rs"
 default = []
 debug = []
 
+[lints.rust]
+future-incompatible = "deny"
+
+[lints.clippy]
+cast_lossless = "deny"
+
+# Deliberately NOT enabled (spec §15): cast_possible_truncation,
+# cast_sign_loss, cast_possible_wrap — the port's narrowing arithmetic is
+# byte-pinned to JojoDiff 0.8.5 C++ behavior — and pedantic-at-large.
+
 [dependencies]
 # none — std only
 

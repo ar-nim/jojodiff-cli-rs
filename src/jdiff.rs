@@ -572,7 +572,7 @@ impl<'a> JDiff<'a> {
                 // - except at the start of the file (azRedOrg < miAhdMax)
                 if *az_org < i64::from(*ahd_max) / 2 {
                     // C++: int assignment of the off_t difference.
-                    (*ahd_max as i64 - *az_org) as i32
+                    (i64::from(*ahd_max) - *az_org) as i32
                 } else {
                     (i64::from(*ahd_max) / 2 - (*az_org - red_org)) as i32
                 }
@@ -625,7 +625,7 @@ impl<'a> JDiff<'a> {
          */
         li_max = if *mz_ahd_new > red_new {
             // C++: int assignment of the off_t difference.
-            (*ahd_max as i64 - (*mz_ahd_new - red_new)) as i32
+            (i64::from(*ahd_max) - (*mz_ahd_new - red_new)) as i32
         } else {
             *ahd_max
         };
@@ -1096,7 +1096,7 @@ mod tests {
         let mut k = 0u32;
         let mut keys = Vec::new();
         for _ in 0..4 {
-            k = hash_key(k, &mut old, b'a' as i32, &mut eql);
+            k = hash_key(k, &mut old, i32::from(b'a'), &mut eql);
             keys.push(k);
         }
         assert_eq!(keys, vec![97, 292, 683, 1466]);
@@ -1133,11 +1133,11 @@ mod tests {
         let mut old = -1i32;
         let mut k = 0u32;
         for _ in 0..40 {
-            k = hash_key(k, &mut old, b'a' as i32, &mut eql);
+            k = hash_key(k, &mut old, i32::from(b'a'), &mut eql);
         }
         assert_eq!(eql, SMPSZE);
         let before = k;
-        k = hash_key(k, &mut old, b'a' as i32, &mut eql);
+        k = hash_key(k, &mut old, i32::from(b'a'), &mut eql);
         assert_eq!(k, before.wrapping_mul(2).wrapping_add(97 + SMPSZE as u32));
         assert_eq!(eql, SMPSZE);
     }

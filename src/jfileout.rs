@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn putc_writes_low_byte_and_returns_it() {
         let mut o = JFileOut::new(Vec::new());
-        assert_eq!(o.putc(b'A' as i32), 0x41);
+        assert_eq!(o.putc(i32::from(b'A')), 0x41);
         assert_eq!(o.putc(0xA7), 0xA7);
         assert_eq!(o.putc(-1), 0xFF); // fputc(int) casts to unsigned char
         assert_eq!(o.into_inner(), vec![0x41, 0xA7, 0xFF]);
@@ -192,7 +192,7 @@ mod tests {
         );
         // Cursor sits at 5 (after the stray get(4)): reading position 4 is
         // out of order again (4th seek) but still served.
-        assert_eq!(f.get(4, ReadType::Read), src[4] as i32);
+        assert_eq!(f.get(4, ReadType::Read), i32::from(src[4]));
         assert_eq!(f.seekcount(), 4);
     }
 
