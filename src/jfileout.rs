@@ -10,7 +10,7 @@
 use std::io::Write;
 
 use crate::defs::{EOF, EXI_OK, EXI_RED, EXI_WRI};
-use crate::jfile::{JFile, ReadType};
+use crate::jfile::{ByteOrEof, JFile, ReadType};
 
 /// Patch-phase output file (`JFileOut`, `JFileOut.h:35-69`), generic over the
 /// byte sink (the C++ `FILE * const mpFil`).
@@ -86,18 +86,20 @@ impl<W: Write> JFileOut<W> {
 
         /* Copy character by character (JFileOut.cpp:56-73). */
         while az_len > 0 {
-            let lc_val = inp.get(az_pos, ReadType::Read);
-            if lc_val <= EOF {
-                break;
-            }
-            if self.putc(lc_val) < 0 {
+            /* `lcVal <= EOF` (JFileOut.cpp:59): EOF and the error sentinels
+             * end the copy as a short read. */
+            let lc_val = match inp.getv(az_pos, ReadType::Read) {
+                ByteOrEof::Byte(lc_val) => lc_val,
+                _ => break,
+            };
+            if self.putc(i32::from(lc_val)) < 0 {
                 eprintln!("Error writing output file.");
                 return EXI_WRI;
             }
             /* Stray discard read (`JFileOut.cpp:67`): the C++ zero-argument
              * `get()` reads at the advanced sequential cursor — one past the
              * byte just output — and ignores the result. */
-            let _ = inp.get(az_pos + 1, ReadType::Read);
+            let _ = inp.getv(az_pos + 1, ReadType::Read);
             az_len -= 1;
             az_pos += 1;
         }

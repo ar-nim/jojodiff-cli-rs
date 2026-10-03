@@ -55,12 +55,12 @@
 //! assert_eq!(tbl.getbest(0, 600), Some((1100, 600)));
 //! ```
 
-use crate::defs::{EOB, ReadType, SMPSZE, get_lower_prime};
+use crate::defs::{ReadType, SMPSZE, get_lower_prime};
 #[cfg(feature = "debug")]
 use crate::defs::{p8, print_char};
 #[cfg(feature = "debug")]
 use crate::jdebug::{DBGCMP, DBGMCH, dbg, dbg_print};
-use crate::jfile::JFile;
+use crate::jfile::{ByteOrEof, JFile};
 #[cfg(feature = "debug")]
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -1311,8 +1311,8 @@ fn check(
     gld: i32,          // aiGld: gliding match recurrence
     sft: ReadType,     // aiSft: 1=hard read, 2=soft read
 ) -> i32 {
-    let mut lc_org: i32 = 0; // lcOrg: byte from source file (C++ zero-init)
-    let mut lc_new: i32 = 0; // lcNew: byte from destination file
+    let mut lc_org = ByteOrEof::Byte(0); // lcOrg: byte from source file (C++ zero-init)
+    let mut lc_new = ByteOrEof::Byte(0); // lcNew: byte from destination file
     let mut eql: i32 = 0; // liEql: equal bytes counter
 
     /* Debug: compare prologue (:825-830) */
@@ -1332,15 +1332,19 @@ fn check(
      * conditions in the C++ (`liEql >= EQLSZE` / `aiLen <= 0`) — kept 1:1. */
     #[allow(clippy::if_same_then_else)]
     while eql < EQLMAX {
-        lc_org = org.get(*pos_org, sft);
-        if lc_org < 0 {
+        lc_org = org.getv(*pos_org, sft);
+        /* `lcOrg < 0` (:835): EOF, EOB (soft reads) and the error sentinels
+         * end the compare; the sentinel stays in `lc_org` for the EOB check
+         * below. */
+        let ByteOrEof::Byte(lc_o) = &lc_org else {
             break;
-        }
-        lc_new = newf.get(*pos_new, sft);
-        if lc_new < 0 {
+        };
+        lc_new = newf.getv(*pos_new, sft);
+        /* `lcNew < 0` (:838): same sentinels on the destination read. */
+        let ByteOrEof::Byte(lc_n) = &lc_new else {
             break;
-        }
-        if lc_org == lc_new {
+        };
+        if lc_o == lc_n {
             *pos_org += 1;
             *pos_new += 1;
             eql += 1;
@@ -1363,6 +1367,8 @@ fn check(
     /* Debug: compare result (:857-864) */
     #[cfg(feature = "debug")]
     if dbg(DBGCMP) {
+        // boundary: the trace prints the raw i32 channel values
+        // (`%02x`/print_char), including EOF/EOB sentinels.
         dbg_print(format_args!(
             "{} {} {:2} {} ({}){:02x} == ({}){:02x}\n",
             p8(*pos_org - i64::from(eql)),
@@ -1370,15 +1376,15 @@ fn check(
             eql,
             if eql >= EQLMIN {
                 "OK!"
-            } else if lc_org == EOB || lc_new == EOB {
+            } else if matches!(&lc_org, ByteOrEof::Eob) || matches!(&lc_new, ByteOrEof::Eob) {
                 "EOB"
             } else {
                 "NOK"
             },
-            print_char(lc_org),
-            lc_org as u8,
-            print_char(lc_new),
-            lc_new as u8,
+            print_char(lc_org.to_i32()),
+            lc_org.to_i32() as u8,
+            print_char(lc_new.to_i32()),
+            lc_new.to_i32() as u8,
         ));
     }
 
@@ -1386,7 +1392,7 @@ fn check(
         *pos_org -= i64::from(eql);
         *pos_new -= i64::from(eql);
         eql
-    } else if lc_org == EOB || lc_new == EOB {
+    } else if matches!(&lc_org, ByteOrEof::Eob) || matches!(&lc_new, ByteOrEof::Eob) {
         // EOB reached
         CMPEOB
     } else {
