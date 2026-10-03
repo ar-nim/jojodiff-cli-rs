@@ -76,6 +76,42 @@ const PGSMRK: i64 = 0x100000;
 /// (`JDiff.cpp:96`).
 const PGSMSK: i64 = 0x1ffffff;
 
+/// Search-ahead state (`JDiff.h:264-274`): the rolling window `search`
+/// advances. Extracted from `JDiff` so the scan methods can borrow the
+/// state and the file readers disjointly — the C++ reaches into these
+/// members through pointer aliasing, which the two field-disjoint
+/// destructures used to emulate.
+struct SearchState {
+    /// Current ahead position on the original file (`mzAhdOrg`).
+    az_org: i64,
+    /// Current ahead position on the new file (`mzAhdNew`).
+    az_new: i64,
+    /// Current hash value for the original file (`mlHshOrg`).
+    hsh_org: u32,
+    /// Current hash value for the new file (`mlHshNew`).
+    hsh_new: u32,
+    /// Previous file value, original (`miPrvOrg`).
+    prv_org: i32,
+    /// Current file value, new (`miValNew`).
+    val_new: i32,
+    /// Previous file value, new (`miPrvNew`).
+    prv_new: i32,
+    /// Equal-run counter in the current sample, original (`miEqlOrg`).
+    eql_org: i32,
+    /// Equal-run counter in the current sample, new (`miEqlNew`).
+    eql_new: i32,
+    /// Reliability range for the current hashtable (`miRlb`, cached by
+    /// `search` after each prescan; the 085ac tuning commit, spec §18.E).
+    rlb: i32,
+
+    /// Number of false hash hits (`miHshErr`): incremented on a "solution"
+    /// that pointed nowhere, **in release builds too** (wrapping i32, spec
+    /// §21.6). The C++ never initializes the member (constructor `:103-125`
+    /// does not mention it) — its baseline is stack garbage there; this port
+    /// deterministically starts at 0 and replicates the real increments.
+    hsh_err: i32,
+}
+
 /// JDiff engine (`JDiff.h:149`): owns the two file readers, the output sink,
 /// the hashtable and the matching table.
 pub struct JDiff<'a> {
@@ -108,35 +144,8 @@ pub struct JDiff<'a> {
     /// Prescan original file: 0=no, 1=yes, 2=done (`miSrcScn`).
     src_scn: i32,
 
-    /* Search-ahead state (`JDiff.h:264-274`) */
-    /// Current ahead position on the original file (`mzAhdOrg`).
-    az_org: i64,
-    /// Current ahead position on the new file (`mzAhdNew`).
-    az_new: i64,
-    /// Current hash value for the original file (`mlHshOrg`).
-    hsh_org: u32,
-    /// Current hash value for the new file (`mlHshNew`).
-    hsh_new: u32,
-    /// Previous file value, original (`miPrvOrg`).
-    prv_org: i32,
-    /// Current file value, new (`miValNew`).
-    val_new: i32,
-    /// Previous file value, new (`miPrvNew`).
-    prv_new: i32,
-    /// Equal-run counter in the current sample, original (`miEqlOrg`).
-    eql_org: i32,
-    /// Equal-run counter in the current sample, new (`miEqlNew`).
-    eql_new: i32,
-    /// Reliability range for the current hashtable (`miRlb`, cached by
-    /// `search` after each prescan; the 085ac tuning commit, spec §18.E).
-    rlb: i32,
-
-    /// Number of false hash hits (`miHshErr`): incremented on a "solution"
-    /// that pointed nowhere, **in release builds too** (wrapping i32, spec
-    /// §21.6). The C++ never initializes the member (constructor `:103-125`
-    /// does not mention it) — its baseline is stack garbage there; this port
-    /// deterministically starts at 0 and replicates the real increments.
-    hsh_err: i32,
+    /// Search-ahead state (`JDiff.h:264-274`).
+    sst: SearchState,
 }
 
 impl<'a> JDiff<'a> {
@@ -188,17 +197,19 @@ impl<'a> JDiff<'a> {
             ahd_max: if ahd_max < 1024 { 1024 } else { ahd_max },
             cmp_all,
             src_scn: i32::from(src_scn),
-            az_org: 0,
-            az_new: 0,
-            hsh_org: 0,
-            hsh_new: 0,
-            prv_org: 0,
-            val_new: 0,
-            prv_new: 0,
-            eql_org: 0,
-            eql_new: 0,
-            rlb: 0,
-            hsh_err: 0,
+            sst: SearchState {
+                az_org: 0,
+                az_new: 0,
+                hsh_org: 0,
+                hsh_new: 0,
+                prv_org: 0,
+                val_new: 0,
+                prv_new: 0,
+                eql_org: 0,
+                eql_new: 0,
+                rlb: 0,
+                hsh_err: 0,
+            },
         }
     }
 
@@ -213,7 +224,7 @@ impl<'a> JDiff<'a> {
     /// §18.E). The C++ member's baseline is uninitialized garbage; this port
     /// starts at 0.
     pub fn hsh_err(&self) -> i32 {
-        self.hsh_err
+        self.sst.hsh_err
     }
 
     /// Number of repaired hash hits (`getHshRpr`, `JMatchTable.h:100` /
@@ -249,9 +260,15 @@ impl<'a> JDiff<'a> {
     /// original stream's rolling key and add the sample to the hashtable.
     /// Only reached while `miSrcScn == 0 && lzPosOrg == mzAhdOrg`.
     fn hash_add_org(&mut self, lc_org: i32) {
-        self.hsh_org = hash_key(self.hsh_org, &mut self.prv_org, lc_org, &mut self.eql_org);
-        self.hsh.add(self.hsh_org, self.az_org, self.eql_org);
-        self.az_org += 1;
+        self.sst.hsh_org = hash_key(
+            self.sst.hsh_org,
+            &mut self.sst.prv_org,
+            lc_org,
+            &mut self.sst.eql_org,
+        );
+        self.hsh
+            .add(self.sst.hsh_org, self.sst.az_org, self.sst.eql_org);
+        self.sst.az_org += 1;
     }
 
     /// The equal-run fast loop (`JDiff.cpp:201-224`): counts and consumes
@@ -270,7 +287,7 @@ impl<'a> JDiff<'a> {
         let mut cnt: i64 = 0;
         while *val_org == *val_new && *val_new >= 0 && *pos_new < lap_sml {
             cnt += 1;
-            if index_src && *pos_org == self.az_org {
+            if index_src && *pos_org == self.sst.az_org {
                 self.hash_add_org(*val_org);
             }
             *pos_org += 1;
@@ -330,7 +347,7 @@ impl<'a> JDiff<'a> {
             }
 
             /* Incremental source scan (JDiff.cpp:184-189) */
-            if self.src_scn == 0 && lz_pos_org == self.az_org {
+            if self.src_scn == 0 && lz_pos_org == self.sst.az_org {
                 self.hash_add_org(lc_org);
             }
 
@@ -394,7 +411,7 @@ impl<'a> JDiff<'a> {
 
                 /* Report the miss to the user: counted in release builds too
                  * (wrapping i32, spec §21.6). */
-                self.hsh_err = self.hsh_err.wrapping_add(1);
+                self.sst.hsh_err = self.sst.hsh_err.wrapping_add(1);
                 if self.verbose > 2 && self.cmp_all {
                     dbg_print(format_args!(
                         "\nInaccurate solution at positions {}/{}!\n",
@@ -554,75 +571,46 @@ impl<'a> JDiff<'a> {
                 return li_ret;
             }
             self.src_scn = 2;
-            self.rlb = self.hsh.reliability();
+            self.sst.rlb = self.hsh.reliability();
         } else if self.src_scn == 0 {
-            /* Field-disjoint borrows make the C++ pointer aliasing legal in
-             * Rust (the C++ reaches into gpHsh, mpFilOrg and the state
-             * members simultaneously). */
-            let Self {
-                org,
-                hsh,
-                src_bkt,
-                ahd_max,
-                az_org,
-                hsh_org,
-                prv_org,
-                eql_org,
-                rlb,
-                ..
-            } = self;
-
             // Set lookahead base position and determine lookahead range
-            org.set_lookahead_base(red_org);
-            let mut li_scan: i32 = if *src_bkt {
+            self.org.set_lookahead_base(red_org);
+            let mut li_scan: i32 = if self.src_bkt {
                 // Backtrace allowed: go ahead as far as possible
-                *ahd_max
+                self.ahd_max
             } else {
                 // Backtrace not allowed:
                 // - keep (mzAhdMax - azRedOrg) == miAhdMax / 2
                 // - except at the start of the file (azRedOrg < miAhdMax)
-                if *az_org < i64::from(*ahd_max) / 2 {
+                if self.sst.az_org < i64::from(self.ahd_max) / 2 {
                     // C++: int assignment of the off_t difference.
-                    (i64::from(*ahd_max) - *az_org) as i32
+                    (i64::from(self.ahd_max) - self.sst.az_org) as i32
                 } else {
-                    (i64::from(*ahd_max) / 2 - (*az_org - red_org)) as i32
+                    (i64::from(self.ahd_max) / 2 - (self.sst.az_org - red_org)) as i32
                 }
             };
 
             // scan ahead till EOB or EOF
             while li_scan > 0 {
-                let lc_org = org.get(*az_org, ReadType::SoftAhead);
+                let lc_org = self.org.get(self.sst.az_org, ReadType::SoftAhead);
                 if lc_org <= EOF {
                     break;
                 }
-                *hsh_org = hash_key(*hsh_org, prv_org, lc_org, eql_org);
-                hsh.add(*hsh_org, *az_org, *eql_org);
-                *az_org += 1;
+                self.sst.hsh_org = hash_key(
+                    self.sst.hsh_org,
+                    &mut self.sst.prv_org,
+                    lc_org,
+                    &mut self.sst.eql_org,
+                );
+                self.hsh
+                    .add(self.sst.hsh_org, self.sst.az_org, self.sst.eql_org);
+                self.sst.az_org += 1;
                 li_scan -= 1;
             }
-            *rlb = hsh.reliability();
+            self.sst.rlb = self.hsh.reliability();
         } /* switch scan source file - build hashtable */
 
-        /* Field-disjoint borrows for the rest of the function (see above). */
-        let Self {
-            org,
-            r#new,
-            hsh,
-            mch,
-            src_bkt,
-            verbose,
-            mch_max,
-            mch_min,
-            ahd_max,
-            az_org: _mz_ahd_org, // not reset on backtrack anymore (0.8.5)
-            az_new: mz_ahd_new,
-            hsh_new: ml_hsh_new,
-            prv_new: mi_prv_new,
-            val_new: mi_val_new,
-            eql_new: mi_eql_new,
-            rlb: mi_rlb,
-            ..
-        } = self;
+        /* mzAhdOrg is not reset on backtrack anymore (0.8.5). */
 
         /*
          * How many bytes to look ahead (search) ? (JDiff.cpp:450-470)
@@ -634,15 +622,15 @@ impl<'a> JDiff<'a> {
          * potential solutions is found, the lookahead may again be reduced
          * to the reliability range (see below).
          */
-        li_max = if *mz_ahd_new > red_new {
+        li_max = if self.sst.az_new > red_new {
             // C++: int assignment of the off_t difference.
-            (i64::from(*ahd_max) - (*mz_ahd_new - red_new)) as i32
+            (i64::from(self.ahd_max) - (self.sst.az_new - red_new)) as i32
         } else {
-            *ahd_max
+            self.ahd_max
         };
 
-        if li_max < *mi_rlb {
-            li_max = *mi_rlb; // search at least the reliability distance
+        if li_max < self.sst.rlb {
+            li_max = self.sst.rlb; // search at least the reliability distance
         }
 
         /*
@@ -654,42 +642,52 @@ impl<'a> JDiff<'a> {
          * - looking back allows to keep the existing match-table up-to-date
          * Therefore, we allow for some look back.
          */
-        li_bck = (red_new - *mz_ahd_new) as i32; // C++ int assignment
+        li_bck = (red_new - self.sst.az_new) as i32; // C++ int assignment
         if li_bck < 0 {
             // mzAhdNew is stil ahead of azRedNew from a previous lookahead
             // continue where the previous left off
             li_bck = 0;
-        } else if li_bck > *mi_rlb + 2 * SMPSZE - 1 {
-            li_bck = *mi_rlb + 2 * SMPSZE - 1; // 2 * SMPSZE to anticipate a reinitialization
+        } else if li_bck > self.sst.rlb + 2 * SMPSZE - 1 {
+            li_bck = self.sst.rlb + 2 * SMPSZE - 1; // 2 * SMPSZE to anticipate a reinitialization
         }
 
         /* Do not backtrace before lzBseOrg (JDiff.cpp:490-491) */
-        let lz_bse_org: i64 = if *src_bkt { 0 } else { org.get_buf_pos() };
+        let lz_bse_org: i64 = if self.src_bkt {
+            0
+        } else {
+            self.org.get_buf_pos()
+        };
 
         /* Cleanup the old matches (JDiff.cpp:493-508): Full means the table
          * has no reusable element; Error lands there too. Best/Good mean a
          * good match is already available and shorten the lookahead. */
         let mut li_fnd: i32 = 0; /* Number of matches found */
-        match mch.cleanup(lz_bse_org, red_new, *mi_rlb, &mut **org, &mut **r#new) {
+        match self.mch.cleanup(
+            lz_bse_org,
+            red_new,
+            self.sst.rlb,
+            &mut *self.org,
+            &mut *self.r#new,
+        ) {
             MchRet::Error | MchRet::Full => {
-                li_fnd = *mch_max; // table is full
+                li_fnd = self.mch_max; // table is full
             }
             // a good match is already available : reduce search (but not to
             // zero); the guard is the C++ `if (liMax > miRlb * 2)` — when it
             // fails the arm does nothing, like the C++ break.
-            MchRet::Best | MchRet::Good if li_max > *mi_rlb * 2 => {
-                li_max = *mi_rlb * 2;
+            MchRet::Best | MchRet::Good if li_max > self.sst.rlb * 2 => {
+                li_max = self.sst.rlb * 2;
             }
             _ => {}
         }
 
         /* If there's room to work (JDiff.cpp:510-647) */
-        if li_fnd < *mch_max {
+        if li_fnd < self.mch_max {
             // Set lookahead base position
-            r#new.set_lookahead_base(red_new);
+            self.r#new.set_lookahead_base(red_new);
 
             // Switch to soft reading if the minimum number of matches is obtained
-            let mut li_sft_new = if li_fnd >= *mch_min {
+            let mut li_sft_new = if li_fnd >= self.mch_min {
                 ReadType::SoftAhead
             } else {
                 ReadType::HardAhead
@@ -701,15 +699,15 @@ impl<'a> JDiff<'a> {
              * - read position has jumped over the ahead position
              * (JDiff.cpp:518-574)
              */
-            if *mz_ahd_new == 0 || *mz_ahd_new + i64::from(li_bck) < red_new {
+            if self.sst.az_new == 0 || self.sst.az_new + i64::from(li_bck) < red_new {
                 // Don't go back more than the buffer allows (to avoid EOB)
-                *mz_ahd_new = r#new.get_buf_pos();
+                self.sst.az_new = self.r#new.get_buf_pos();
 
                 // Set looking back position, but never before the buffer
-                if red_new > *mz_ahd_new + i64::from(li_bck) {
-                    *mz_ahd_new = red_new - i64::from(li_bck);
-                    if *mz_ahd_new < 0 {
-                        *mz_ahd_new = 0;
+                if red_new > self.sst.az_new + i64::from(li_bck) {
+                    self.sst.az_new = red_new - i64::from(li_bck);
+                    if self.sst.az_new < 0 {
+                        self.sst.az_new = 0;
                     }
                 }
 
@@ -718,24 +716,29 @@ impl<'a> JDiff<'a> {
                 // (mzAhdNew > 0), in a worst case, we first need SMPSZE to
                 // initialize miEqlNew and then another SMPSZE to initialize
                 // the hash
-                if *mz_ahd_new == 0 {
+                if self.sst.az_new == 0 {
                     li_bck = SMPSZE - 1; // to initialize mkHsh (miEql=0 is correct)
                 } else {
                     li_bck = SMPSZE * 2 - 1; // to initialize mkHsh and miEql
                 }
-                *mz_ahd_new -= 1; // switch to pre-increments
-                *ml_hsh_new = 0;
-                *mi_eql_new = 0;
-                *mi_prv_new = EOF;
+                self.sst.az_new -= 1; // switch to pre-increments
+                self.sst.hsh_new = 0;
+                self.sst.eql_new = 0;
+                self.sst.prv_new = EOF;
                 let mut li_idx: i32 = 0;
                 while li_idx < li_bck {
-                    *mi_val_new = r#new.get(*mz_ahd_new + 1, li_sft_new); // ++mzAhdNew
-                    *mz_ahd_new += 1;
-                    if *mi_val_new <= EOF {
-                        *mz_ahd_new -= 1;
+                    self.sst.val_new = self.r#new.get(self.sst.az_new + 1, li_sft_new); // ++mzAhdNew
+                    self.sst.az_new += 1;
+                    if self.sst.val_new <= EOF {
+                        self.sst.az_new -= 1;
                         break;
                     }
-                    *ml_hsh_new = hash_key(*ml_hsh_new, mi_prv_new, *mi_val_new, mi_eql_new);
+                    self.sst.hsh_new = hash_key(
+                        self.sst.hsh_new,
+                        &mut self.sst.prv_new,
+                        self.sst.val_new,
+                        &mut self.sst.eql_new,
+                    );
 
                     // The following line needs some explication.
                     // The goal of this line is to terminate the initialization ASAP.
@@ -754,7 +757,7 @@ impl<'a> JDiff<'a> {
                     // and initialization will be ok after SMPSZE-1 bytes (position D in the example)
                     // Reset can be detected by miEql != liIdx. Hence, when miEql != liIdx,
                     // we can reduce liMax to liIdx + SMPSZE - 1.
-                    if li_idx != *mi_eql_new && li_bck > li_idx + (SMPSZE - 1) {
+                    if li_idx != self.sst.eql_new && li_bck > li_idx + (SMPSZE - 1) {
                         li_bck = li_idx + (SMPSZE - 1);
                     }
                     li_idx += 1;
@@ -762,8 +765,8 @@ impl<'a> JDiff<'a> {
             }
 
             /* Add the resulting look-back to liMax (JDiff.cpp:576-578) */
-            if *mz_ahd_new < red_new {
-                li_max += (red_new - *mz_ahd_new) as i32; // C++ int assignment
+            if self.sst.az_new < red_new {
+                li_max += (red_new - self.sst.az_new) as i32; // C++ int assignment
             }
 
             /*
@@ -771,18 +774,23 @@ impl<'a> JDiff<'a> {
              */
             while li_max > 0 {
                 /* hash the new value */
-                *mi_val_new = r#new.get(*mz_ahd_new + 1, li_sft_new); // ++mzAhdNew
-                *mz_ahd_new += 1;
-                if *mi_val_new <= EOF {
-                    *mz_ahd_new -= 1;
+                self.sst.val_new = self.r#new.get(self.sst.az_new + 1, li_sft_new); // ++mzAhdNew
+                self.sst.az_new += 1;
+                if self.sst.val_new <= EOF {
+                    self.sst.az_new -= 1;
                     break;
                 }
-                *ml_hsh_new = hash_key(*ml_hsh_new, mi_prv_new, *mi_val_new, mi_eql_new);
+                self.sst.hsh_new = hash_key(
+                    self.sst.hsh_new,
+                    &mut self.sst.prv_new,
+                    self.sst.val_new,
+                    &mut self.sst.eql_new,
+                );
                 li_max -= 1;
 
                 /* lookup the new value in the hashtable and add it to the
                  * table of matches... (JDiff.cpp:594) */
-                if hsh.get(*ml_hsh_new, &mut lz_fnd_org) {
+                if self.hsh.get(self.sst.hsh_new, &mut lz_fnd_org) {
                     /* ...unless it's not usable because we've been instructed
                      * not to backtrack on source file (JDiff.cpp:596) */
                     if lz_fnd_org > lz_bse_org {
@@ -791,13 +799,19 @@ impl<'a> JDiff<'a> {
                          * through into Full ("no break"), Good/Best reduce
                          * the lookahead and fall through into Valid, which
                          * counts the match. */
-                        match mch.add(lz_fnd_org, *mz_ahd_new, red_new, &mut **org, &mut **r#new) {
+                        match self.mch.add(
+                            lz_fnd_org,
+                            self.sst.az_new,
+                            red_new,
+                            &mut *self.org,
+                            &mut *self.r#new,
+                        ) {
                             MchRet::Error => {
                                 // Table in an unexpectedly full state
                                 #[cfg(feature = "debug")]
                                 dbg_print(format_args!(
                                     "Matchtable overflow at {}\n",
-                                    crate::defs::p8(*mz_ahd_new)
+                                    crate::defs::p8(self.sst.az_new)
                                 ));
                                 // no break: continue with next case
                                 li_max = 0;
@@ -827,16 +841,16 @@ impl<'a> JDiff<'a> {
                                 // reliability range, no better solution should
                                 // be found anymore. Reduce the lookahead to be
                                 // sure and to improve performance.
-                                if li_max > *mi_rlb {
-                                    li_max = *mi_rlb;
+                                if li_max > self.sst.rlb {
+                                    li_max = self.sst.rlb;
                                 }
                                 // no break: continue with next case
                                 li_fnd += 1;
-                                if *mz_ahd_new > red_new {
-                                    if li_fnd >= *mch_min {
+                                if self.sst.az_new > red_new {
+                                    if li_fnd >= self.mch_min {
                                         li_sft_new = ReadType::SoftAhead; // switch to soft reading
                                     }
-                                    if li_fnd >= *mch_max {
+                                    if li_fnd >= self.mch_max {
                                         li_max = 0; // stop lookahead
                                         continue;
                                     }
@@ -845,11 +859,11 @@ impl<'a> JDiff<'a> {
                             MchRet::Valid => {
                                 // solution added
                                 li_fnd += 1;
-                                if *mz_ahd_new > red_new {
-                                    if li_fnd >= *mch_min {
+                                if self.sst.az_new > red_new {
+                                    if li_fnd >= self.mch_min {
                                         li_sft_new = ReadType::SoftAhead; // switch to soft reading
                                     }
-                                    if li_fnd >= *mch_max {
+                                    if li_fnd >= self.mch_max {
                                         li_max = 0; // stop lookahead
                                         continue;
                                     }
@@ -860,10 +874,10 @@ impl<'a> JDiff<'a> {
                 } /* lookup */
 
                 /* show progress (JDiff.cpp:641-645) */
-                if *verbose > 1 && lz_lap <= *mz_ahd_new {
+                if self.verbose > 1 && lz_lap <= self.sst.az_new {
                     dbg_print(format_args!(
                         "+{:<12}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}",
-                        (*mz_ahd_new - red_new) / PGSMRK
+                        (self.sst.az_new - red_new) / PGSMRK
                     ));
                     lz_lap += PGSMRK;
                 }
@@ -871,15 +885,15 @@ impl<'a> JDiff<'a> {
         } /* if liFnd <= miMchMax */
 
         /* Check for errors (JDiff.cpp:649-652) */
-        if *mi_val_new < EOB {
-            return *mi_val_new;
+        if self.sst.val_new < EOB {
+            return self.sst.val_new;
         }
 
         /* show progress (JDiff.cpp:654-657) */
-        if *verbose > 1 && lz_lap > red_new + PGSMRK {
+        if self.verbose > 1 && lz_lap > red_new + PGSMRK {
             dbg_print(format_args!(
                 "+{:<12}...\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}",
-                (*mz_ahd_new - red_new) / PGSMRK
+                (self.sst.az_new - red_new) / PGSMRK
             ));
         }
 
@@ -889,10 +903,10 @@ impl<'a> JDiff<'a> {
          * getbest only re-evaluates enlarged EOB elements (when !cmpAll) and
          * returns it — no files, no hashtable, no rescanning.
          */
-        let lb_fnd = mch.getbest(red_org, red_new);
+        let lb_fnd = self.mch.getbest(red_org, red_new);
 
         /* clear search progress (JDiff.cpp:664-668) */
-        if *verbose > 1 && lz_lap > red_new + PGSMRK {
+        if self.verbose > 1 && lz_lap > red_new + PGSMRK {
             dbg_print(format_args!(
                 "                \u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}\u{8}"
             ));
@@ -908,7 +922,7 @@ impl<'a> JDiff<'a> {
                 // SMPSZE bytes.
                 *skp_org = 0;
                 *skp_new = 0;
-                *ahd = *mz_ahd_new - red_new;
+                *ahd = self.sst.az_new - red_new;
                 if *ahd < i64::from(SMPSZE) {
                     #[cfg(feature = "debug")]
                     if dbg(DBGAHD) {
