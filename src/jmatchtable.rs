@@ -532,15 +532,7 @@ impl JMatchTable {
         // iiCnt) (:124-145)
         if !self.cmp_all {
             // join old and new lists
-            if self.mp_new.is_some() {
-                let lst = self
-                    .mp_lst
-                    .expect("mpNew non-null implies mpLst non-null (C++ invariant)");
-                self.nodes[lst].nxt = self.mp_old;
-                self.mp_old = self.mp_new;
-                self.mp_new = None;
-                self.mp_lst = None;
-            }
+            self.merge_new_into_old();
 
             // evaluate
             let mut bst_eob = false;
@@ -628,15 +620,7 @@ impl JMatchTable {
         self.rlb = rlb;
 
         // join old and new lists (:379-385)
-        if self.mp_new.is_some() {
-            let lst = self
-                .mp_lst
-                .expect("mpNew non-null implies mpLst non-null (C++ invariant)");
-            self.nodes[lst].nxt = self.mp_old;
-            self.mp_old = self.mp_new;
-            self.mp_new = None;
-            self.mp_lst = None;
-        }
+        self.merge_new_into_old();
 
         // sanity checks (:387-397)
         #[cfg(feature = "debug")]
@@ -1182,6 +1166,21 @@ impl JMatchTable {
                 *tst_org = 0;
             }
             false
+        }
+    }
+
+    /// Join the new list into the old list (`JMatchTable.cpp:379-385`,
+    /// duplicated at `:124-131`): the old list is appended after the new
+    /// list's last element, then the new-list bookkeeping resets.
+    fn merge_new_into_old(&mut self) {
+        if self.mp_new.is_some() {
+            let lst = self
+                .mp_lst
+                .expect("mpNew non-null implies mpLst non-null (C++ invariant)");
+            self.nodes[lst].nxt = self.mp_old;
+            self.mp_old = self.mp_new;
+            self.mp_new = None;
+            self.mp_lst = None;
         }
     }
 
