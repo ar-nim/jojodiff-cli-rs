@@ -35,13 +35,48 @@ pub const SMPSZE: i32 = 32;
 /// to 2 ("start EQL-sequence on 3'rd byte"), a wire-format break (§18.C).
 pub const MINEQL: i32 = 2;
 
-/** Output routine constants (`JDefs.h:163-168`). */
-pub const ESC: i32 = 0xA7; // Escape
-pub const MOD: i32 = 0xA6; // Modify
-pub const INS: i32 = 0xA5; // Insert
-pub const DEL: i32 = 0xA4; // Delete
-pub const EQL: i32 = 0xA3; // Equal
-pub const BKT: i32 = 0xA2; // Backtrace
+/// Patch-format opcodes (`JDefs.h:163-168`): the wire values are the
+/// discriminants. `Esc` doubles as the data-escape and the "no operator
+/// yet" seed of `opr_cur`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+#[non_exhaustive] // API-07; crate-internal matches stay exhaustive
+pub enum Op {
+    /// `ESC` 0xA7 — escape.
+    Esc = 0xA7,
+    /// `MOD` 0xA6 — modify.
+    Mod = 0xA6,
+    /// `INS` 0xA5 — insert.
+    Ins = 0xA5,
+    /// `DEL` 0xA4 — delete.
+    Del = 0xA4,
+    /// `EQL` 0xA3 — equal.
+    Eql = 0xA3,
+    /// `BKT` 0xA2 — backtrace.
+    Bkt = 0xA2,
+}
+
+impl Op {
+    /// The wire byte (the value of the C++ `i32` opcode constants).
+    pub const fn byte(self) -> u8 {
+        self as u8
+    }
+
+    /// Classifies a patch-stream byte as an opcode; `None` for every
+    /// non-opcode byte, which stays data in the decoder exactly like the
+    /// C++ `default` arms.
+    pub const fn from_byte(b: u8) -> Option<Op> {
+        match b {
+            x if x == Self::Esc as u8 => Some(Self::Esc),
+            x if x == Self::Mod as u8 => Some(Self::Mod),
+            x if x == Self::Ins as u8 => Some(Self::Ins),
+            x if x == Self::Del as u8 => Some(Self::Del),
+            x if x == Self::Eql as u8 => Some(Self::Eql),
+            x if x == Self::Bkt as u8 => Some(Self::Bkt),
+            _ => None,
+        }
+    }
+}
 
 /// Exit codes, renumbered/negated at 0.8.5 with the new `EXI_OK`
 /// (`JDefs.h:146-158`). The CLI exits with `-EXI_*` so the process exit codes
@@ -197,10 +232,25 @@ mod tests {
     #[test]
     fn constants_match_cxx() {
         assert_eq!(EOB, -2);
+        // Opcode wire values (`JDefs.h:163-168`) as the Op discriminants.
         assert_eq!(
-            (ESC, MOD, INS, DEL, EQL, BKT),
+            (
+                Op::Esc.byte(),
+                Op::Mod.byte(),
+                Op::Ins.byte(),
+                Op::Del.byte(),
+                Op::Eql.byte(),
+                Op::Bkt.byte()
+            ),
             (0xA7, 0xA6, 0xA5, 0xA4, 0xA3, 0xA2)
         );
+        // from_byte classifies every opcode and rejects its neighborhood.
+        assert_eq!(Op::from_byte(0xA7), Some(Op::Esc));
+        assert_eq!(Op::from_byte(0xA2), Some(Op::Bkt));
+        assert_eq!(Op::from_byte(0xA1), None);
+        assert_eq!(Op::from_byte(0xA8), None);
+        assert_eq!(Op::from_byte(0x00), None);
+        assert_eq!(Op::from_byte(0xFF), None);
     }
 
     /// Exit codes, byte-exact with 0.8.5 (`JDefs.h:146-158`): a positive

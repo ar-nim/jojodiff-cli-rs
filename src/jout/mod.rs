@@ -40,10 +40,12 @@ pub struct OutStats {
 pub trait JOut {
     /// Outputs one operand.
     ///
-    /// * `opr` — operand: [`ESC`](crate::defs::ESC),
-    ///   [`INS`](crate::defs::INS), [`DEL`](crate::defs::DEL),
-    ///   [`EQL`](crate::defs::EQL), [`BKT`](crate::defs::BKT) or
-    ///   [`MOD`](crate::defs::MOD).
+    /// * `opr` — operand: [`Op::Esc`](crate::defs::Op::Esc),
+    ///   [`Op::Ins`](crate::defs::Op::Ins),
+    ///   [`Op::Del`](crate::defs::Op::Del),
+    ///   [`Op::Eql`](crate::defs::Op::Eql),
+    ///   [`Op::Bkt`](crate::defs::Op::Bkt) or
+    ///   [`Op::Mod`](crate::defs::Op::Mod).
     /// * `len` — length of operand for DEL and BKT.
     /// * `org` — character from the original file.
     /// * `new` — character from the new file.
@@ -52,7 +54,15 @@ pub trait JOut {
     ///
     /// Returns `false` = continue sending byte by byte, `true` = permission
     /// to send length (faster).
-    fn put(&mut self, opr: i32, len: i64, org: i32, new: i32, pos_org: i64, pos_new: i64) -> bool;
+    fn put(
+        &mut self,
+        opr: crate::defs::Op,
+        len: i64,
+        org: i32,
+        new: i32,
+        pos_org: i64,
+        pos_new: i64,
+    ) -> bool;
 
     /// Statistics about the operations performed so far.
     fn stats(&self) -> OutStats;

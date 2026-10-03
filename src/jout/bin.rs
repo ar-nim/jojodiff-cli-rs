@@ -37,7 +37,7 @@ use std::io::Write;
 
 use super::wire::LenTier;
 use super::{JOut, OutStats};
-use crate::defs::{BKT, DEL, EQL, ESC, INS, MINEQL, MOD};
+use crate::defs::{MINEQL, Op};
 
 /// 0.8.1 EQL flush threshold and buffer size (`miEqlBuf[4]` with the
 /// `mzEqlCnt > 4` flush, 0.8.1 `JOutBin.cpp:162,214-216`; the 0.8.5 writer
@@ -52,7 +52,7 @@ pub struct JOutBin<W: Write> {
     /// Current operand: INS, MOD, EQL or DEL. ESC means none
     /// (`miOprCur`, `JOutBin.h:52`). Seeded MOD in the default mode
     /// (`JOutBin.cpp:27`; 0.8.1 seeded ESC — the compat-mode seed).
-    opr_cur: i32,
+    opr_cur: Op,
     /// Number of pending equal bytes (`mzEqlCnt`, `JOutBin.h:53`).
     eql_cnt: i64,
     /// Pending equal bytes (`miEqlBuf`): the first `MINEQL` (0.8.5) or the
@@ -83,7 +83,7 @@ impl<W: Write> JOutBin<W> {
         JOutBin {
             out,
             stats: OutStats::default(),
-            opr_cur: if compat_081 { ESC } else { MOD },
+            opr_cur: if compat_081 { Op::Esc } else { Op::Mod },
             eql_cnt: 0,
             eql_buf: [0; EQL_BUF_081],
             out_esc: false,
@@ -176,21 +176,21 @@ impl<W: Write> JOutBin<W> {
     /// an EQL, BKT or DEL (implicit MOD) — and `opr_cur` is assigned here for
     /// every call. Compat mode (§21.16) emits `ESC <opr>` unconditionally,
     /// like the 0.8.1 `ufPutOpr` (`JOutBin.cpp:118-123`).
-    fn put_opr(&mut self, opr: i32) {
+    fn put_opr(&mut self, opr: Op) {
         if self.out_esc {
-            self.raw(ESC as u8);
-            self.raw(ESC as u8);
+            self.raw(Op::Esc.byte());
+            self.raw(Op::Esc.byte());
             self.out_esc = false;
             self.stats.esc += 1;
             self.stats.dta += 1;
         }
 
-        if opr != ESC {
+        if opr != Op::Esc {
             // No need to output a MOD after an EQL, BKT or DEL (0.8.5);
             // compat mode emits every opcode (0.8.1 JOutBin.cpp:118-123).
-            if self.compat_081 || opr != MOD || self.opr_cur == INS {
-                self.raw(ESC as u8);
-                self.raw(opr as u8);
+            if self.compat_081 || opr != Op::Mod || self.opr_cur == Op::Ins {
+                self.raw(Op::Esc.byte());
+                self.raw(opr.byte());
                 self.stats.ctl += 2;
             }
         }
@@ -202,15 +202,15 @@ impl<W: Write> JOutBin<W> {
     fn put_byte(&mut self, byt: i32) {
         if self.out_esc {
             self.out_esc = false;
-            if (BKT..=ESC).contains(&byt) {
+            if (Op::Bkt.byte()..=Op::Esc.byte()).contains(&(byt as u8)) {
                 /* output an additional <esc> byte */
-                self.raw(ESC as u8);
+                self.raw(Op::Esc.byte());
                 self.stats.esc += 1;
             }
-            self.raw(ESC as u8);
+            self.raw(Op::Esc.byte());
             self.stats.dta += 1;
         }
-        if byt == ESC {
+        if byt == i32::from(Op::Esc.byte()) {
             self.out_esc = true;
         } else {
             self.raw(byt as u8);
@@ -222,31 +222,23 @@ impl<W: Write> JOutBin<W> {
 impl<W: Write> JOut for JOutBin<W> {
     /// `JOutBin::put` (`JOutBin.cpp:165-232`): binary output function for
     /// generating patch files.
-    fn put(
-        &mut self,
-        opr: i32,
-        len: i64,
-        org: i32,
-        new: i32,
-        _pos_org: i64,
-        _pos_new: i64,
-    ) -> bool {
+    fn put(&mut self, opr: Op, len: i64, org: i32, new: i32, _pos_org: i64, _pos_new: i64) -> bool {
         /* Output a pending EQL operand (if more than MINEQL, resp. 4 in
          * compat mode, equal bytes — 0.8.5 `JOutBin.cpp:175` with MINEQL=2;
          * 0.8.1 `:162` with the 4-byte `miEqlBuf`). */
         let min_eql = self.eql_threshold();
-        if opr != EQL && self.eql_cnt > 0 {
-            if self.eql_cnt > min_eql || (self.opr_cur != MOD && opr != MOD) {
+        if opr != Op::Eql && self.eql_cnt > 0 {
+            if self.eql_cnt > min_eql || (self.opr_cur != Op::Mod && opr != Op::Mod) {
                 // as of 3 equal bytes (0.8.5) resp. 5 (compat) => output as
                 // EQL (ESC EQL <cnt>)
-                self.put_opr(EQL);
+                self.put_opr(Op::Eql);
                 self.put_len(self.eql_cnt);
 
                 self.stats.eql += self.eql_cnt;
             } else {
                 // less than 3 equal bytes => output as MOD
-                if self.opr_cur != MOD {
-                    self.put_opr(MOD);
+                if self.opr_cur != Op::Mod {
+                    self.put_opr(Op::Mod);
                 }
                 for li_cnt in 0..self.eql_cnt {
                     self.put_byte(self.eql_buf[li_cnt as usize]);
@@ -257,33 +249,33 @@ impl<W: Write> JOut for JOutBin<W> {
 
         /* Handle current operand */
         match opr {
-            ESC => {
+            Op::Esc => {
                 /* before closing the output */
-                self.put_opr(ESC);
+                self.put_opr(Op::Esc);
             }
 
-            MOD | INS => {
+            Op::Mod | Op::Ins => {
                 if self.opr_cur != opr {
                     self.put_opr(opr);
                 }
                 self.put_byte(new);
             }
 
-            DEL => {
-                self.put_opr(DEL);
+            Op::Del => {
+                self.put_opr(Op::Del);
                 self.put_len(len);
 
                 self.stats.del += len;
             }
 
-            BKT => {
-                self.put_opr(BKT);
+            Op::Bkt => {
+                self.put_opr(Op::Bkt);
                 self.put_len(len);
 
                 self.stats.bkt += len;
             }
 
-            EQL => {
+            Op::Eql => {
                 if self.eql_cnt < min_eql {
                     self.eql_buf[self.eql_cnt as usize] = org;
                     self.eql_cnt += 1;
@@ -293,10 +285,6 @@ impl<W: Write> JOut for JOutBin<W> {
                     return true;
                 }
             }
-
-            /* The engine only ever sends ESC/MOD/INS/DEL/BKT/EQL; the C++
-             * switch has no default and falls through to `return false`. */
-            _ => {}
         }
 
         false
@@ -314,12 +302,12 @@ mod tests {
     /// Drives `put` with `(opr, len, org, new)` tuples over a `Vec<u8>` sink,
     /// followed by the engine's end-of-stream flush `put(ESC, 0, 0, 0, …)`
     /// (`JDiff.cpp:197/249`), and returns the patch bytes and the statistics.
-    fn run_stats(ops: &[(i32, i64, i32, i32)]) -> (Vec<u8>, OutStats) {
+    fn run_stats(ops: &[(Op, i64, i32, i32)]) -> (Vec<u8>, OutStats) {
         let mut jout = JOutBin::new(Vec::new());
         for &(opr, len, org, new) in ops {
             jout.put(opr, len, org, new, 0, 0);
         }
-        jout.put(ESC, 0, 0, 0, 0, 0);
+        jout.put(Op::Esc, 0, 0, 0, 0, 0);
         let stats = jout.stats();
         (jout.into_inner(), stats)
     }
@@ -349,9 +337,12 @@ mod tests {
         ];
         for &(len, bytes, ctl) in CASES {
             let mut jout = JOutBin::new(Vec::new());
-            assert!(!jout.put(DEL, len, 0, 0, 0, 0), "put(DEL, {len}) return");
+            assert!(
+                !jout.put(Op::Del, len, 0, 0, 0, 0),
+                "put(DEL, {len}) return"
+            );
             let st = jout.stats();
-            let mut expected = vec![ESC as u8, DEL as u8];
+            let mut expected = vec![Op::Esc.byte(), Op::Del.byte()];
             expected.extend_from_slice(bytes);
             assert_eq!(jout.into_inner(), expected, "put_len({len}) bytes");
             assert_eq!(st.ctl, ctl, "ctl for len {len}");
@@ -371,16 +362,16 @@ mod tests {
         // flushed as plain data when the next byte (0x00 < BKT) arrives — no
         // escape twin (JOutBin.cpp:139-159).
         let (out, st) = run_stats(&[
-            (MOD, 1, 0x00, 0x00),
-            (MOD, 1, 0x00, 0xA7),
-            (MOD, 1, 0x00, 0x00),
+            (Op::Mod, 1, 0x00, 0x00),
+            (Op::Mod, 1, 0x00, 0xA7),
+            (Op::Mod, 1, 0x00, 0x00),
         ]);
         assert_eq!(out, [0x00, 0xA7, 0x00]);
         assert_eq!((st.dta, st.esc, st.ctl), (3, 0, 0));
 
         // MOD data 0xA7,0xA6: ESC followed by an opcode-range byte
         // (BKT..=ESC) is doubled (JOutBin.cpp:141-149).
-        let (out, st) = run_stats(&[(MOD, 1, 0x00, 0xA7), (MOD, 1, 0x00, 0xA6)]);
+        let (out, st) = run_stats(&[(Op::Mod, 1, 0x00, 0xA7), (Op::Mod, 1, 0x00, 0xA6)]);
         assert_eq!(out, [0xA7, 0xA7, 0xA6]);
         assert_eq!((st.dta, st.esc, st.ctl), (2, 1, 0));
 
@@ -388,15 +379,15 @@ mod tests {
         // escape twin by put_opr (JOutBin.cpp:113-119); the INS switch itself
         // still emits ESC INS.
         let (out, st) = run_stats(&[
-            (MOD, 1, 0x00, 0x00),
-            (MOD, 1, 0x00, 0xA7),
-            (INS, 1, 0x00, 0x01),
+            (Op::Mod, 1, 0x00, 0x00),
+            (Op::Mod, 1, 0x00, 0xA7),
+            (Op::Ins, 1, 0x00, 0x01),
         ]);
         assert_eq!(out, [0x00, 0xA7, 0xA7, 0xA7, 0xA5, 0x01]);
         assert_eq!((st.dta, st.esc, st.ctl), (3, 1, 2));
 
         // … and likewise by the engine's final put(ESC) at end of stream.
-        let (out, st) = run_stats(&[(MOD, 1, 0x00, 0x00), (MOD, 1, 0x00, 0xA7)]);
+        let (out, st) = run_stats(&[(Op::Mod, 1, 0x00, 0x00), (Op::Mod, 1, 0x00, 0xA7)]);
         assert_eq!(out, [0x00, 0xA7, 0xA7]);
         assert_eq!((st.dta, st.esc, st.ctl), (2, 1, 0));
     }
@@ -407,11 +398,11 @@ mod tests {
         // `eql_cnt > MINEQL` (JOutBin.cpp:175) emits ESC EQL <cnt>; the
         // following MOD is implicit (no ESC MOD after an EQL).
         let (out, st) = run_stats(&[
-            (MOD, 1, 0x00, 0x11),
-            (EQL, 1, 0x22, 0x22),
-            (EQL, 1, 0x33, 0x33),
-            (EQL, 1, 0x44, 0x44),
-            (MOD, 1, 0x00, 0x55),
+            (Op::Mod, 1, 0x00, 0x11),
+            (Op::Eql, 1, 0x22, 0x22),
+            (Op::Eql, 1, 0x33, 0x33),
+            (Op::Eql, 1, 0x44, 0x44),
+            (Op::Mod, 1, 0x00, 0x55),
         ]);
         assert_eq!(out, [0x11, 0xA7, 0xA3, 0x02, 0x55]);
         assert_eq!((st.dta, st.ctl, st.eql), (2, 3, 3));
@@ -419,23 +410,23 @@ mod tests {
         // Boundary: exactly 2 pending equals with MOD on both sides stay MOD
         // data (`eql_cnt > MINEQL` is false, `opr_cur != MOD` is false).
         let (out, st) = run_stats(&[
-            (MOD, 1, 0x00, 0x11),
-            (EQL, 1, 0x22, 0x22),
-            (EQL, 1, 0x33, 0x33),
-            (MOD, 1, 0x00, 0x55),
+            (Op::Mod, 1, 0x00, 0x11),
+            (Op::Eql, 1, 0x22, 0x22),
+            (Op::Eql, 1, 0x33, 0x33),
+            (Op::Mod, 1, 0x00, 0x55),
         ]);
         assert_eq!(out, [0x11, 0x22, 0x33, 0x55]);
-        assert!(!out.contains(&(EQL as u8)), "no EQL opcode in {out:?}");
+        assert!(!out.contains(&(Op::Eql.byte())), "no EQL opcode in {out:?}");
         assert_eq!((st.dta, st.ctl, st.eql), (4, 0, 0));
 
         // 2 equals with INS on both sides: the second flush clause
         // (`opr_cur != MOD && opr != MOD`, JOutBin.cpp:175) forces a tiny
         // explicit EQL record.
         let (out, st) = run_stats(&[
-            (INS, 1, 0x00, 0x11),
-            (EQL, 1, 0x22, 0x22),
-            (EQL, 1, 0x33, 0x33),
-            (INS, 1, 0x00, 0x44),
+            (Op::Ins, 1, 0x00, 0x11),
+            (Op::Eql, 1, 0x22, 0x22),
+            (Op::Eql, 1, 0x33, 0x33),
+            (Op::Ins, 1, 0x00, 0x44),
         ]);
         assert_eq!(out, [0xA7, 0xA5, 0x11, 0xA7, 0xA3, 0x01, 0xA7, 0xA5, 0x44]);
         assert_eq!((st.dta, st.ctl, st.eql), (2, 7, 2));
@@ -443,9 +434,9 @@ mod tests {
         // Equals at patch start: opr_cur still holds the constructor's MOD
         // seed, so the buffered bytes go out as implicit MOD data.
         let (out, st) = run_stats(&[
-            (EQL, 1, 0x22, 0x22),
-            (EQL, 1, 0x33, 0x33),
-            (MOD, 1, 0x00, 0x55),
+            (Op::Eql, 1, 0x22, 0x22),
+            (Op::Eql, 1, 0x33, 0x33),
+            (Op::Mod, 1, 0x00, 0x55),
         ]);
         assert_eq!(out, [0x22, 0x33, 0x55]);
         assert_eq!((st.dta, st.ctl, st.eql), (3, 0, 0));
@@ -458,7 +449,11 @@ mod tests {
         // `eql_cnt >= MINEQL`, JOutBin.cpp:223), the remaining 8 accumulate in
         // lzEql and are flushed as a single put(EQL, 8, 0, 0, …) by flushEql
         // (JDiff.cpp:507-516); the final put(ESC) emits ESC EQL <put_len(10)>.
-        let (out, st) = run_stats(&[(EQL, 1, 0xF0, 0xF0), (EQL, 1, 0xF1, 0xF1), (EQL, 8, 0, 0)]);
+        let (out, st) = run_stats(&[
+            (Op::Eql, 1, 0xF0, 0xF0),
+            (Op::Eql, 1, 0xF1, 0xF1),
+            (Op::Eql, 8, 0, 0),
+        ]);
         assert_eq!(out, [0xA7, 0xA3, 0x09]);
         assert_eq!(st.eql, 10);
         assert_eq!((st.ctl, st.dta), (3, 0));
@@ -469,14 +464,14 @@ mod tests {
         // ESC MOD is still emitted when switching INS→MOD
         // (`aiOpr != MOD || miOprCur == INS`, JOutBin.cpp:123).
         let (out, st) = run_stats(&[
-            (INS, 1, 0x00, 0x11),
-            (INS, 1, 0x00, 0x12),
-            (MOD, 1, 0x00, 0x22),
-            (MOD, 1, 0x00, 0x23),
+            (Op::Ins, 1, 0x00, 0x11),
+            (Op::Ins, 1, 0x00, 0x12),
+            (Op::Mod, 1, 0x00, 0x22),
+            (Op::Mod, 1, 0x00, 0x23),
         ]);
         assert_eq!(out, [0xA7, 0xA5, 0x11, 0x12, 0xA7, 0xA6, 0x22, 0x23]);
         assert_eq!(
-            out.iter().filter(|&&b| b == ESC as u8).count(),
+            out.iter().filter(|&&b| b == Op::Esc.byte()).count(),
             2,
             "INS opcode + the INS→MOD switch"
         );
@@ -489,10 +484,10 @@ mod tests {
         // ("No need to output a MOD after an EQL, BKT or DEL",
         // JOutBin.cpp:122-127): the data bytes ride the implicit MOD.
         let (out, st) = run_stats(&[
-            (DEL, 5, 0, 0),
-            (MOD, 1, 0x00, 0x41),
-            (BKT, 3, 0, 0),
-            (MOD, 1, 0x00, 0x42),
+            (Op::Del, 5, 0, 0),
+            (Op::Mod, 1, 0x00, 0x41),
+            (Op::Bkt, 3, 0, 0),
+            (Op::Mod, 1, 0x00, 0x42),
         ]);
         assert_eq!(out, [0xA7, 0xA4, 0x04, 0x41, 0xA7, 0xA2, 0x02, 0x42]);
         assert_eq!((st.dta, st.ctl, st.del, st.bkt), (2, 6, 5, 3));
@@ -503,14 +498,14 @@ mod tests {
         // The opcode is emitted only when the operand changes; the leading
         // MOD is implicit (constructor seed).
         let (out, st) = run_stats(&[
-            (MOD, 1, 0x00, 0x01),
-            (MOD, 1, 0x00, 0x02),
-            (INS, 1, 0x00, 0x03),
-            (INS, 1, 0x00, 0x04),
+            (Op::Mod, 1, 0x00, 0x01),
+            (Op::Mod, 1, 0x00, 0x02),
+            (Op::Ins, 1, 0x00, 0x03),
+            (Op::Ins, 1, 0x00, 0x04),
         ]);
         assert_eq!(out, [0x01, 0x02, 0xA7, 0xA5, 0x03, 0x04]);
         assert_eq!(
-            out.iter().filter(|&&b| b == ESC as u8).count(),
+            out.iter().filter(|&&b| b == Op::Esc.byte()).count(),
             1,
             "exactly one opcode switch"
         );
@@ -525,19 +520,19 @@ mod tests {
         // INS-preceded MOD runs nor the trailing MOD after the EQL record
         // emit an ESC MOD pair (the latter only switches opr_cur).
         let (out, st) = run_stats(&[
-            (INS, 1, 0x00, 0x41), // ESC INS 41
-            (EQL, 1, 0x42, 0x42), // buffered (cnt 1, false)
-            (EQL, 1, 0x43, 0x43), // buffered (cnt 2, true: >= MINEQL)
-            (EQL, 1, 0x44, 0x44), // length-mode accumulate (cnt 3)
-            (INS, 1, 0x00, 0x45), // 3 equals + INS flush → ESC EQL 3
-            (DEL, 300, 0, 0),     // ESC DEL 252,2F (300 = 253 + 47)
-            (BKT, 5, 0, 0),       // ESC BKT 04
-            (INS, 1, 0x00, 0x46), // ESC INS 46
-            (EQL, 1, 0x47, 0x47), // buffered (cnt 1, false)
-            (EQL, 1, 0x48, 0x48), // buffered (cnt 2, true)
-            (EQL, 1, 0x49, 0x49), // accumulate (cnt 3)
-            (EQL, 1, 0x4A, 0x4A), // accumulate (cnt 4)
-            (MOD, 1, 0x00, 0x4B), // 4 equals + MOD → ESC EQL 4, then implicit MOD data
+            (Op::Ins, 1, 0x00, 0x41), // ESC INS 41
+            (Op::Eql, 1, 0x42, 0x42), // buffered (cnt 1, false)
+            (Op::Eql, 1, 0x43, 0x43), // buffered (cnt 2, true: >= MINEQL)
+            (Op::Eql, 1, 0x44, 0x44), // length-mode accumulate (cnt 3)
+            (Op::Ins, 1, 0x00, 0x45), // 3 equals + INS flush → ESC EQL 3
+            (Op::Del, 300, 0, 0),     // ESC DEL 252,2F (300 = 253 + 47)
+            (Op::Bkt, 5, 0, 0),       // ESC BKT 04
+            (Op::Ins, 1, 0x00, 0x46), // ESC INS 46
+            (Op::Eql, 1, 0x47, 0x47), // buffered (cnt 1, false)
+            (Op::Eql, 1, 0x48, 0x48), // buffered (cnt 2, true)
+            (Op::Eql, 1, 0x49, 0x49), // accumulate (cnt 3)
+            (Op::Eql, 1, 0x4A, 0x4A), // accumulate (cnt 4)
+            (Op::Mod, 1, 0x00, 0x4B), // 4 equals + MOD → ESC EQL 4, then implicit MOD data
         ]);
         assert_eq!(
             out,
@@ -576,12 +571,12 @@ mod tests {
     /// Drives `put` with `(opr, len, org, new)` tuples over a compat-mode
     /// `JOutBin` like [`run_stats`], ending with the engine's end-of-stream
     /// flush `put(ESC, 0, 0, 0, …)`.
-    fn run_compat_stats(ops: &[(i32, i64, i32, i32)]) -> (Vec<u8>, OutStats) {
+    fn run_compat_stats(ops: &[(Op, i64, i32, i32)]) -> (Vec<u8>, OutStats) {
         let mut jout = JOutBin::with_compat_081(Vec::new(), true);
         for &(opr, len, org, new) in ops {
             jout.put(opr, len, org, new, 0, 0);
         }
-        jout.put(ESC, 0, 0, 0, 0, 0);
+        jout.put(Op::Esc, 0, 0, 0, 0, 0);
         let stats = jout.stats();
         (jout.into_inner(), stats)
     }
@@ -599,28 +594,28 @@ mod tests {
         // (2 bytes in 0.8.5 mode, 4 in compat mode), then `flushEql`'s
         // single `put(EQL, n, 0, 0, …)` for the remainder — the pending
         // counts (25 resp. 11) are mode-independent.
-        let ops: Vec<(i32, i64, i32, i32)> = [
-            (EQL, 1, 0x61, 0x61),
-            (EQL, 1, 0x62, 0x62),
-            (EQL, 1, 0x63, 0x63),
-            (EQL, 1, 0x64, 0x64),
-            (EQL, 21, 0, 0), // pending equal run: 25 bytes
-            (MOD, 1, 0x00, i32::from(b'M')),
-            (MOD, 1, 0x00, i32::from(b'O')),
-            (MOD, 1, 0x00, i32::from(b'D')),
-            (MOD, 1, 0x00, i32::from(b'I')),
-            (MOD, 1, 0x00, i32::from(b'F')),
-            (MOD, 1, 0x00, i32::from(b'I')),
-            (MOD, 1, 0x00, i32::from(b'E')),
-            (MOD, 1, 0x00, i32::from(b'D')),
-            (EQL, 1, 0x63, 0x63),
-            (EQL, 1, 0x64, 0x64),
-            (EQL, 1, 0x65, 0x65),
-            (EQL, 1, 0x66, 0x66),
-            (EQL, 7, 0, 0), // pending equal run: 11 bytes
-            (MOD, 1, 0x00, i32::from(b'X')),
-            (MOD, 1, 0x00, i32::from(b'Y')),
-            (MOD, 1, 0x00, i32::from(b'Z')),
+        let ops: Vec<(Op, i64, i32, i32)> = [
+            (Op::Eql, 1, 0x61, 0x61),
+            (Op::Eql, 1, 0x62, 0x62),
+            (Op::Eql, 1, 0x63, 0x63),
+            (Op::Eql, 1, 0x64, 0x64),
+            (Op::Eql, 21, 0, 0), // pending equal run: 25 bytes
+            (Op::Mod, 1, 0x00, i32::from(b'M')),
+            (Op::Mod, 1, 0x00, i32::from(b'O')),
+            (Op::Mod, 1, 0x00, i32::from(b'D')),
+            (Op::Mod, 1, 0x00, i32::from(b'I')),
+            (Op::Mod, 1, 0x00, i32::from(b'F')),
+            (Op::Mod, 1, 0x00, i32::from(b'I')),
+            (Op::Mod, 1, 0x00, i32::from(b'E')),
+            (Op::Mod, 1, 0x00, i32::from(b'D')),
+            (Op::Eql, 1, 0x63, 0x63),
+            (Op::Eql, 1, 0x64, 0x64),
+            (Op::Eql, 1, 0x65, 0x65),
+            (Op::Eql, 1, 0x66, 0x66),
+            (Op::Eql, 7, 0, 0), // pending equal run: 11 bytes
+            (Op::Mod, 1, 0x00, i32::from(b'X')),
+            (Op::Mod, 1, 0x00, i32::from(b'Y')),
+            (Op::Mod, 1, 0x00, i32::from(b'Z')),
         ]
         .to_vec();
 
@@ -648,12 +643,12 @@ mod tests {
     /// 0.8.5 writer (threshold `> MINEQL` = 2) emits an EQL record.
     #[test]
     fn compat_081_three_equal_run_stays_mod_data() {
-        let ops: [(i32, i64, i32, i32); 5] = [
-            (MOD, 1, 0x00, 0x61), // 'a'
-            (EQL, 1, 0x78, 0x78), // 'x'
-            (EQL, 1, 0x79, 0x79), // 'y': count 2
-            (EQL, 1, 0x7A, 0x7A), // 'z': count 3
-            (MOD, 1, 0x00, 0x62), // 'b': flush
+        let ops: [(Op, i64, i32, i32); 5] = [
+            (Op::Mod, 1, 0x00, 0x61), // 'a'
+            (Op::Eql, 1, 0x78, 0x78), // 'x'
+            (Op::Eql, 1, 0x79, 0x79), // 'y': count 2
+            (Op::Eql, 1, 0x7A, 0x7A), // 'z': count 3
+            (Op::Mod, 1, 0x00, 0x62), // 'b': flush
         ];
 
         // 0.8.5: 3 > MINEQL (2) => ESC EQL 03.
@@ -674,11 +669,11 @@ mod tests {
     /// exactly once.
     #[test]
     fn compat_081_mod_at_start_explicit_and_ins_switch_once() {
-        let ops: [(i32, i64, i32, i32); 4] = [
-            (MOD, 1, 0x00, 0x61),
-            (MOD, 1, 0x00, 0x62),
-            (INS, 1, 0x00, 0x63),
-            (MOD, 1, 0x00, 0x64),
+        let ops: [(Op, i64, i32, i32); 4] = [
+            (Op::Mod, 1, 0x00, 0x61),
+            (Op::Mod, 1, 0x00, 0x62),
+            (Op::Ins, 1, 0x00, 0x63),
+            (Op::Mod, 1, 0x00, 0x64),
         ];
 
         // 0.8.5: implicit leading MOD, one opcode switch (INS→MOD).
@@ -692,7 +687,7 @@ mod tests {
             [0xA7, 0xA6, 0x61, 0x62, 0xA7, 0xA5, 0x63, 0xA7, 0xA6, 0x64]
         );
         assert_eq!(
-            out.iter().filter(|&&b| b == ESC as u8).count(),
+            out.iter().filter(|&&b| b == Op::Esc.byte()).count(),
             3,
             "leading MOD + MOD→INS + INS→MOD switches"
         );
@@ -709,39 +704,39 @@ mod tests {
         // The engine drives byte-wise EQL puts until `put` returns true
         // (`eql_cnt >= threshold`), then flushes the remainder through
         // `flushEql` as one `put(EQL, n, 0, 0, …)` — reproduced here.
-        let four: [(i32, i64, i32, i32); 6] = [
-            (MOD, 1, 0x00, 0x61),
-            (EQL, 1, 0x31, 0x31),
-            (EQL, 1, 0x32, 0x32),
-            (EQL, 1, 0x33, 0x33),
-            (EQL, 1, 0x34, 0x34), // count 4 => true (threshold 4)
-            (MOD, 1, 0x00, 0x62),
+        let four: [(Op, i64, i32, i32); 6] = [
+            (Op::Mod, 1, 0x00, 0x61),
+            (Op::Eql, 1, 0x31, 0x31),
+            (Op::Eql, 1, 0x32, 0x32),
+            (Op::Eql, 1, 0x33, 0x33),
+            (Op::Eql, 1, 0x34, 0x34), // count 4 => true (threshold 4)
+            (Op::Mod, 1, 0x00, 0x62),
         ];
         let (out, st) = run_compat_stats(&four);
         assert_eq!(out, [0xA7, 0xA6, 0x61, 0x31, 0x32, 0x33, 0x34, 0x62]);
         assert_eq!((st.ctl, st.dta, st.eql), (2, 6, 0));
 
-        let five: [(i32, i64, i32, i32); 7] = [
-            (MOD, 1, 0x00, 0x61),
-            (EQL, 1, 0x31, 0x31),
-            (EQL, 1, 0x32, 0x32),
-            (EQL, 1, 0x33, 0x33),
-            (EQL, 1, 0x34, 0x34), // count 4 => true
-            (EQL, 1, 0x35, 0x35), // flushEql remainder => count 5
-            (MOD, 1, 0x00, 0x62),
+        let five: [(Op, i64, i32, i32); 7] = [
+            (Op::Mod, 1, 0x00, 0x61),
+            (Op::Eql, 1, 0x31, 0x31),
+            (Op::Eql, 1, 0x32, 0x32),
+            (Op::Eql, 1, 0x33, 0x33),
+            (Op::Eql, 1, 0x34, 0x34), // count 4 => true
+            (Op::Eql, 1, 0x35, 0x35), // flushEql remainder => count 5
+            (Op::Mod, 1, 0x00, 0x62),
         ];
         let (out, st) = run_compat_stats(&five);
         assert_eq!(out, [0xA7, 0xA6, 0x61, 0xA7, 0xA3, 0x04, 0xA7, 0xA6, 0x62]);
         assert_eq!((st.ctl, st.dta, st.eql), (7, 2, 5));
 
         // 4 equals between INS runs: forced explicit EQL record.
-        let ins: [(i32, i64, i32, i32); 6] = [
-            (INS, 1, 0x00, 0x41),
-            (EQL, 1, 0x31, 0x31),
-            (EQL, 1, 0x32, 0x32),
-            (EQL, 1, 0x33, 0x33),
-            (EQL, 1, 0x34, 0x34),
-            (INS, 1, 0x00, 0x42),
+        let ins: [(Op, i64, i32, i32); 6] = [
+            (Op::Ins, 1, 0x00, 0x41),
+            (Op::Eql, 1, 0x31, 0x31),
+            (Op::Eql, 1, 0x32, 0x32),
+            (Op::Eql, 1, 0x33, 0x33),
+            (Op::Eql, 1, 0x34, 0x34),
+            (Op::Ins, 1, 0x00, 0x42),
         ];
         let (out, st) = run_compat_stats(&ins);
         assert_eq!(out, [0xA7, 0xA5, 0x41, 0xA7, 0xA3, 0x03, 0xA7, 0xA5, 0x42]);
@@ -754,10 +749,10 @@ mod tests {
     #[test]
     fn compat_081_mod_after_del_bkt_is_explicit() {
         let (out, st) = run_compat_stats(&[
-            (DEL, 5, 0, 0),
-            (MOD, 1, 0x00, 0x41),
-            (BKT, 3, 0, 0),
-            (MOD, 1, 0x00, 0x42),
+            (Op::Del, 5, 0, 0),
+            (Op::Mod, 1, 0x00, 0x41),
+            (Op::Bkt, 3, 0, 0),
+            (Op::Mod, 1, 0x00, 0x42),
         ]);
         assert_eq!(
             out,

@@ -20,11 +20,16 @@
 
 use std::io::Write;
 
-use crate::defs::{BKT, DEL, EOF, EQL, ESC, EXI_ERR, EXI_OK, INS, MOD, ReadType, p8, print_char};
+use crate::defs::{EOF, EXI_ERR, EXI_OK, Op, ReadType, p8, print_char};
 use crate::jdebug::dbg_print;
 use crate::jfile::JFile;
 use crate::jfileout::JFileOut;
 use crate::jout::wire::LenTier;
+
+/// The escape wire byte (`0xA7`) as an `i32` data value: the decoder's data
+/// and length arithmetic computes with C `int`s (EOF = -1 included), so the
+/// escape opcode appears as a byte value wherever it rides the data channel.
+const ESC_BYTE: i32 = Op::Esc as i32;
 
 /// Patch applier (`JPatcht`, `JPatcht.h:34-114`): holds the source file, the
 /// patch file, the output file and the verbosity level.
@@ -139,7 +144,7 @@ impl<'a, W: Write> JPatcht<'a, W> {
         &mut self,
         lz_pos_org: i64,
         lz_pos_out: i64,
-        li_opr: i32,
+        li_opr: Op,
         ai_dta: i32,
         az_off: i64,
     ) -> i32 {
@@ -147,9 +152,9 @@ impl<'a, W: Write> JPatcht<'a, W> {
         if self.verbse > 1 {
             dbg_print(format_args!(
                 "{} {} {} {:02x} {}\n",
-                p8(lz_pos_org + if li_opr == MOD { az_off } else { 0 }),
+                p8(lz_pos_org + if li_opr == Op::Mod { az_off } else { 0 }),
                 p8(lz_pos_out + az_off),
-                if li_opr == MOD { "MOD" } else { "INS" },
+                if li_opr == Op::Mod { "MOD" } else { "INS" },
                 ai_dta,
                 print_char(ai_dta),
             ));
@@ -160,16 +165,16 @@ impl<'a, W: Write> JPatcht<'a, W> {
     /// Read a data sequence INS or MOD (`JPatcht::ufGetDta`,
     /// `JPatcht.cpp:120-196`): outputs the pending bytes, then reads data
     /// until EOF or a new operator; `lz_mod` accumulates the offset counter.
-    /// Returns the new operator or `EOF`.
+    /// Returns the new operator, or `None` at EOF.
     fn uf_get_dta(
         &mut self,
         lz_pos_org: i64,
         lz_pos_out: i64,
-        li_opr: i32,
+        li_opr: Op,
         lz_mod: &mut i64,
         li_pnd: i32,
         li_dbl: i32,
-    ) -> i32 {
+    ) -> Option<Op> {
         let mut li_inp: i32; /* Input from mpFilPch */
         let mut li_new: i32; /* New operator */
 
@@ -183,7 +188,7 @@ impl<'a, W: Write> JPatcht<'a, W> {
         (comment as in the C++; the code outputs one ESC for ESC ESC.) */
         if li_pnd != EOF {
             *lz_mod += i64::from(self.uf_put_dta(lz_pos_org, lz_pos_out, li_opr, li_pnd, *lz_mod));
-            if li_pnd == ESC && li_dbl != ESC {
+            if li_pnd == ESC_BYTE && li_dbl != ESC_BYTE {
                 *lz_mod +=
                     i64::from(self.uf_put_dta(lz_pos_org, lz_pos_out, li_opr, li_dbl, *lz_mod));
             }
@@ -197,16 +202,40 @@ impl<'a, W: Write> JPatcht<'a, W> {
             }
 
             // Handle ESC-code
-            if li_inp == ESC {
+            if li_inp == ESC_BYTE {
                 li_new = self.pch_get();
-                match li_new {
-                    DEL | EQL | BKT | MOD | INS => {} // new operator: handled below
-                    ESC => {
+                /* `li_new as u8`: EOF (-1) truncates to 0xFF, which is not an
+                 * opcode, so an EOF right after an ESC lands in the
+                 * not-an-opcode arm like any unknown byte — the C++
+                 * `default` arm, which outputs it as data. */
+                match Op::from_byte(li_new as u8) {
+                    Some(opr) if opr != Op::Esc => {
+                        if opr == li_opr {
+                            // <ESC> MOD within an <ESC> MOD is meaningless: handle as data
+                            // <ESC> INS within an <ESC> INS is meaningless: handle as data
+                            if self.verbse > 2 {
+                                dbg_print(format_args!(
+                                    "{} {} ESC {:02x}\n",
+                                    p8(lz_pos_org + if li_opr == Op::Mod { *lz_mod } else { 0 }),
+                                    p8(lz_pos_out + *lz_mod),
+                                    li_new,
+                                ));
+                            }
+
+                            *lz_mod += i64::from(
+                                self.uf_put_dta(lz_pos_org, lz_pos_out, li_opr, li_inp, *lz_mod),
+                            );
+                            li_inp = li_new; // will be output below
+                        } else {
+                            return Some(opr);
+                        }
+                    }
+                    Some(_) => {
                         // Double ESC: drop one
                         if self.verbse > 2 {
                             dbg_print(format_args!(
                                 "{} {} ESC ESC\n",
-                                p8(lz_pos_org + if li_opr == MOD { *lz_mod } else { 0 }),
+                                p8(lz_pos_org + if li_opr == Op::Mod { *lz_mod } else { 0 }),
                                 p8(lz_pos_out + *lz_mod),
                             ));
                         }
@@ -217,12 +246,12 @@ impl<'a, W: Write> JPatcht<'a, W> {
                         );
                         continue;
                     }
-                    _ => {
+                    None => {
                         // ESC <xxx> with <xxx> not an opcode: output as they are
                         if self.verbse > 2 {
                             dbg_print(format_args!(
                                 "{} {} ESC XXX\n",
-                                p8(lz_pos_org + if li_opr == MOD { *lz_mod } else { 0 }),
+                                p8(lz_pos_org + if li_opr == Op::Mod { *lz_mod } else { 0 }),
                                 p8(lz_pos_out + *lz_mod),
                             ));
                         }
@@ -237,31 +266,13 @@ impl<'a, W: Write> JPatcht<'a, W> {
                         continue;
                     }
                 }
-                if li_new == li_opr {
-                    // <ESC> MOD within an <ESC> MOD is meaningless: handle as data
-                    // <ESC> INS within an <ESC> INS is meaningless: handle as data
-                    if self.verbse > 2 {
-                        dbg_print(format_args!(
-                            "{} {} ESC {:02x}\n",
-                            p8(lz_pos_org + if li_opr == MOD { *lz_mod } else { 0 }),
-                            p8(lz_pos_out + *lz_mod),
-                            li_new,
-                        ));
-                    }
-
-                    *lz_mod +=
-                        i64::from(self.uf_put_dta(lz_pos_org, lz_pos_out, li_opr, ESC, *lz_mod));
-                    li_inp = li_new; // will be output below
-                } else {
-                    return li_new;
-                }
             }
 
             // Handle data
             *lz_mod += i64::from(self.uf_put_dta(lz_pos_org, lz_pos_out, li_opr, li_inp, *lz_mod));
         } /* while ! EOF */
 
-        EOF // we
+        None // EOF
     }
 
     /// Patch function (`JPatcht::jpatch`, `JPatcht.cpp:209-338`).
@@ -279,7 +290,7 @@ impl<'a, W: Write> JPatcht<'a, W> {
     pub fn jpatch(&mut self) -> i32 {
         let mut li_inp: i32; /* 1st Pending byte (EOF = no pending byte) */
         let mut li_dbl: i32 = EOF; /* 2nd Pending byte (EOF = no pending byte) */
-        let mut li_opr: i32; /* Current operand */
+        let mut li_opr: Option<Op>; /* Current operand (None = read next from input) */
         /* Current operand's offset. The C++ leaves `lzOff` uninitialized on
          * entry (ufGetDta sets it through the reference; DEL/EQL/BKT assign
          * before use); Rust requires an initializer, which is behaviorally
@@ -288,25 +299,27 @@ impl<'a, W: Write> JPatcht<'a, W> {
         let mut lz_pos_org: i64 = 0; /* Position in source file */
         let mut lz_pos_out: i64 = 0; /* Position in destination file */
 
-        li_opr = 0; // no operator
-        while li_opr != EOF {
+        li_opr = None; // no operator
+        loop {
             // Read operator from input, unless this has already been done
-            if li_opr == 0 {
+            if li_opr.is_none() {
                 li_inp = self.pch_get();
                 if li_inp == EOF {
                     break;
                 }
 
                 // Handle ESC <opr>
-                if li_inp == ESC {
+                if li_inp == ESC_BYTE {
                     li_dbl = self.pch_get();
-                    match li_dbl {
-                        EQL | DEL | BKT | MOD | INS => {
-                            li_opr = li_dbl;
+                    /* `li_dbl as u8`: EOF (-1) truncates to 0xFF, not an
+                     * opcode, so it is classified separately below. */
+                    match Op::from_byte(li_dbl as u8) {
+                        Some(opr) if opr != Op::Esc => {
+                            li_opr = Some(opr);
                             li_dbl = EOF;
                             li_inp = EOF;
                         } // new operator found, all ok !
-                        EOF => {
+                        None if li_dbl == EOF => {
                             // serious error, let's call this a trailing byte
                             eprintln!(
                                 "Warning: unexpected trailing byte at end of file, \
@@ -314,14 +327,14 @@ impl<'a, W: Write> JPatcht<'a, W> {
                             );
                             return EXI_ERR;
                         }
+                        // ESC ESC or ESC <unknown> at the start of a sequence:
+                        // resolve by double pending bytes: liInp and liDbl
                         _ => {
-                            // ESC xxx or ESC ESC at the start of a sequence
-                            // Resolve by double pending bytes: liInp and liDbl
-                            li_opr = MOD;
+                            li_opr = Some(Op::Mod);
                         }
                     }
                 } else {
-                    li_opr = MOD; // If an ESC <opr> is missing, set default operator (gaining two bytes)
+                    li_opr = Some(Op::Mod); // If an ESC <opr> is missing, set default operator (gaining two bytes)
                     li_dbl = EOF;
                 }
             } else {
@@ -330,16 +343,11 @@ impl<'a, W: Write> JPatcht<'a, W> {
             }
 
             // Execute the operator
-            match li_opr {
-                MOD => {
-                    li_opr = self.uf_get_dta(
-                        lz_pos_org,
-                        lz_pos_out,
-                        li_opr,
-                        &mut lz_off,
-                        li_inp,
-                        li_dbl,
-                    );
+            let opr = li_opr.expect("operator just read or carried over");
+            match opr {
+                Op::Mod => {
+                    li_opr =
+                        self.uf_get_dta(lz_pos_org, lz_pos_out, opr, &mut lz_off, li_inp, li_dbl);
                     if self.verbse == 1 {
                         dbg_print(format_args!(
                             "{} {} MOD {}\n",
@@ -350,17 +358,14 @@ impl<'a, W: Write> JPatcht<'a, W> {
                     }
                     lz_pos_org += lz_off;
                     lz_pos_out += lz_off;
+                    if li_opr.is_none() {
+                        break; // EOF: end of patch
+                    }
                 }
 
-                INS => {
-                    li_opr = self.uf_get_dta(
-                        lz_pos_org,
-                        lz_pos_out,
-                        li_opr,
-                        &mut lz_off,
-                        li_inp,
-                        li_dbl,
-                    );
+                Op::Ins => {
+                    li_opr =
+                        self.uf_get_dta(lz_pos_org, lz_pos_out, opr, &mut lz_off, li_inp, li_dbl);
                     if self.verbse == 1 {
                         dbg_print(format_args!(
                             "{} {} INS {}\n",
@@ -370,9 +375,12 @@ impl<'a, W: Write> JPatcht<'a, W> {
                         ));
                     }
                     lz_pos_out += lz_off;
+                    if li_opr.is_none() {
+                        break; // EOF: end of patch
+                    }
                 }
 
-                DEL => {
+                Op::Del => {
                     lz_off = self.uf_get_int();
                     if lz_off < 0 {
                         return lz_off as i32;
@@ -386,10 +394,10 @@ impl<'a, W: Write> JPatcht<'a, W> {
                         ));
                     }
                     lz_pos_org += lz_off;
-                    li_opr = 0; // to read next operator from input
+                    li_opr = None; // to read next operator from input
                 }
 
-                EQL => {
+                Op::Eql => {
                     /* get length of operation */
                     lz_off = self.uf_get_int();
                     if lz_off < 0 {
@@ -415,10 +423,10 @@ impl<'a, W: Write> JPatcht<'a, W> {
                     lz_pos_out += lz_off;
 
                     /* Next operator */
-                    li_opr = 0; // to read next operator from input
+                    li_opr = None; // to read next operator from input
                 }
 
-                BKT => {
+                Op::Bkt => {
                     lz_off = self.uf_get_int();
                     if lz_off < 0 {
                         return lz_off as i32;
@@ -432,14 +440,15 @@ impl<'a, W: Write> JPatcht<'a, W> {
                         ));
                     }
                     lz_pos_org -= lz_off;
-                    li_opr = 0; // to read next operator from input
+                    li_opr = None; // to read next operator from input
                 }
 
-                /* No default in the C++ switch; li_opr is always one of the
-                 * five operators here (or EOF, excluded by the loop). */
-                _ => {}
+                /* `Esc` is the escape byte, never an operator: the
+                 * read-operator branch above resolves every escape (or dies
+                 * on the trailing-ESC warning). */
+                Op::Esc => {}
             }
-        } /* while ! EOF */
+        } /* loop */
 
         if self.verbse >= 1 {
             dbg_print(format_args!("{} {} EOF\n", p8(lz_pos_org), p8(lz_pos_out)));
@@ -455,15 +464,15 @@ mod tests {
     use crate::defs::{EXI_ERR, EXI_OK, EXI_RED};
     use crate::jfile::JFileMem;
 
-    /// u8 mirrors of the opcode consts (the `defs` consts are i32 like the
-    /// C++ ints; patch byte arrays are u8). The local definitions shadow the
-    /// glob import for the test byte arrays below.
-    const ESC: u8 = crate::defs::ESC as u8;
-    const MOD: u8 = crate::defs::MOD as u8;
-    const INS: u8 = crate::defs::INS as u8;
-    const DEL: u8 = crate::defs::DEL as u8;
-    const EQL: u8 = crate::defs::EQL as u8;
-    const BKT: u8 = crate::defs::BKT as u8;
+    /// u8 wire bytes of the opcodes (patch byte arrays are u8, the `Op`
+    /// enum carries the wire values). The local definitions shadow the glob
+    /// import for the test byte arrays below.
+    const ESC: u8 = Op::Esc.byte();
+    const MOD: u8 = Op::Mod.byte();
+    const INS: u8 = Op::Ins.byte();
+    const DEL: u8 = Op::Del.byte();
+    const EQL: u8 = Op::Eql.byte();
+    const BKT: u8 = Op::Bkt.byte();
 
     /// 17-byte fixture differing only in the tail (the round-trip.rs pair).
     const ORG_A: &[u8] = b"hello world hello";

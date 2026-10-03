@@ -59,7 +59,7 @@
 //! distribution is now verbose-driven (`:324-327,785-787`, release builds
 //! included) — `-d dst` has zero sites (spec §18.G).
 
-use crate::defs::{BKT, DEL, EOF, EQL, ESC, INS, MAX_OFF_T, MOD, ReadType, SMPSZE};
+use crate::defs::{EOF, MAX_OFF_T, Op, ReadType, SMPSZE};
 use crate::jdebug::dbg_print;
 #[cfg(feature = "debug")]
 use crate::jdebug::{DBGAHD, DBGAHH, DBGMCH, DBGPRG, dbg};
@@ -379,7 +379,7 @@ impl<'a> JDiff<'a> {
                         // the first bytes may be kept in reserve, then switch to
                         // counting asap
                         lb_eql = self.out.put(
-                            EQL,
+                            Op::Eql,
                             1,
                             i32::from(*lc_org_val),
                             i32::from(*lc_new_val),
@@ -416,7 +416,7 @@ impl<'a> JDiff<'a> {
                      * exhausted) or an error sentinel. */
                     if !matches!(&lc_org, ByteOrEof::Byte(_)) {
                         self.out.put(
-                            INS,
+                            Op::Ins,
                             1,
                             lc_org.to_i32(),
                             i32::from(*lc_new_val),
@@ -439,7 +439,7 @@ impl<'a> JDiff<'a> {
                                 break;
                             }
                             self.out.put(
-                                MOD,
+                                Op::Mod,
                                 1,
                                 i32::from(*lc_o),
                                 i32::from(*lc_n),
@@ -485,7 +485,7 @@ impl<'a> JDiff<'a> {
                     /* Flush output buffer in debug (JDiff.cpp:269-274) */
                     #[cfg(feature = "debug")]
                     if dbg(DBGAHD) || dbg(DBGMCH) {
-                        self.out.put(ESC, 0, 0, 0, lz_pos_org, lz_pos_new);
+                        self.out.put(Op::Esc, 0, 0, 0, lz_pos_org, lz_pos_new);
                     }
 
                     /* Find a new equals-region (JDiff.cpp:276-279): the int
@@ -522,11 +522,13 @@ impl<'a> JDiff<'a> {
 
                     /* Execute offsets (JDiff.cpp:288-305) */
                     if lz_skp_org > 0 {
-                        self.out.put(DEL, lz_skp_org, 0, 0, lz_pos_org, lz_pos_new);
+                        self.out
+                            .put(Op::Del, lz_skp_org, 0, 0, lz_pos_org, lz_pos_new);
                         lz_pos_org += lz_skp_org;
                         lc_org = self.org.get(lz_pos_org, ReadType::Read);
                     } else if lz_skp_org < 0 {
-                        self.out.put(BKT, -lz_skp_org, 0, 0, lz_pos_org, lz_pos_new);
+                        self.out
+                            .put(Op::Bkt, -lz_skp_org, 0, 0, lz_pos_org, lz_pos_new);
                         lz_pos_org += lz_skp_org;
                         lc_org = self.org.get(lz_pos_org, ReadType::Read);
                     }
@@ -538,7 +540,7 @@ impl<'a> JDiff<'a> {
                                 break;
                             };
                             self.out
-                                .put(INS, 1, 0, i32::from(*lc_n), lz_pos_org, lz_pos_new);
+                                .put(Op::Ins, 1, 0, i32::from(*lc_n), lz_pos_org, lz_pos_new);
                             lz_skp_new -= 1;
                             lz_pos_new += 1;
                             lc_new = self.r#new.get(lz_pos_new, ReadType::Read);
@@ -556,7 +558,7 @@ impl<'a> JDiff<'a> {
 
         /* Flush output buffer (JDiff.cpp:315-317) */
         self.flush_eql(lz_pos_org, lz_pos_new, &mut lz_eql, &mut lb_eql);
-        self.out.put(ESC, 0, 0, 0, lz_pos_org, lz_pos_new);
+        self.out.put(Op::Esc, 0, 0, 0, lz_pos_org, lz_pos_new);
 
         /* Show progress (JDiff.cpp:319-322) */
         if self.verbose > 0 {
@@ -590,7 +592,7 @@ impl<'a> JDiff<'a> {
         /* Output accumulated equals (JDiff.cpp:342-345) */
         if *lz_eql > 0 {
             self.out
-                .put(EQL, *lz_eql, 0, 0, pos_org - *lz_eql, pos_new - *lz_eql);
+                .put(Op::Eql, *lz_eql, 0, 0, pos_org - *lz_eql, pos_new - *lz_eql);
             *lz_eql = 0;
         }
         *lb_eql = false;
@@ -1264,7 +1266,7 @@ mod tests {
     }
 
     /// One recorded operand: (opr, len, org, new).
-    type OpLog = Vec<(i32, i64, i32, i32)>;
+    type OpLog = Vec<(Op, i64, i32, i32)>;
 
     /// Shared op log so the test can retrieve the (opr, len, org, new) tuples
     /// after the recorder has been moved into the engine.
@@ -1290,7 +1292,7 @@ mod tests {
     impl JOut for RecordingOut {
         fn put(
             &mut self,
-            opr: i32,
+            opr: Op,
             len: i64,
             org: i32,
             new: i32,
@@ -1298,7 +1300,7 @@ mod tests {
             _pos_new: i64,
         ) -> bool {
             self.ops.0.borrow_mut().push((opr, len, org, new));
-            if opr == EQL {
+            if opr == Op::Eql {
                 if self.eql_cnt < MINEQL {
                     self.eql_cnt += 1;
                     self.eql_cnt >= MINEQL
@@ -1369,12 +1371,12 @@ mod tests {
         (ret, ops.0.borrow().clone())
     }
 
-    const E: i32 = EQL; // 163, brevity in the pinned sequences below
-    const M: i32 = MOD; // 166
-    const I: i32 = INS; // 165
-    const X: i32 = ESC; // 167
+    const E: Op = Op::Eql; // 163, brevity in the pinned sequences below
+    const M: Op = Op::Mod; // 166
+    const I: Op = Op::Ins; // 165
+    const X: Op = Op::Esc; // 167
 
-    fn op(opr: i32, len: i64, org: i32, new: i32) -> (i32, i64, i32, i32) {
+    fn op(opr: Op, len: i64, org: i32, new: i32) -> (Op, i64, i32, i32) {
         (opr, len, org, new)
     }
 
@@ -1396,7 +1398,10 @@ mod tests {
             ]
         );
         // The brief's core intent: no difference operand was emitted.
-        assert!(ops.iter().all(|&(opr, ..)| matches!(opr, EQL | ESC)));
+        assert!(
+            ops.iter()
+                .all(|&(opr, ..)| matches!(opr, Op::Eql | Op::Esc))
+        );
     }
 
     /// Brief step-1 test: "" → "abc" emits three byte-wise INS operands (org =
@@ -1513,7 +1518,7 @@ mod tests {
                 op(E, 1, 89, 89),
                 op(E, 1, 133, 133), // -> length mode granted (MINEQL=2)
                 op(E, 798, 0, 0),
-                op(BKT, 500, 0, 0), // backtrack 500 bytes on the original file
+                op(Op::Bkt, 500, 0, 0), // backtrack 500 bytes on the original file
                 op(E, 1, 190, 190),
                 op(E, 1, 145, 145), // -> length mode granted (MINEQL=2)
                 op(E, 698, 0, 0),
@@ -1539,9 +1544,9 @@ mod tests {
             ops,
             vec![
                 op(E, 1, 89, 89),
-                op(E, 1, 133, 133), // -> length mode granted (MINEQL=2)
-                op(E, 498, 0, 0),   // 500 equal bytes total
-                op(DEL, 100, 0, 0), // delete the 100 shifted-out bytes
+                op(E, 1, 133, 133),     // -> length mode granted (MINEQL=2)
+                op(E, 498, 0, 0),       // 500 equal bytes total
+                op(Op::Del, 100, 0, 0), // delete the 100 shifted-out bytes
                 op(E, 1, 103, 103),
                 op(E, 1, 136, 136), // -> length mode granted (MINEQL=2)
                 op(E, 398, 0, 0),   // remaining 400 equal bytes
@@ -1631,7 +1636,7 @@ mod tests {
                 op(E, 1, 89, 89),
                 op(E, 1, 133, 133), // -> length mode granted (MINEQL=2)
                 op(E, 998, 0, 0),
-                op(DEL, 200, 0, 0),
+                op(Op::Del, 200, 0, 0),
                 op(E, 1, 49, 49),
                 op(E, 1, 35, 35), // -> length mode granted (MINEQL=2)
                 op(E, 1798, 0, 0),

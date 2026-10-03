@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use jojodiff_cli_rs::defs::{BKT, ESC, INS, MOD};
+use jojodiff_cli_rs::defs::Op;
 
 /// Byte-exact greeting block (`main.cpp:480-509`): version line, copyright,
 /// blank line, GPL block (0.8.5 wording, final line
@@ -1702,7 +1702,7 @@ fn fixture(name: &str) -> PathBuf {
 /// `--compat-081` output, §21.16) has zero implicit-MOD segments.
 fn count_implicit_mod_segments(patch: &[u8]) -> usize {
     // Opcode range BKT..=MOD (0xA2..=0xA6): BKT, EQL, DEL, INS, MOD.
-    let is_opcode = |b: u8| (BKT..=MOD).contains(&i32::from(b));
+    let is_opcode = |b: u8| (Op::Bkt.byte()..=Op::Mod.byte()).contains(&b);
     // Advances past one `ufGetInt` length tier (`JPatcht.cpp:50-85`); a
     // truncated length simply ends the walk.
     let skip_len = |patch: &[u8], i: &mut usize| {
@@ -1726,14 +1726,14 @@ fn count_implicit_mod_segments(patch: &[u8]) -> usize {
     while i < patch.len() {
         match run {
             Some(op) => {
-                if patch[i] == ESC as u8 {
+                if patch[i] == Op::Esc.byte() {
                     if i + 1 >= patch.len() {
                         break; // trailing lone ESC at end of stream
                     }
                     let nxt = patch[i + 1];
                     if is_opcode(nxt) && nxt != op {
                         i += 2; // new explicit record
-                        if nxt == MOD as u8 || nxt == INS as u8 {
+                        if nxt == Op::Mod.byte() || nxt == Op::Ins.byte() {
                             run = Some(nxt);
                         } else {
                             run = None;
@@ -1747,21 +1747,21 @@ fn count_implicit_mod_segments(patch: &[u8]) -> usize {
                 }
             }
             None => {
-                if patch[i] == ESC as u8 && i + 1 < patch.len() && is_opcode(patch[i + 1]) {
+                if patch[i] == Op::Esc.byte() && i + 1 < patch.len() && is_opcode(patch[i + 1]) {
                     let nxt = patch[i + 1];
                     i += 2;
-                    if nxt == MOD as u8 || nxt == INS as u8 {
+                    if nxt == Op::Mod.byte() || nxt == Op::Ins.byte() {
                         run = Some(nxt);
                     } else {
                         skip_len(patch, &mut i);
                     }
-                } else if patch[i] == ESC as u8 && i + 1 == patch.len() {
+                } else if patch[i] == Op::Esc.byte() && i + 1 == patch.len() {
                     break; // trailing lone ESC (JPatcht trailing-byte case)
                 } else {
                     // Raw data byte, ESC ESC or ESC <unknown> at a sequence
                     // start: the decoder defaults to MOD — implicit segment.
                     implicit += 1;
-                    run = Some(MOD as u8);
+                    run = Some(Op::Mod.byte());
                 }
             }
         }
