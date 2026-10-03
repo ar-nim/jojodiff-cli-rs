@@ -37,7 +37,11 @@ cast_lossless = "deny"
 # byte-pinned to JojoDiff 0.8.5 C++ behavior — and pedantic-at-large.
 
 [dependencies]
-# none — std only
+# First runtime dependency (spec §13 dependency record): `thiserror` derives
+# the `Display`/`std::error::Error` impls of the library-wide `JDiffError`
+# (src/error.rs). Compile-time (derive) only — the port stays otherwise
+# std-only, and every diagnostic byte remains hand-pinned.
+thiserror = "2"
 
 [dev-dependencies]
 pretty_assertions = "1.4"

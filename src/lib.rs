@@ -6,12 +6,16 @@
 //! held byte-identical to the original C++ implementation, which serves as
 //! the verification oracle.
 //!
-//! The library is std-only and contains no `unsafe`. See the repository README
-//! for project status and the docs in `docs/superpowers/` for the port plan and
-//! functional specification.
+//! The library is std-only apart from one compile-time dependency,
+//! [`thiserror`](https://docs.rs/thiserror) (spec §13): it derives the
+//! `Display`/`std::error::Error` impls of the library-wide
+//! [`error::JDiffError`] — no runtime code beyond the generated impls. There
+//! is no `unsafe`. See the repository README for project status and the docs
+//! in `docs/superpowers/` for the port plan and functional specification.
 
 pub mod cli;
 pub mod defs;
+pub mod error;
 pub mod jdebug;
 pub mod jdiff;
 pub mod jfile;
