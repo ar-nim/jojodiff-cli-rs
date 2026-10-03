@@ -43,6 +43,12 @@ cast_lossless = "deny"
 # std-only, and every diagnostic byte remains hand-pinned.
 thiserror = "2"
 
+# Second runtime dependency: the thin `jdiff` binary (src/bin/jdiff.rs) wraps
+# `cli::run`'s `Result` in `anyhow` (spec §8.1). The library itself stays
+# std-only apart from `thiserror`; `JDiffError` crosses into `anyhow::Error`
+# via its `std::error::Error + Send + Sync + 'static` impls.
+anyhow = "1"
+
 [dev-dependencies]
 pretty_assertions = "1.4"
 jojodiff = "0.1.2"   # francisdb crate, cross-validation only (tests/oracle.rs)
