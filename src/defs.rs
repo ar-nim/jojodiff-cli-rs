@@ -177,6 +177,18 @@ pub fn c_atoi(s: &OsStr) -> i32 {
     val.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
+/// C `%c` with JojoDiff's printable-ASCII filter: the byte itself when
+/// `32 <= v <= 127`, a space otherwise (shared by the DBGCMP result trace
+/// `JMatchTable.cpp:857-864`, the ASCII listing `JOutAsc.cpp:53-54`, and
+/// the patch verbose trace `JPatcht.cpp:104-106`).
+pub fn print_char(v: i32) -> char {
+    if (32..=127).contains(&v) {
+        char::from_u32(v as u32).unwrap_or(' ')
+    } else {
+        ' '
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,6 +280,19 @@ mod tests {
         assert_eq!(c_atoi(OsStr::new("abc")), 0);
         assert_eq!(c_atoi(OsStr::new("1")), 1); // -m 1 → 1/2*1024 = 0
         assert_eq!(c_atoi(OsStr::new("")), 0);
+    }
+
+    /// The C `%c` printable-ASCII filter shared by the DBGCMP trace, the
+    /// ASCII listing and the patch verbose trace (`JMatchTable.cpp:857-864`).
+    #[test]
+    fn print_char_matches_c_percent_c_filter() {
+        assert_eq!(print_char(0x68), 'h');
+        assert_eq!(print_char(32), ' ');
+        assert_eq!(print_char(65), 'A');
+        assert_eq!(print_char(127), '\u{7f}');
+        assert_eq!(print_char(31), ' ');
+        assert_eq!(print_char(128), ' ');
+        assert_eq!(print_char(-1), ' ');
     }
 
     #[test]

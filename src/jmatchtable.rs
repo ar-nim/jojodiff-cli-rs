@@ -55,11 +55,11 @@
 //! assert_eq!(tbl.getbest(0, 600), Some((1100, 600)));
 //! ```
 
-#[cfg(feature = "debug")]
-use crate::defs::p8;
 use crate::defs::{EOB, ReadType, SMPSZE, get_lower_prime};
 #[cfg(feature = "debug")]
-use crate::jdebug::{DBGCMP, DBGMCH, c_chr, dbg, dbg_print};
+use crate::defs::{p8, print_char};
+#[cfg(feature = "debug")]
+use crate::jdebug::{DBGCMP, DBGMCH, dbg, dbg_print};
 use crate::jfile::JFile;
 #[cfg(feature = "debug")]
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -1342,9 +1342,9 @@ fn check(
             } else {
                 "NOK"
             },
-            c_chr(lc_org),
+            print_char(lc_org),
             lc_org as u8,
-            c_chr(lc_new),
+            print_char(lc_new),
             lc_new as u8,
         ));
     }

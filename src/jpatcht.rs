@@ -20,7 +20,7 @@
 
 use std::io::Write;
 
-use crate::defs::{BKT, DEL, EOF, EQL, ESC, EXI_ERR, EXI_OK, INS, MOD, ReadType, p8};
+use crate::defs::{BKT, DEL, EOF, EQL, ESC, EXI_ERR, EXI_OK, INS, MOD, ReadType, p8, print_char};
 use crate::jdebug::dbg_print;
 use crate::jfile::JFile;
 use crate::jfileout::JFileOut;
@@ -142,11 +142,7 @@ impl<'a, W: Write> JPatcht<'a, W> {
                 p8(lz_pos_out + az_off),
                 if li_opr == MOD { "MOD" } else { "INS" },
                 ai_dta,
-                if (32..=127).contains(&ai_dta) {
-                    char::from_u32(ai_dta as u32).unwrap_or(' ')
-                } else {
-                    ' '
-                },
+                print_char(ai_dta),
             ));
         }
         1

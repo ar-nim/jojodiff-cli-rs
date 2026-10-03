@@ -22,7 +22,7 @@
 use std::io::Write;
 
 use super::{JOut, OutStats};
-use crate::defs::{BKT, DEL, EQL, ESC, INS, MOD};
+use crate::defs::{BKT, DEL, EQL, ESC, INS, MOD, print_char};
 
 /// ASCII listing writer (`JOutAsc`, `JOutAsc.cpp:26-126`), generic over any
 /// `std::io::Write` sink (the C++ writes to a `FILE *`).
@@ -52,16 +52,6 @@ impl<W: Write> JOutAsc<W> {
     /// flush/drop buffered writers such as `BufWriter`).
     pub fn into_inner(self) -> W {
         self.out
-    }
-
-    /// The C `printf` `%c` argument rendering (`JOutAsc.cpp:53-54`): the
-    /// byte itself when `32 <= b <= 127`, a space otherwise.
-    fn chr(b: i32) -> char {
-        if (32..=127).contains(&b) {
-            char::from_u32(b as u32).expect("32..=127 is a valid char scalar")
-        } else {
-            ' '
-        }
     }
 
     /// Length encoding size in the binary format (`JOutAsc::ufPutSze`,
@@ -106,8 +96,8 @@ impl<W: Write> JOut for JOutAsc<W> {
                 /* "MOD %02x %02x %c-%c\n" (JOutAsc.cpp:51) */
                 self.out(format_args!(
                     "MOD {org:02x} {new:02x} {}-{}\n",
-                    Self::chr(org),
-                    Self::chr(new)
+                    print_char(org),
+                    print_char(new)
                 ));
 
                 if self.opr_cur != opr {
@@ -122,7 +112,7 @@ impl<W: Write> JOut for JOutAsc<W> {
 
             INS => {
                 /* "INS     %02x  -%c\n" (JOutAsc.cpp:64) */
-                self.out(format_args!("INS     {new:02x}  -{}\n", Self::chr(new)));
+                self.out(format_args!("INS     {new:02x}  -{}\n", print_char(new)));
 
                 if self.opr_cur != opr {
                     self.opr_cur = opr;
@@ -156,8 +146,8 @@ impl<W: Write> JOut for JOutAsc<W> {
                 /* "EQL %02x %02x %c-%c\n" (JOutAsc.cpp:92) */
                 self.out(format_args!(
                     "EQL {org:02x} {new:02x} {}-{}\n",
-                    Self::chr(org),
-                    Self::chr(new)
+                    print_char(org),
+                    print_char(new)
                 ));
 
                 if self.opr_cur != opr {
