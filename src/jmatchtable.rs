@@ -152,6 +152,50 @@ struct Node {
     cmp: i32,
 }
 
+/// The two bucket-chain link fields of [`Node`] — the gliding and the
+/// colliding hashtable (`JMatchTable.h`), the only difference between
+/// `delGld` and `delCol`.
+#[derive(Clone, Copy)]
+enum Link {
+    Gld,
+    Col,
+}
+
+impl Link {
+    fn get(self, n: &Node) -> Option<usize> {
+        match self {
+            Link::Gld => n.gld,
+            Link::Col => n.col,
+        }
+    }
+    fn set(self, n: &mut Node, v: Option<usize>) {
+        match self {
+            Link::Gld => n.gld = v,
+            Link::Col => n.col = v,
+        }
+    }
+}
+
+/// Unlink `cur` from the bucket chain rooted at `tbl[idx]`
+/// (`delGld`/`delCol` common shape, `JMatchTable.cpp:893-926`). The last
+/// node's dangling `nxt` convention is unaffected — this only relinks the
+/// bucket chain.
+fn del_bucket(nodes: &mut [Node], tbl: &mut [Option<usize>], cur: usize, idx: usize, link: Link) {
+    if tbl[idx] == Some(cur) {
+        tbl[idx] = link.get(&nodes[cur]);
+    } else {
+        let mut p = tbl[idx];
+        while let Some(i) = p {
+            if link.get(&nodes[i]) == Some(cur) {
+                let nxt = link.get(&nodes[cur]);
+                link.set(&mut nodes[i], nxt);
+                break;
+            }
+            p = link.get(&nodes[i]);
+        }
+    }
+}
+
 /// JojoDiff matching table (`JMatchTable.h:33`): builds and maintains a table
 /// of matching regions between two files and selects the "best" match.
 pub struct JMatchTable {
@@ -1207,38 +1251,14 @@ impl JMatchTable {
         // C++ `%` on a negative izOrg yields a negative index (UB); izOrg is
         // only ever filled from non-negative match positions.
         let idx = (self.nodes[cur].org % i64::from(self.mch_pme)) as usize;
-        if self.gld_tbl[idx] == Some(cur) {
-            self.gld_tbl[idx] = self.nodes[cur].gld;
-        } else {
-            let mut p = self.gld_tbl[idx];
-            while let Some(gi) = p {
-                if self.nodes[gi].gld == Some(cur) {
-                    self.nodes[gi].gld = self.nodes[cur].gld;
-                    break;
-                } else {
-                    p = self.nodes[gi].gld;
-                }
-            }
-        }
+        del_bucket(&mut self.nodes, &mut self.gld_tbl, cur, idx, Link::Gld);
     }
 
     /// Delete element from colliding hashtable (`delCol`,
     /// `JMatchTable.cpp:912-926`).
     fn del_col(&mut self, cur: usize) {
         let idx = (self.nodes[cur].dlt.abs() % i64::from(self.mch_pme)) as usize;
-        if self.col_tbl[idx] == Some(cur) {
-            self.col_tbl[idx] = self.nodes[cur].col;
-        } else {
-            let mut p = self.col_tbl[idx];
-            while let Some(ci) = p {
-                if self.nodes[ci].col == Some(cur) {
-                    self.nodes[ci].col = self.nodes[cur].col;
-                    break;
-                } else {
-                    p = self.nodes[ci].col;
-                }
-            }
-        }
+        del_bucket(&mut self.nodes, &mut self.col_tbl, cur, idx, Link::Col);
     }
 
     /// Get number of hash repairs (matches repaired by comparing)
