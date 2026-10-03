@@ -20,7 +20,7 @@ use crate::jout::{JOut, JOutAsc, JOutBin, JOutRgn};
 /// fresh readers. The output sink arrives from the caller's
 /// `main.cpp:754-774` open; `nam_out` re-derives the stdout decision for
 /// the writer wrapping.
-pub fn diff_phase(
+pub(crate) fn diff_phase(
     opts: &mut Options,
     nam_out: &OsStr,
     buffers: &Buffers,

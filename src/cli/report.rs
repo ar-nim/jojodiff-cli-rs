@@ -11,7 +11,7 @@ use crate::jdebug::dbg_print;
 /// Greeting block (`main.cpp:480-509`), written line by line like the C++
 /// `fprintf` calls — including the 0.8.5 GPL wording and the "adressing"
 /// (sic) line computed from `MAX_OFF_T` (no 0.8.1 `+1`).
-pub fn print_greeting() {
+pub(crate) fn print_greeting() {
     dbg_print(format_args!(
         "\nJDIFF - binary diff version {JDIFF_VERSION}\n"
     ));
@@ -65,7 +65,7 @@ pub fn print_greeting() {
 /// Usage/help block (`main.cpp:511-557`); the `-n`/`-x` lines print the
 /// current (post-parse) match limits, and the stale texts are replicated
 /// verbatim (spec §21.10).
-pub fn print_usage(mch_min: i32, mch_max: i32) {
+pub(crate) fn print_usage(mch_min: i32, mch_max: i32) {
     dbg_print(format_args!("\n"));
     dbg_print(format_args!(
         "JDiff differentiates two files so that the second file can be recreated from\n"
@@ -167,7 +167,7 @@ pub fn print_usage(mch_min: i32, mch_max: i32) {
 
 /// The `-hh` notes block (`main.cpp:559-593`, printed when liHlp > 1 or
 /// verbose > 2), verbatim including the two-space "blank" lines.
-pub fn print_notes() {
+pub(crate) fn print_notes() {
     dbg_print(format_args!("\nNotes:\n"));
     dbg_print(format_args!(
         " - Options -b, -bb, -f, -ff, ... should be used before other options.\n"

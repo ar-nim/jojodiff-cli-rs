@@ -17,7 +17,7 @@ use crate::jpatcht::JPatcht;
 /// `-t` (`is_test`, §21.3) — appends to the diff output; open failures
 /// propagate to the caller's boundary, which prints the pinned text at the
 /// same point in the output stream as the old inline `report` calls.
-pub fn patch_phase(
+pub(crate) fn patch_phase(
     opts: &mut Options,
     nam_org: &OsStr,
     nam_new: &OsStr,

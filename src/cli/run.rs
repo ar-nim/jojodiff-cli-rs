@@ -174,9 +174,9 @@ pub fn run(args: &[OsString]) -> Result<i32, JDiffError> {
 }
 
 /// The two input readers (`lpJflOrg`/`lpJflNew`).
-pub struct Inputs {
-    pub org: Box<dyn JFile>,
-    pub new: Box<dyn JFile>,
+pub(crate) struct Inputs {
+    pub(crate) org: Box<dyn JFile>,
+    pub(crate) new: Box<dyn JFile>,
 }
 
 /// Opens both input files as buffered look-ahead readers
@@ -184,7 +184,7 @@ pub struct Inputs {
 /// else opens the named file; failures return `OpenFirst`/`OpenSecond` with
 /// the name moved in — the boundary (`cli::error::report`) prints the
 /// `main.cpp` messages and exits 3/4.
-pub fn open_inputs(
+pub(crate) fn open_inputs(
     nam_org: &OsStr,
     nam_new: &OsStr,
     buf_org: i64,
@@ -227,7 +227,7 @@ pub fn open_inputs(
 /// boundary (`cli::error::report`) prints the pinned message and exits
 /// `-EXI_OUT` (5). `append` selects the `-t` reopen path (the same FILE*
 /// appended after the diff output).
-pub fn open_output_file(nam_out: &OsStr, append: bool) -> Result<File, JDiffError> {
+pub(crate) fn open_output_file(nam_out: &OsStr, append: bool) -> Result<File, JDiffError> {
     let attempt = if append {
         File::options().append(true).open(nam_out)
     } else {
@@ -290,7 +290,7 @@ impl Seek for Input {
 }
 
 /// Output sink: a real file or locked stdout (`main.cpp:754-774`).
-pub enum Sink {
+pub(crate) enum Sink {
     File(File),
     Stdout(std::io::StdoutLock<'static>),
 }
