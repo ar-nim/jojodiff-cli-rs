@@ -202,6 +202,10 @@ impl<W: Write> JOutBin<W> {
     fn put_byte(&mut self, byt: i32) {
         if self.out_esc {
             self.out_esc = false;
+            // Truncation safety: `byt` is always `i32::from(u8)` data at
+            // this site (0..=255), so the `as u8` is lossless and the
+            // range matches the C `BKT..=ESC` int compare; a negative
+            // `byt` cannot occur here.
             if (Op::Bkt.byte()..=Op::Esc.byte()).contains(&(byt as u8)) {
                 /* output an additional <esc> byte */
                 self.raw(Op::Esc.byte());

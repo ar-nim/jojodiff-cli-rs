@@ -105,6 +105,10 @@ const CMPEOB: i32 = -3;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CmpVal {
     /// Validated run length (C++ `>= 0`).
+    ///
+    /// Invariant: the payload is always non-negative — negative legacy
+    /// values are `Est`, never `Run`; `from_legacy_i32` guards `v >= 0`,
+    /// and every direct construction is `Run(0)`.
     Run(i32),
     /// `CMPINV` -1 — invalid, may be reused.
     Inv,
