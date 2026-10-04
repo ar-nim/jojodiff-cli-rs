@@ -224,10 +224,27 @@ pub fn print_char(v: i32) -> char {
     }
 }
 
+/// Human-readable MiB label for memory-budget messages: one decimal place,
+/// `Mb` suffix matching the options' own units (`-m`/`-i` are MB).
+pub fn fmt_mb(bytes: i64) -> String {
+    format!("{:.1}Mb", bytes as f64 / (1024.0 * 1024.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+
+    /// Memory-budget labels (`fmt_mb`): one decimal, `Mb` suffix matching
+    /// the options' own units (-m/-i are MB).
+    #[test]
+    fn fmt_mb_labels() {
+        assert_eq!(fmt_mb(0), "0.0Mb");
+        assert_eq!(fmt_mb(1048576), "1.0Mb");
+        assert_eq!(fmt_mb(33554172), "32.0Mb");
+        assert_eq!(fmt_mb(2148531564), "2049.0Mb"); // 2048.9995 MiB rounds up
+        assert_eq!(fmt_mb(1125899905794048), "1073741823.0Mb"); // 2^50 - 2^20
+    }
 
     #[test]
     fn constants_match_cxx() {
