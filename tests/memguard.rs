@@ -155,3 +155,31 @@ fn big_patch_files_stream_unbounded() {
         );
     }
 }
+
+/// Flag-chain regression (plan task 9): `-ffffffff` (8x -f halves
+/// mch_max to 0) and `-bbbbbbbbbbbb -m 8 -i 1` (12x -b wraps it to
+/// i32::MIN with small buffers) both panicked in JMatchTable's ctor
+/// assert (rc=101). Both now run the normal diff path (exit 1).
+#[test]
+fn flag_chains_floor_instead_of_panicking() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = fixtures(dir.path());
+    // -f x8: buffers 16 MB, table 1 MB (hsh_mbt halves to 0 -> clamped
+    // to 1 by JHashPos) — deterministic on any machine.
+    jdiff()
+        .args(["-ffffffff", "-j"])
+        .arg(&a)
+        .arg(&b)
+        .arg(dir.path().join("f8.patch"))
+        .assert()
+        .code(1);
+    // -b x12 + small -m/-i: without the floor this reached the ctor with
+    // mch_max = i32::MIN (observed rc=101 pre-fix).
+    jdiff()
+        .args(["-bbbbbbbbbbbb", "-m", "8", "-i", "1", "-j"])
+        .arg(&a)
+        .arg(&b)
+        .arg(dir.path().join("b12.patch"))
+        .assert()
+        .code(1);
+}

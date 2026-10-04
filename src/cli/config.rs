@@ -303,6 +303,14 @@ pub fn parse(args: &[OsString]) -> Options {
     let _ = lb_stdio;
     let _ = li_tst;
 
+    // Post-parse floor (plan task 9): -f chains (8+) and -b chains (12+)
+    // can drive mch_max to <= 0 — JMatchTable's ctor assert dies there
+    // today (the C++ hits calloc(0)/modulo-zero UB). Floor like the -x
+    // handler (<= 0 -> 1024); safe because <= 0 never ran.
+    if mch_max <= 0 {
+        mch_max = 1024;
+    }
+
     Options {
         fun,
         out_typ,
@@ -506,6 +514,21 @@ mod tests {
         let b = size_buffers(&o);
         let p = memory_footprint(&o, &b);
         assert!(p.total > 1_000_000_000_000_000); // petabyte-scale
+    }
+
+    /// Flag-chain floor (plan task 9): `-f` x8 halves mch_max 128 -> 0 and
+    /// `-b` x12 wraps `*4` to i32::MIN — both tripped JMatchTable's ctor
+    /// assert (rc=101; C++ calloc(0)/%0 UB). After parsing, mch_max is
+    /// floored like a non-positive -x value; no working config changes.
+    #[test]
+    fn f_and_b_chains_floor_mch_max() {
+        let f8 = parse(&[argv0("jdiff"), OsString::from("-ffffffff")]);
+        assert_eq!(f8.mch_max, 1024);
+        let b12 = parse(&[argv0("jdiff"), OsString::from("-bbbbbbbbbbbb")]);
+        assert_eq!(b12.mch_max, 1024);
+        // A 7-deep -f chain stays at 1 — the floor must not touch it.
+        let f7 = parse(&[argv0("jdiff"), OsString::from("-fffffff")]);
+        assert_eq!(f7.mch_max, 1);
     }
 
     #[test]
