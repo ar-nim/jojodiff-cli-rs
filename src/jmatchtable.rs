@@ -874,53 +874,68 @@ impl JMatchTable {
                     tst_new = n.tst;
                 }
                 cur_cmp = cc.as_legacy_i32();
-            } else if !gliding
-                && let CmpVal::Run(c) = n.cmp
-                && c > 0
-                && n.tst - tst_new + i64::from(c) > i64::from(EQLMIN)
-            {
-                // The new test position is within the previous test result.
-                // Report the remaining length (:476-478). C++: int assignment
-                // of an off_t expression.
-                cur_cmp = (n.tst - tst_new + i64::from(c)) as i32;
             } else {
-                // The previous test result cannot be reused: check (again)
-                // determine number of bytes to check (:482-486)
-                let mut d = n.beg - tst_new; // lzDst
-                // The C++ spells the clamp as if/else-if (:483-486) — kept 1:1.
-                #[allow(clippy::manual_clamp)]
-                if d < MINDST {
-                    d = MINDST;
-                } else if d > MAXDST {
-                    d = MAXDST;
-                }
-                dst = d;
-
-                // check (:489-490): cmp_all reads hard, otherwise soft
-                let sft = if self.cmp_all {
-                    ReadType::HardAhead
+                // Reuse candidate for the branch below. MSRV 1.85: let chains
+                // stabilize in 1.88, so the chained condition
+                // `!gliding && let CmpVal::Run(c) = n.cmp && c > 0 && …`
+                // is hoisted into a precomputed match (same conjunct set —
+                // every part is pure, so evaluation order is irrelevant).
+                let reuse = if !gliding {
+                    match n.cmp {
+                        CmpVal::Run(c)
+                            if c > 0 && n.tst - tst_new + i64::from(c) > i64::from(EQLMIN) =>
+                        {
+                            Some((n.tst - tst_new + i64::from(c)) as i32)
+                        }
+                        _ => None,
+                    }
                 } else {
-                    ReadType::SoftAhead
+                    None
                 };
-                let gld_arg = if gliding { n.gldcnt } else { 0 };
-                // C++ passes the off_t lzDst to check's int aiLen (truncating).
-                cur_cmp = check(
-                    org,
-                    newf,
-                    &mut tst_org,
-                    &mut tst_new,
-                    d as i32,
-                    gld_arg,
-                    sft,
-                );
-
-                // store result (:493-497)
-                let n = &mut self.nodes[cur];
-                n.tst = tst_new;
-                if matches!(n.cmp, CmpVal::Inv) && cur_cmp <= 0 {
-                    // don't erase an invalid marker
+                if let Some(cur) = reuse {
+                    // The new test position is within the previous test result.
+                    // Report the remaining length (:476-478). C++: int assignment
+                    // of an off_t expression.
+                    cur_cmp = cur;
                 } else {
-                    n.cmp = CmpVal::from_legacy_i32(cur_cmp);
+                    // The previous test result cannot be reused: check (again)
+                    // determine number of bytes to check (:482-486)
+                    let mut d = n.beg - tst_new; // lzDst
+                    // The C++ spells the clamp as if/else-if (:483-486) — kept 1:1.
+                    #[allow(clippy::manual_clamp)]
+                    if d < MINDST {
+                        d = MINDST;
+                    } else if d > MAXDST {
+                        d = MAXDST;
+                    }
+                    dst = d;
+
+                    // check (:489-490): cmp_all reads hard, otherwise soft
+                    let sft = if self.cmp_all {
+                        ReadType::HardAhead
+                    } else {
+                        ReadType::SoftAhead
+                    };
+                    let gld_arg = if gliding { n.gldcnt } else { 0 };
+                    // C++ passes the off_t lzDst to check's int aiLen (truncating).
+                    cur_cmp = check(
+                        org,
+                        newf,
+                        &mut tst_org,
+                        &mut tst_new,
+                        d as i32,
+                        gld_arg,
+                        sft,
+                    );
+
+                    // store result (:493-497)
+                    let n = &mut self.nodes[cur];
+                    n.tst = tst_new;
+                    if matches!(n.cmp, CmpVal::Inv) && cur_cmp <= 0 {
+                        // don't erase an invalid marker
+                    } else {
+                        n.cmp = CmpVal::from_legacy_i32(cur_cmp);
+                    }
                 }
             }
         }
