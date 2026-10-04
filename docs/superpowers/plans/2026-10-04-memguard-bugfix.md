@@ -23,7 +23,9 @@ The C++ has an `EXI_MEM` exit code (`JDefs.h:146-158`, exit 10, `"\nError alloca
 
 **Verified reference points** (used as test vectors below, cross-checked against the live binary): `get_lower_prime(256)=251`, `get_lower_prime(2048)=2039`, `get_lower_prime(2796202)=2796181`, `get_lower_prime(179044352)=179044297` (`-i 2049`), `get_lower_prime(536870912)=536870909` (`-i 6144`), `NODE_SIZE=104`, default footprint 35 668 652 bytes.
 
-**Out of scope (known, deliberately not fixed here):** diff-path write errors are swallowed (`IgnoringWriter`, oracle-pinned C++ behavior); `-ffffffff` (8× `-f`) drives `mch_max` to 0 and panics in `JMatchTable`'s ctor assert (C++ is UB there too — same class as this plan's findings but a different mechanism; registered as a separate future fix).
+**Out of scope (known, deliberately not fixed here):** diff-path write errors are swallowed (`IgnoringWriter`, oracle-pinned C++ behavior).
+
+**Also fixed by this plan (Task 9) — flag-chain panics.** `-f` takes no argument (only `a: d: i: k: m: n: x:` and optional `t::` do in the optstring), so `-ffffffff` is one getopt *cluster* = eight `-f` flags, like `-vv` is two `-v`s. Upstream designs two levels (`-f`, `-ff`) but never guards the arithmetic: each `-f` does `mch_max /= 2`, so 128→64→32→16→8→4→2→1→**0** at the eighth, the bucket prime becomes 0, and `JMatchTable`'s ctor assert fires (observed rc=101). `-b` chains reach the same assert by wrapping: `mch_max.wrapping_mul(4)` is `i32::MIN` after 12 `-b`s — observed rc=101 with `-bbbbbbbbbbbb -m 8 -i 1` (small buffers reach the ctor; without a small `-m` the chain dies earlier in a giant allocation, which Tasks 5/6 already convert to exit 10). The C++ is UB at every one of these points (`calloc(0)`, then a modulo-by-zero on the first bucket access).
 
 ## Global Constraints
 
@@ -46,12 +48,12 @@ The C++ has an `EXI_MEM` exit code (`JDefs.h:146-158`, exit 10, `"\nError alloca
 | `src/jmatchtable.rs` | `NODE_SIZE`, `mch_pme_for`; `try_reserve` ctor | 2, 6 |
 | `src/jdiff.rs` | `JDiff::new` becomes fallible | 6 |
 | `src/lib.rs` | `try_zeroed_vec` allocation helper | 6 |
-| `src/cli/config.rs` | `MemoryPlan` + `memory_footprint` | 3 |
+| `src/cli/config.rs` | `MemoryPlan` + `memory_footprint`; post-parse `mch_max` floor | 3, 9 |
 | `src/cli/sysmem.rs` (new) | `/proc/meminfo` ceiling, headroom, escape-hatch env | 4 |
 | `src/cli/mod.rs` | register `sysmem` module | 4 |
 | `src/cli/run.rs` | Layer-A gate + messages; Layer-B note arms | 5, 6 |
 | `src/cli/diff_phase.rs` | `JDiff::new?`, i64 stat line | 6, 7 |
-| `tests/memguard.rs` (new) | integration tests | 5, 6, 8 |
+| `tests/memguard.rs` (new) | integration tests | 5, 6, 8, 9 |
 | spec §21 + release notes | deviation register | 8 |
 
 ---
@@ -996,9 +998,97 @@ rtk git commit -m "test: big-patch streaming regression; docs: spec 21.19 memory
 
 ---
 
+### Task 9: Flag-chain floor — `mch_max <= 0` never reaches the engine
+
+**Files:**
+- Modify: `src/cli/config.rs` (one floor in `parse`, before the `Options` construction at ~line 305)
+- Test: `src/cli/config.rs` tests module; `tests/memguard.rs`
+
+**Interfaces:** none new — this only guarantees the invariant `Options.mch_max >= 1` that `JMatchTable::new`'s assert (and the C++'s `calloc`) rely on.
+
+**Background for the implementer:** `-f` has no argument; `-ffffffff` is a cluster of eight flags. Each `-f` beyond the first does `mch_max /= 2` (0 at the 8th); each `-b` does `mch_max.wrapping_mul(4)` (`i32::MIN` at the 12th). `mch_max <= 0` makes `mch_pme_for` return `<= 0` and the ctor assert dies (rc=101 today; C++ `calloc(0)` + modulo-zero UB). The `-x` handler already floors its own `<= 0` to 1024 (`src/cli/config.rs:262-269`) — this task applies the same floor once, after parsing, so no combination can reach the engine with a non-positive value. Safe by construction: every `mch_max <= 0` configuration dies today, so no working behavior can change.
+
+- [ ] **Step 1: Write the failing unit test** — append to `config.rs` tests:
+
+```rust
+    /// Flag-chain floor (plan task 9): `-f` x8 halves mch_max 128 -> 0 and
+    /// `-b` x12 wraps `*4` to i32::MIN — both tripped JMatchTable's ctor
+    /// assert (rc=101; C++ calloc(0)/%0 UB). After parsing, mch_max is
+    /// floored like a non-positive -x value; no working config changes.
+    #[test]
+    fn f_and_b_chains_floor_mch_max() {
+        let f8 = parse(&[argv0("jdiff"), OsString::from("-ffffffff")]);
+        assert_eq!(f8.mch_max, 1024);
+        let b12 = parse(&[argv0("jdiff"), OsString::from("-bbbbbbbbbbbb")]);
+        assert_eq!(b12.mch_max, 1024);
+        // A 7-deep -f chain stays at 1 — the floor must not touch it.
+        let f7 = parse(&[argv0("jdiff"), OsString::from("-fffffff")]);
+        assert_eq!(f7.mch_max, 1);
+    }
+```
+
+- [ ] **Step 2: Run** — `rtk cargo test --release f_and_b_chains` → FAIL (`f8.mch_max` is 0, `b12.mch_max` is `i32::MIN`).
+
+- [ ] **Step 3: Implement** — in `parse`, immediately before the `Options { … }` construction:
+
+```rust
+    // Post-parse floor (plan task 9): -f chains (8+) and -b chains (12+)
+    // can drive mch_max to <= 0 — JMatchTable's ctor assert dies there
+    // today (the C++ hits calloc(0)/modulo-zero UB). Floor like the -x
+    // handler (<= 0 -> 1024); safe because <= 0 never ran.
+    if mch_max <= 0 {
+        mch_max = 1024;
+    }
+```
+
+- [ ] **Step 4: Write the integration regression test** — append to `tests/memguard.rs`:
+
+```rust
+/// Flag-chain regression (plan task 9): `-ffffffff` (8x -f halves
+/// mch_max to 0) and `-bbbbbbbbbbbb -m 8 -i 1` (12x -b wraps it to
+/// i32::MIN with small buffers) both panicked in JMatchTable's ctor
+/// assert (rc=101). Both now run the normal diff path (exit 1).
+#[test]
+fn flag_chains_floor_instead_of_panicking() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = fixtures(dir.path());
+    // -f x8: buffers 16 MB, table 1 MB (hsh_mbt halves to 0 -> clamped
+    // to 1 by JHashPos) — deterministic on any machine.
+    jdiff()
+        .args(["-ffffffff", "-j"])
+        .arg(&a)
+        .arg(&b)
+        .arg(dir.path().join("f8.patch"))
+        .assert()
+        .code(1);
+    // -b x12 + small -m/-i: without the floor this reached the ctor with
+    // mch_max = i32::MIN (observed rc=101 pre-fix).
+    jdiff()
+        .args(["-bbbbbbbbbbbb", "-m", "8", "-i", "1", "-j"])
+        .arg(&a)
+        .arg(&b)
+        .arg(dir.path().join("b12.patch"))
+        .assert()
+        .code(1);
+}
+```
+
+- [ ] **Step 5: Run everything** — `rtk cargo test --release` → all PASS (the pre-fix state fails Step 4's first assertion with rc=101, which is the red step for the integration side).
+
+- [ ] **Step 6: Commit**
+
+```bash
+rtk git add src/cli/config.rs tests/memguard.rs
+rtk git commit -m "fix: floor mch_max after -f/-b flag chains (-f x8 / -b x12 hit the ctor assert)"
+```
+
+
+
+---
+
 ## Self-Review (completed during planning)
 
-1. **Coverage:** Finding 1 → Tasks 3–6 (gate + try_reserve + messages); finding 2 → Task 2 (helper) + Task 7 (rewire); "don't break valid big patches" → Task 8 streaming test + differential wave; user-facing guidance → Task 5/6 message blocks; escape hatch → Task 4 + Task 6 test; docs → Task 8. Exit code stays the pinned `EXI_MEM` family (10).
+1. **Coverage:** Finding 1 → Tasks 3–6 (gate + try_reserve + messages); finding 2 → Task 2 (helper) + Task 7 (rewire); flag-chain panics (`-f`×8, `-b`×12) → Task 9 (post-parse `mch_max` floor, verified vectors rc 101 → 1); "don't break valid big patches" → Task 8 streaming test + differential wave; user-facing guidance → Task 5/6 message blocks; escape hatch → Task 4 + Task 6 test; docs → Task 8. Exit code stays the pinned `EXI_MEM` family (10).
 2. **Placeholders:** none — every step carries code, commands, and expected results.
 3. **Type consistency:** `memory_footprint` returns `MemoryPlan` (u64) used verbatim by both run.rs arms; `size_bytes_for -> i64` feeds Task 7's i64 field; `try_zeroed_vec` is the single allocation helper for all three ctors; `fmt_mb(i64)` wrapped by run.rs's `mb(u64)` clamp.
 4. **Known accepted effect** (documented in §21.19): sparse-overcommit configurations now fail fast instead of running by luck.
