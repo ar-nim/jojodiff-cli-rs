@@ -110,8 +110,9 @@ pub struct JHashPos {
     tbl_hsh: Vec<u32>,
     /// Prime number for size and hashing (`miHshPme`).
     prime: i32,
-    /// Actual size in bytes of the hashtable (`miHshSze`).
-    size_bytes: i32,
+    /// Actual size in bytes of the hashtable (`miHshSze`); i64 because
+    /// `-i >= 2049` overflows i32 (finding 2).
+    size_bytes: i64,
     /// Max number of collisions before override (`miHshColMax`).
     col_max: i32,
     /// Current number of subsequent collisions (`miHshColCnt`); 0.8.5 counts
@@ -156,7 +157,7 @@ impl JHashPos {
 
         // miHshSze = prime * (sizeof(off_t) + sizeof(hkey)) on the port's
         // 64-bit off_t / 32-bit hkey build = prime * (8 + 4).
-        let size_bytes = size_bytes_for(prime) as i32;
+        let size_bytes = size_bytes_for(prime);
         let tbl = JHashPos {
             tbl_pos: crate::try_zeroed_vec(prime as usize, 0_i64)?,
             tbl_hsh: crate::try_zeroed_vec(prime as usize, 0_u32)?,
@@ -296,7 +297,9 @@ impl JHashPos {
     /// `JHashPos.h:146`): `prime * (sizeof(off_t) + sizeof(hkey))` on the
     /// 64-bit `off_t` build, i.e. `prime * 12`. The verbose-stats label says
     /// "samples" while the value is bytes — replicate (spec §4.4).
-    pub fn hash_size_bytes(&self) -> i32 {
+    /// Returned in i64: the C++ int product overflows for `-i >= 2049`
+    /// (finding 2), the port does not.
+    pub fn hash_size_bytes(&self) -> i64 {
         self.size_bytes
     }
 
@@ -435,6 +438,26 @@ mod tests {
         // -i 2049: the product that overflows i32 (finding 2) — exact here.
         assert_eq!(size_bytes_for(179_044_297), 2_148_531_564);
         assert_eq!(size_bytes_for(536_870_909), 6_442_450_908);
+    }
+
+    /// `size_bytes` is i64: `-i >= 2049` overflows i32 (finding 2) — the
+    /// values that wrapped to negative (observed "-2046Mb" in the -vv
+    /// statistic) are now exact. The pure helper carries the math; these
+    /// constructor checks stay at sizes any machine can allocate.
+    #[test]
+    fn hash_size_bytes_is_i64_exact() {
+        assert_eq!(size_bytes_for(179_044_297), 2_148_531_564); // -i 2049 prime
+        assert_eq!(size_bytes_for(536_870_909), 6_442_450_908); // -i 6144 case
+        assert!(size_bytes_for(179_044_297) > i64::from(i32::MAX));
+        // Constructor round-trip at sane sizes:
+        assert_eq!(
+            JHashPos::new(32).expect("table").hash_size_bytes(),
+            33_554_172_i64
+        );
+        assert_eq!(
+            JHashPos::new(8).expect("table").hash_size_bytes(),
+            8_388_444_i64
+        );
     }
 
     /// MB ctor → elements `mb*1024*1024/12` → [`get_lower_prime`] (spec
