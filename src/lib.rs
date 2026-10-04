@@ -1,17 +1,40 @@
 //! `jojodiff-cli-rs` — an independent Rust port of JojoDiff 0.8.5.
 //!
 //! Provides the `jdiff` tool as a reusable library and a single CLI: patching
-//! is `jdiff -u` or an argv[0] dispatch (copies/links named `jpatch*`/`jptch*`
+//! is `jdiff -u` or an `argv[0]` dispatch (copies/links named `jpatch*`/`jptch*`
 //! patch; spec §21.2). Patches, listings, verbose output and exit codes are
 //! held byte-identical to the original C++ implementation, which serves as
 //! the verification oracle.
 //!
-//! The library is std-only and contains no `unsafe`. See the repository README
-//! for project status and the docs in `docs/superpowers/` for the port plan and
-//! functional specification.
+//! Module map:
+//!
+//! - **Engine** (the ported C++ classes): [`defs`], [`jdebug`], [`jdiff`],
+//!   [`jfile`], [`jfileout`], [`jhashpos`], [`jmatchtable`], [`jout`],
+//!   [`jpatcht`].
+//! - **CLI** ([`cli`]): option parsing and buffer sizing ([`cli::config`],
+//!   [`cli::opts`]), the phase functions and orchestrator
+//!   ([`cli::diff_phase`], [`cli::patch_phase`], [`cli::run()`]), the
+//!   byte-pinned greeting/usage/report texts ([`cli::report`]) and the error
+//!   boundary ([`cli::error`]).
+//! - **Errors** ([`error`]): the library-wide [`error::JDiffError`].
+//!
+//! Error model: the engine's status APIs return `Result<T, JDiffError>` (the
+//! legacy exit-code vocabulary survives as [`error::JDiffError::exit_code`]
+//! and the `Raw` variant). [`cli::error::report`] is the single
+//! text/exit-code boundary — the one place an error becomes pinned stderr
+//! bytes and a process exit code; the library never exits the process.
+//!
+//! Dependencies (spec §13): [`thiserror`](https://docs.rs/thiserror) derives
+//! the `Display`/`std::error::Error` impls of [`error::JDiffError`] (compile-
+//! time only, no runtime code beyond the generated impls), and
+//! [`anyhow`](https://docs.rs/anyhow) wraps `cli::run` in the thin `jdiff`
+//! binary — no `anyhow` types cross into the library. There is no `unsafe`.
+//! See the repository README for project status and the docs in
+//! `docs/superpowers/` for the port plan and functional specification.
 
 pub mod cli;
 pub mod defs;
+pub mod error;
 pub mod jdebug;
 pub mod jdiff;
 pub mod jfile;

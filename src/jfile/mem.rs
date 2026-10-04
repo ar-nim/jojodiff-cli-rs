@@ -5,8 +5,7 @@
 //! `istringstream(char*)` and thereby truncates at the first NUL byte
 //! (spec §15.3), NUL bytes are served like any other byte.
 
-use super::{JFile, ReadType};
-use crate::defs::EOF;
+use super::{ByteOrEof, JFile, ReadType};
 
 /// In-memory byte source, 1:1 with C++ `JFileIStream` (`src/JFileIStream.cpp`,
 /// spec §9): `data` holds the whole file, `pos_inp` is the position of the
@@ -31,15 +30,16 @@ impl JFileMem {
 }
 
 impl JFile for JFileMem {
-    fn get(&mut self, pos: i64, _typ: ReadType) -> i32 {
+    fn get(&mut self, pos: i64, _typ: ReadType) -> ByteOrEof {
         if pos != self.pos_inp {
             self.seeks += 1;
         }
         self.pos_inp = pos + 1;
-        if pos < 0 || pos as usize >= self.data.len() {
-            EOF
-        } else {
-            self.data[pos as usize] as i32
+        match self.data.get(pos as usize) {
+            // `pos as usize` wraps a negative `pos` to a huge index: negative
+            // and past-end positions both gate to EOF (§21.17).
+            Some(&b) => ByteOrEof::Byte(b),
+            None => ByteOrEof::Eof,
         }
     }
 
@@ -69,6 +69,12 @@ mod tests {
     use super::*;
     use crate::defs::{EOB, EOF, ReadType};
 
+    /// Maps a legacy channel value (`0..=255`, `EOF`, `EOB`) onto the typed
+    /// form, so the test expectations below keep their C-side literals.
+    fn raw(v: i32) -> ByteOrEof {
+        ByteOrEof::from_raw(v)
+    }
+
     /// Brief step-1 test, verbatim: sequential reads return bytes in order,
     /// NUL bytes survive, `seekcount` stays 0 on the sequential run and
     /// increments once per out-of-order `get`; end and negative positions
@@ -76,14 +82,14 @@ mod tests {
     #[test]
     fn seq_nul_eof_seekcount() {
         let mut f = JFileMem::new(vec![0u8, 1, 0, 3, 0xA7]);
-        assert_eq!(f.get(0, ReadType::Read), 0);
-        assert_eq!(f.get(1, ReadType::Read), 1);
-        assert_eq!(f.get(2, ReadType::SoftAhead), 0); // soft never EOBs
+        assert_eq!(f.get(0, ReadType::Read), raw(0));
+        assert_eq!(f.get(1, ReadType::Read), raw(1));
+        assert_eq!(f.get(2, ReadType::SoftAhead), raw(0)); // soft never EOBs
         assert_eq!(f.seekcount(), 0);
-        assert_eq!(f.get(4, ReadType::Read), 0xA7);
+        assert_eq!(f.get(4, ReadType::Read), raw(0xA7));
         assert_eq!(f.seekcount(), 1); // jumped 2→4
-        assert_eq!(f.get(5, ReadType::Read), EOF);
-        assert_eq!(f.get(-1, ReadType::Read), EOF);
+        assert_eq!(f.get(5, ReadType::Read), raw(EOF));
+        assert_eq!(f.get(-1, ReadType::Read), raw(EOF));
     }
 
     /// `EOB` must never be returned, for any `ReadType`, at any position;
@@ -94,16 +100,16 @@ mod tests {
     fn eob_never_returned_eof_repeats() {
         let mut f = JFileMem::new(vec![0u8, 2]);
         for typ in [ReadType::Read, ReadType::HardAhead, ReadType::SoftAhead] {
-            assert_eq!(f.get(0, typ), 0);
-            assert_eq!(f.get(1, typ), 2);
-            assert_ne!(f.get(2, typ), EOB); // pos == len
-            assert_eq!(f.get(2, typ), EOF);
-            assert_ne!(f.get(102, typ), EOB); // pos == len + 100
-            assert_eq!(f.get(102, typ), EOF);
-            assert_ne!(f.get(-1, typ), EOB);
-            assert_eq!(f.get(-1, typ), EOF);
+            assert_eq!(f.get(0, typ), raw(0));
+            assert_eq!(f.get(1, typ), raw(2));
+            assert_ne!(f.get(2, typ), raw(EOB)); // pos == len
+            assert_eq!(f.get(2, typ), raw(EOF));
+            assert_ne!(f.get(102, typ), raw(EOB)); // pos == len + 100
+            assert_eq!(f.get(102, typ), raw(EOF));
+            assert_ne!(f.get(-1, typ), raw(EOB));
+            assert_eq!(f.get(-1, typ), raw(EOF));
         }
-        assert_eq!(f.get(1, ReadType::Read), 2);
+        assert_eq!(f.get(1, ReadType::Read), raw(2));
     }
 
     /// `seekcount` stays 0 during a sequential run and increments exactly
@@ -111,23 +117,23 @@ mod tests {
     #[test]
     fn seekcount_once_per_out_of_order_get() {
         let mut f = JFileMem::new(vec![0u8, 1, 2, 3, 4, 5]);
-        assert_eq!(f.get(0, ReadType::Read), 0);
-        assert_eq!(f.get(1, ReadType::HardAhead), 1);
-        assert_eq!(f.get(2, ReadType::SoftAhead), 2);
+        assert_eq!(f.get(0, ReadType::Read), raw(0));
+        assert_eq!(f.get(1, ReadType::HardAhead), raw(1));
+        assert_eq!(f.get(2, ReadType::SoftAhead), raw(2));
         assert_eq!(f.seekcount(), 0); // sequential run
-        assert_eq!(f.get(0, ReadType::Read), 0); // seek back
+        assert_eq!(f.get(0, ReadType::Read), raw(0)); // seek back
         assert_eq!(f.seekcount(), 1);
-        assert_eq!(f.get(4, ReadType::Read), 4); // seek forward
+        assert_eq!(f.get(4, ReadType::Read), raw(4)); // seek forward
         assert_eq!(f.seekcount(), 2);
-        assert_eq!(f.get(4, ReadType::Read), 4); // pos_inp has moved past 4
+        assert_eq!(f.get(4, ReadType::Read), raw(4)); // pos_inp has moved past 4
         assert_eq!(f.seekcount(), 3);
-        assert_eq!(f.get(5, ReadType::Read), 5); // sequential again
+        assert_eq!(f.get(5, ReadType::Read), raw(5)); // sequential again
         assert_eq!(f.seekcount(), 3);
-        assert_eq!(f.get(5, ReadType::Read), 5); // pos_inp has moved past 5:
+        assert_eq!(f.get(5, ReadType::Read), raw(5)); // pos_inp has moved past 5:
         assert_eq!(f.seekcount(), 4); // out-of-order, byte still served
-        assert_eq!(f.get(6, ReadType::Read), EOF); // pos == len, sequential
+        assert_eq!(f.get(6, ReadType::Read), raw(EOF)); // pos == len, sequential
         assert_eq!(f.seekcount(), 4);
-        assert_eq!(f.get(6, ReadType::Read), EOF); // EOF repeatedly
+        assert_eq!(f.get(6, ReadType::Read), raw(EOF)); // EOF repeatedly
         assert_eq!(f.seekcount(), 5);
     }
 

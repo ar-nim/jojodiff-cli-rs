@@ -22,7 +22,7 @@
 use std::io::Write;
 
 use super::{JOut, OutStats};
-use crate::defs::{BKT, DEL, EQL, ESC, INS, MOD};
+use crate::defs::{Op, print_char};
 
 /// ASCII listing writer (`JOutAsc`, `JOutAsc.cpp:26-126`), generic over any
 /// `std::io::Write` sink (the C++ writes to a `FILE *`).
@@ -33,7 +33,7 @@ pub struct JOutAsc<W: Write> {
     /// `JOutAsc.cpp:43`). The C++ original is a function-local `static`
     /// shared by every instance in the process; the port keeps it
     /// per-instance, which is indistinguishable for the single-writer CLI.
-    opr_cur: i32,
+    opr_cur: Op,
 }
 
 impl<W: Write> JOutAsc<W> {
@@ -43,7 +43,7 @@ impl<W: Write> JOutAsc<W> {
         JOutAsc {
             out,
             stats: OutStats::default(),
-            opr_cur: ESC,
+            opr_cur: Op::Esc,
         }
     }
 
@@ -54,32 +54,10 @@ impl<W: Write> JOutAsc<W> {
         self.out
     }
 
-    /// The C `printf` `%c` argument rendering (`JOutAsc.cpp:53-54`): the
-    /// byte itself when `32 <= b <= 127`, a space otherwise.
-    fn chr(b: i32) -> char {
-        if (32..=127).contains(&b) {
-            char::from_u32(b as u32).expect("32..=127 is a valid char scalar")
-        } else {
-            ' '
-        }
-    }
-
     /// Length encoding size in the binary format (`JOutAsc::ufPutSze`,
-    /// `JOutAsc.cpp:107-126`): 1/2/3/5/9 bytes. The 9-byte tier is always
-    /// enabled: the oracle build defines `JDIFF_LARGEFILE`
-    /// (`JDefs.h:64-67` via `-D_FILE_OFFSET_BITS=64`).
+    /// `JOutAsc.cpp:107-126`): 1/2/3/5/9 bytes.
     fn put_sze(len: i64) -> i64 {
-        if len <= 252 {
-            1
-        } else if len <= 508 {
-            2
-        } else if len <= 0xffff {
-            3
-        } else if len <= 0xffff_ffff {
-            5
-        } else {
-            9
-        }
+        super::wire::len_tier(len).size()
     }
 
     /// Writes a formatted fragment, panicking on I/O errors (the C++ never
@@ -93,8 +71,8 @@ impl<W: Write> JOutAsc<W> {
 impl<W: Write> JOut for JOutAsc<W> {
     /// `JOutAsc::put` (`JOutAsc.cpp:35-105`): ASCII output function for
     /// visualisation; always returns `false` ("we always want details").
-    fn put(&mut self, opr: i32, len: i64, org: i32, new: i32, pos_org: i64, pos_new: i64) -> bool {
-        if opr == ESC {
+    fn put(&mut self, opr: Op, len: i64, org: i32, new: i32, pos_org: i64, pos_new: i64) -> bool {
+        if opr == Op::Esc {
             return false;
         }
 
@@ -102,62 +80,62 @@ impl<W: Write> JOut for JOutAsc<W> {
         self.out(format_args!("{pos_org:>12} {pos_new:>12} "));
 
         match opr {
-            MOD => {
+            Op::Mod => {
                 /* "MOD %02x %02x %c-%c\n" (JOutAsc.cpp:51) */
                 self.out(format_args!(
                     "MOD {org:02x} {new:02x} {}-{}\n",
-                    Self::chr(org),
-                    Self::chr(new)
+                    print_char(org),
+                    print_char(new)
                 ));
 
                 if self.opr_cur != opr {
                     self.opr_cur = opr;
                     self.stats.ctl += 2;
                 }
-                if new == ESC {
+                if new == i32::from(Op::Esc.byte()) {
                     self.stats.esc += 1;
                 }
                 self.stats.dta += 1;
             }
 
-            INS => {
+            Op::Ins => {
                 /* "INS     %02x  -%c\n" (JOutAsc.cpp:64) */
-                self.out(format_args!("INS     {new:02x}  -{}\n", Self::chr(new)));
+                self.out(format_args!("INS     {new:02x}  -{}\n", print_char(new)));
 
                 if self.opr_cur != opr {
                     self.opr_cur = opr;
                     self.stats.ctl += 2;
                 }
-                if new == ESC {
+                if new == i32::from(Op::Esc.byte()) {
                     self.stats.esc += 1;
                 }
                 self.stats.dta += 1;
             }
 
-            DEL => {
+            Op::Del => {
                 /* "DEL %"PRIzd"\n" */
                 self.out(format_args!("DEL {len}\n"));
 
-                self.opr_cur = DEL;
+                self.opr_cur = Op::Del;
                 self.stats.ctl += 2 + Self::put_sze(len);
                 self.stats.del += len;
             }
 
-            BKT => {
+            Op::Bkt => {
                 /* "BKT %"PRIzd"\n" */
                 self.out(format_args!("BKT {len}\n"));
 
-                self.opr_cur = BKT;
+                self.opr_cur = Op::Bkt;
                 self.stats.ctl += 2 + Self::put_sze(len);
                 self.stats.bkt += len;
             }
 
-            EQL => {
+            Op::Eql => {
                 /* "EQL %02x %02x %c-%c\n" (JOutAsc.cpp:92) */
                 self.out(format_args!(
                     "EQL {org:02x} {new:02x} {}-{}\n",
-                    Self::chr(org),
-                    Self::chr(new)
+                    print_char(org),
+                    print_char(new)
                 ));
 
                 if self.opr_cur != opr {
@@ -187,12 +165,12 @@ mod tests {
     /// Drives `put` with `(opr, len, org, new, pos_org, pos_new)` tuples over
     /// a `Vec<u8>` sink and returns the listing text and the statistics.
     /// `JOutAsc::put` always returns `false`; the driver asserts that.
-    fn run(ops: &[(i32, i64, i32, i32, i64, i64)]) -> (String, OutStats) {
+    fn run(ops: &[(Op, i64, i32, i32, i64, i64)]) -> (String, OutStats) {
         let mut jout = JOutAsc::new(Vec::new());
         for &(opr, len, org, new, pos_org, pos_new) in ops {
             assert!(
                 !jout.put(opr, len, org, new, pos_org, pos_new),
-                "put({opr}) must return false"
+                "put({opr:?}) must return false"
             );
         }
         let stats = jout.stats();
@@ -212,12 +190,12 @@ mod tests {
         // and byte 0xA7 is ESC, hence esc=1; the ESC put itself is ignored
         // entirely.
         let (out, st) = run(&[
-            (MOD, 1, 0x65, 0x41, 7, 9),
-            (INS, 1, -1, 0xA7, 0, 1),
-            (DEL, 57751, 0, 0, 0, 0),
-            (EQL, 1, 0x20, 0x20, 3, 3),
-            (EQL, 1, 0x48, 0x48, 4, 4),
-            (ESC, 0, 0, 0, 4, 4),
+            (Op::Mod, 1, 0x65, 0x41, 7, 9),
+            (Op::Ins, 1, -1, 0xA7, 0, 1),
+            (Op::Del, 57751, 0, 0, 0, 0),
+            (Op::Eql, 1, 0x20, 0x20, 3, 3),
+            (Op::Eql, 1, 0x48, 0x48, 4, 4),
+            (Op::Esc, 0, 0, 0, 4, 4),
         ]);
         assert_eq!(
             out,
@@ -249,13 +227,13 @@ mod tests {
         // bytes equal to ESC (0xA7) bump `esc`. Oracle-verified literals
         // (0.8.5 JOutAsc.cpp:51,64,92).
         let (out, st) = run(&[
-            (MOD, 1, 0x08, 0x1F, 1, 1),
-            (MOD, 1, 0x20, 0x7F, 2, 2),
-            (MOD, 1, 0x80, 0xFF, 3, 3),
-            (INS, 1, -1, 0x00, 4, 4),
-            (EQL, 1, 0x41, 0x41, 5, 5),
-            (MOD, 1, 0x30, 0xA7, 6, 6),
-            (INS, 1, -1, 0xA7, 7, 7),
+            (Op::Mod, 1, 0x08, 0x1F, 1, 1),
+            (Op::Mod, 1, 0x20, 0x7F, 2, 2),
+            (Op::Mod, 1, 0x80, 0xFF, 3, 3),
+            (Op::Ins, 1, -1, 0x00, 4, 4),
+            (Op::Eql, 1, 0x41, 0x41, 5, 5),
+            (Op::Mod, 1, 0x30, 0xA7, 6, 6),
+            (Op::Ins, 1, -1, 0xA7, 7, 7),
         ]);
         assert_eq!(
             out,
@@ -291,21 +269,21 @@ mod tests {
         // hex change is display-only: the accounting is unchanged.
         // Oracle: dta=6 ctl=64 del=131576 bkt=8589935610 esc=2 eql=1.
         let (out, st) = run(&[
-            (MOD, 1, 0x08, 0x1F, 1, 1),
-            (MOD, 1, 0x20, 0x7F, 2, 2),
-            (MOD, 1, 0x80, 0xFF, 3, 3),
-            (INS, 1, -1, 0x00, 4, 4),
-            (EQL, 1, 0x41, 0x41, 5, 5),
-            (MOD, 1, 0x30, 0xA7, 6, 6),
-            (INS, 1, -1, 0xA7, 7, 7),
-            (DEL, 252, 0, 0, 8, 8),           // ctl += 2+1
-            (DEL, 253, 0, 0, 8, 8),           // ctl += 2+2
-            (BKT, 508, 0, 0, 8, 8),           // ctl += 2+2
-            (BKT, 509, 0, 0, 8, 8),           // ctl += 2+3
-            (DEL, 65_535, 0, 0, 8, 8),        // ctl += 2+3
-            (DEL, 65_536, 0, 0, 8, 8),        // ctl += 2+5
-            (BKT, 4_294_967_296, 0, 0, 8, 8), // ctl += 2+9
-            (BKT, 4_294_967_297, 0, 0, 8, 8), // ctl += 2+9
+            (Op::Mod, 1, 0x08, 0x1F, 1, 1),
+            (Op::Mod, 1, 0x20, 0x7F, 2, 2),
+            (Op::Mod, 1, 0x80, 0xFF, 3, 3),
+            (Op::Ins, 1, -1, 0x00, 4, 4),
+            (Op::Eql, 1, 0x41, 0x41, 5, 5),
+            (Op::Mod, 1, 0x30, 0xA7, 6, 6),
+            (Op::Ins, 1, -1, 0xA7, 7, 7),
+            (Op::Del, 252, 0, 0, 8, 8),           // ctl += 2+1
+            (Op::Del, 253, 0, 0, 8, 8),           // ctl += 2+2
+            (Op::Bkt, 508, 0, 0, 8, 8),           // ctl += 2+2
+            (Op::Bkt, 509, 0, 0, 8, 8),           // ctl += 2+3
+            (Op::Del, 65_535, 0, 0, 8, 8),        // ctl += 2+3
+            (Op::Del, 65_536, 0, 0, 8, 8),        // ctl += 2+5
+            (Op::Bkt, 4_294_967_296, 0, 0, 8, 8), // ctl += 2+9
+            (Op::Bkt, 4_294_967_297, 0, 0, 8, 8), // ctl += 2+9
         ]);
         assert_eq!(
             out,

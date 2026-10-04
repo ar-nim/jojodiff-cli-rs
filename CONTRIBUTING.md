@@ -14,7 +14,9 @@ explicitly (§20/§21 of `docs/superpowers/specs/2026-10-01-jojodiff-1to1-port-s
 ## Development setup
 
 - Rust 1.85 or newer (`rustup update stable`); the project uses edition 2024.
-- The library is std-only: no new runtime dependencies, no `unsafe`.
+- Runtime dependencies are `thiserror` (library error impls, derive-only) and
+  `anyhow` (the thin binary wrapper only); no `unsafe`. See the README's
+  [Dependencies](README.md#dependencies) section and spec §13 for the record.
 - Before committing:
   ```
   cargo fmt --all
@@ -30,6 +32,27 @@ Porting work is organized as a test-driven task list in
 specification in `docs/superpowers/specs/2026-10-01-jojodiff-1to1-port-spec.md`.
 Each task follows the same cycle: write failing tests from the spec, port the
 C++ module, make the tests pass, then commit.
+
+## Port anchors
+
+`// port:<File>.cpp:<lines>` comments are verification metadata tying code
+to the C++ source the goldens were generated from. They are optional —
+new idiomatic code owes nothing — but when ported code moves, its anchors
+travel with it (greppable via `rg '// port:'`).
+
+## Do-not-fix markers
+
+Behavioral quirks replicated on purpose are inventoried in the port spec
+(`docs/superpowers/specs/2026-10-01-jojodiff-1to1-port-spec.md` §21). If a
+piece of code looks wrong, check §21 before "fixing" it — the goldens will
+fail otherwise, by design.
+
+## Refactoring rule
+
+Green-to-green only: the full gate (`cargo fmt --all && cargo clippy
+--all-targets --all-features --locked -- -D warnings && cargo test
+--all-features`) passes before and after every transformation, one
+transformation per commit. Goldens are never regenerated.
 
 ## Testing and the oracle
 

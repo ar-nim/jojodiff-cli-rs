@@ -16,10 +16,12 @@
 //! this port ≥0.8.5 are flagged unreadable for them in the README; no C++
 //! 0.8.1 patcher takes part in any gate.
 
+mod common;
+
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU32, Ordering};
 
 /// The 0.8.1 golden corpus: per pair directory, the original and new fixture
 /// files a patch must reproduce, and the number of committed `.jdf` patches
@@ -29,34 +31,6 @@ const PAIRS: &[(&str, &str, &str, usize)] = &[
     ("bkocomu", "bkocomu.0000.fil", "bkocomu.0009.fil", 10),
     ("test2", "test2.001.txt", "test2.002.txt", 12),
 ];
-
-/// Unique temp directory per test (parallel-safe). The returned guard
-/// deletes the directory on drop, so a failed assertion cannot leak it.
-fn temp_dir(tag: &str) -> (PathBuf, DirGuard) {
-    static N: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "jdiff-t22-{}-{}-{}",
-        tag,
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir_all(&dir).expect("create temp dir");
-    // Leak the path into a 'static allocation for the guard: every temp dir
-    // here is process-lifetime scratch anyway.
-    let leaked: &'static Path = Box::leak(Box::new(dir.clone()));
-    (dir, DirGuard(leaked))
-}
-
-/// Drops-in a `remove_dir_all` — assertion-failure cleanup for temp dirs
-/// (the explicit end-of-test cleanups elsewhere in the suite skip them when
-/// an assert fires first).
-struct DirGuard(&'static Path);
-
-impl Drop for DirGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(self.0);
-    }
-}
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -131,8 +105,8 @@ fn golden_081_patches_restore_exactly() {
     }
 
     // The argv[0]=jptch copy of the single binary (spec §21.2).
-    let (argv0_dir, _argv0_guard) = temp_dir("argv0");
-    let jptch = copy_binary_as(&argv0_dir, "jptch");
+    let argv0_dir = common::scratch("argv0");
+    let jptch = copy_binary_as(argv0_dir.path(), "jptch");
 
     for (pair, patch) in &patches {
         let (_, org, new, _) = PAIRS.iter().find(|(p, ..)| p == pair).unwrap();
@@ -149,18 +123,19 @@ fn golden_081_patches_restore_exactly() {
             ("-u", Path::new(env!("CARGO_BIN_EXE_jdiff")), false),
             ("argv0", jptch.as_path(), true),
         ] {
-            let (dir, _guard) = temp_dir(&format!("apply-{pair}-{mode}"));
-            let restored = dir.join("restored.bin");
+            let dir = common::scratch(&format!("apply-{pair}-{mode}"));
+            let restored = dir.path().join("restored.bin");
             let out = if via_argv0 {
                 run_copied(exe, &[org.as_path(), patch.as_path(), restored.as_path()])
             } else {
-                Command::new(exe)
-                    .arg("-u")
-                    .arg(&org)
-                    .arg(patch)
-                    .arg(&restored)
-                    .output()
-                    .expect("spawn jdiff -u")
+                common::jdiff(&[
+                    OsStr::new("-u"),
+                    org.as_os_str(),
+                    patch.as_os_str(),
+                    restored.as_os_str(),
+                ])
+                .output()
+                .expect("spawn jdiff -u")
             };
             assert_eq!(
                 out.status.code(),
@@ -197,8 +172,8 @@ fn golden_081_patches_restore_exactly() {
 /// [`copy_binary_as`]) and the plain name elsewhere.
 #[test]
 fn argv0_copy_name_matches_platform() {
-    let (dir, _guard) = temp_dir("suffix");
-    let exe = copy_binary_as(&dir, "jptch");
+    let dir = common::scratch("suffix");
+    let exe = copy_binary_as(dir.path(), "jptch");
     let name = exe.file_name().expect("copied file name").to_string_lossy();
     if cfg!(windows) {
         assert_eq!(name, "jptch.exe");

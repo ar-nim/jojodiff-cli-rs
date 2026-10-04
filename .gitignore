@@ -17,3 +17,6 @@
 
 # ZCode workspace-local config
 .zcodeignore
+
+# git-worktree isolation workspaces (superpowers using-git-worktrees)
+.worktrees/

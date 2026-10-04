@@ -49,7 +49,7 @@ pub const DBGRED: usize = 8; // Debug ufFabGet                 -dred
 pub const DBGMCH: usize = 9; // Debug ufMch...                 -dmch
 pub const DBGDST: usize = 10; // Debug Hashtable distribution   -ddst
 
-/// Port of the C++ `JDebug` class; the `gbDbg` flags live in [`GB_DBG`].
+/// Port of the C++ `JDebug` class; the `gbDbg` flags live in `GB_DBG`.
 pub struct JDebug;
 
 /// Returns the debug/verbose stream (`JDebug::stddbg`): stderr, or stdout
@@ -100,18 +100,6 @@ pub fn dbg_set(idx: usize, val: bool) {
         .unwrap_or_else(std::sync::PoisonError::into_inner)[idx] = val;
 }
 
-/// C `%c` with JojoDiff's printable-ASCII filter
-/// `(v >= 32 && v <= 127) ? v : ' '` (used by the DBGCMP result site,
-/// `JMatchTable.cpp:857-864`).
-#[cfg(feature = "debug")]
-pub fn c_chr(v: i32) -> char {
-    if (32..=127).contains(&v) {
-        char::from_u32(v as u32).unwrap_or(' ')
-    } else {
-        ' '
-    }
-}
-
 /// Every test here exercises feature-only surface, so the whole module is
 /// gated: in default builds it would compile to an empty shell whose imports
 /// trip `-D warnings`.
@@ -147,17 +135,5 @@ mod tests {
         assert!(!dbg(DBGMCH));
         dbg_set(DBGDST, true);
         dbg_set(DBGDST, false);
-    }
-
-    /// `%c` printable-ASCII filter (`JHashPos.h:114`, `JMatchTable.cpp:433`).
-    #[cfg(feature = "debug")]
-    #[test]
-    fn c_chr_filter() {
-        assert_eq!(c_chr(0x68), 'h');
-        assert_eq!(c_chr(32), ' ');
-        assert_eq!(c_chr(127), '\u{7f}');
-        assert_eq!(c_chr(31), ' ');
-        assert_eq!(c_chr(128), ' ');
-        assert_eq!(c_chr(-1), ' ');
     }
 }

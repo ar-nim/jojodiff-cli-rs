@@ -26,10 +26,12 @@
 //! parity) and stay documented as unreachable on the violation paths (spec
 //! §21.3/§21.17).
 
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::process::Output;
+
+mod common;
 
 /// Deterministic pseudo-random bytes (LCG, bits 8..=15), identical to the
 /// fixtures the oracle expectations below were captured with.
@@ -69,19 +71,6 @@ fn sek_pair() -> (Vec<u8>, Vec<u8>) {
     (org, new)
 }
 
-/// Unique temp directory per test (parallel-safe), cleaned up by the caller.
-fn temp_dir(tag: &str) -> PathBuf {
-    static N: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "jdiff-t11-{}-{}-{}",
-        tag,
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir_all(&dir).expect("create temp dir");
-    dir
-}
-
 fn write_file(path: &Path, content: &[u8]) -> PathBuf {
     fs::write(path, content).expect("write fixture");
     path.to_path_buf()
@@ -113,10 +102,8 @@ fn run_dbg(dir: &Path, org: &[u8], new: &[u8], extra: &[&str], tag: &str) -> (St
         p.into_os_string(),
     ]);
 
-    let out = Command::new(env!("CARGO_BIN_EXE_jdiff"))
-        .args(&args)
-        .output()
-        .expect("spawn jdiff");
+    let arg_refs: Vec<&std::ffi::OsStr> = args.iter().map(|a| a.as_os_str()).collect();
+    let out = common::jdiff(&arg_refs).output().expect("spawn jdiff");
     (String::from_utf8_lossy(&out.stdout).into_owned(), out)
 }
 
@@ -140,8 +127,8 @@ const PATCH_AB_TINY: &[u8] = &[
 /// reports position `-1` (oracle-pinned quirk).
 #[test]
 fn prg_input_lines_tiny() {
-    let dir = temp_dir("prg-tiny");
-    let (stdout, out) = run_dbg(&dir, ORG_A, NEW_B, &["-dprg"], "prg");
+    let dir = common::scratch("prg-tiny");
+    let (stdout, out) = run_dbg(dir.path(), ORG_A, NEW_B, &["-dprg"], "prg");
     assert_eq!(out.status.code(), Some(1));
     assert!(
         stdout.contains("Input         -1->68         -1->68.\n"),
@@ -151,7 +138,6 @@ fn prg_input_lines_tiny() {
         stdout.contains("Input         11->68         11->62.\n"),
         "mismatch line ('h'->'b' at file position 12): {stdout:?}"
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// DBGBUF (`-dbuf`, `JFileAhead.cpp:50-54`): one `ufFabOpn` line per reader
@@ -160,8 +146,8 @@ fn prg_input_lines_tiny() {
 /// verified); 0.8.1 defaulted to 256 kB.
 #[test]
 fn buf_open_lines() {
-    let dir = temp_dir("buf-open");
-    let (stdout, out) = run_dbg(&dir, ORG_A, NEW_B, &["-dbuf"], "buf");
+    let dir = common::scratch("buf-open");
+    let (stdout, out) = run_dbg(dir.path(), ORG_A, NEW_B, &["-dbuf"], "buf");
     assert_eq!(out.status.code(), Some(1));
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 2, "exactly two ufFabOpn lines: {stdout:?}");
@@ -173,7 +159,6 @@ fn buf_open_lines() {
         lines[1].starts_with("ufFabOpn(New):(buf=0x") && lines[1].ends_with("sze=1048576)"),
         "New open line: {stdout:?}"
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// DBGRED (`-dred`) at 0.8.5 (spec §18.G): the 0.8.1 `ufFabGet` trace sites
@@ -184,24 +169,23 @@ fn buf_open_lines() {
 /// completely empty — a negative invariant over every buffer read.
 #[test]
 fn red_double_verify_silent_tiny() {
-    let dir = temp_dir("red-tiny");
-    let (stdout, out) = run_dbg(&dir, ORG_A, NEW_B, &["-dred"], "red");
+    let dir = common::scratch("red-tiny");
+    let (stdout, out) = run_dbg(dir.path(), ORG_A, NEW_B, &["-dred"], "red");
     assert_eq!(out.status.code(), Some(1));
     assert!(
         stdout.is_empty(),
         "no DBGRED output expected (sites removed at 0.8.5, double-verify\n\
          silent on correct buffer contents): {stdout:?}"
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// DBGPRG on the 1000-byte pair, including the byte-250 mismatch and the
 /// "Current position" line after find-ahead (`JDiff.cpp:219-221`).
 #[test]
 fn prg_big_mismatch_and_current_position() {
-    let dir = temp_dir("prg-big");
+    let dir = common::scratch("prg-big");
     let (org, new) = big_pair();
-    let (stdout, out) = run_dbg(&dir, &org, &new, &["-dprg"], "prgB");
+    let (stdout, out) = run_dbg(dir.path(), &org, &new, &["-dprg"], "prgB");
     assert_eq!(out.status.code(), Some(1));
     assert!(
         stdout.starts_with("Input         -1->59         -1->59.\n"),
@@ -215,7 +199,6 @@ fn prg_big_mismatch_and_current_position() {
         stdout.contains("Current position in new file= 250\n"),
         "current-position line: {stdout:?}"
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// DBGAHD (`-dahd`, `JDiff.cpp:281-283`): the find-ahead summary. On this
@@ -223,15 +206,14 @@ fn prg_big_mismatch_and_current_position() {
 /// the 0.8.1 pin (pinned against the 0.8.5 C++ engine's debug build).
 #[test]
 fn ahd_findahead_line_big() {
-    let dir = temp_dir("ahd-big");
+    let dir = common::scratch("ahd-big");
     let (org, new) = big_pair();
-    let (stdout, out) = run_dbg(&dir, &org, &new, &["-dahd"], "ahdB");
+    let (stdout, out) = run_dbg(dir.path(), &org, &new, &["-dahd"], "ahdB");
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         stdout, "Findahead on 250 250 skip 0 0 ahead 1\n",
         "exact find-ahead line"
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// DBGAHH (`-dahh`) in the 0.8.5 `buildFullIndex` (`JDiff.cpp:758-762`): the
@@ -244,9 +226,9 @@ fn ahd_findahead_line_big() {
 /// the 0.8.1 pin).
 #[test]
 fn ahh_prescan_lines_big() {
-    let dir = temp_dir("ahh-big");
+    let dir = common::scratch("ahh-big");
     let (org, new) = big_pair();
-    let (stdout, out) = run_dbg(&dir, &org, &new, &["-vv", "-dahh"], "ahhB");
+    let (stdout, out) = run_dbg(dir.path(), &org, &new, &["-vv", "-dahh"], "ahhB");
     assert_eq!(out.status.code(), Some(1));
     // Filter out the verbose>1 engine/CLI text mixed into the stream; the
     // "Indexing  : ...           " marker shares the first line with the
@@ -267,7 +249,6 @@ fn ahh_prescan_lines_big() {
         lines[lines.len() - 1],
         "ufHshAdd(9a -> 957ca3a4,        999,        0)"
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// DBGAHH in the search loop: 0.8.5 has **no DBGAHH site left there** (the
@@ -276,15 +257,14 @@ fn ahh_prescan_lines_big() {
 /// stays silent.
 #[test]
 fn ahh_findahead_lines_ff() {
-    let dir = temp_dir("ahh-ff");
+    let dir = common::scratch("ahh-ff");
     let (org, new) = big_pair();
-    let (stdout, out) = run_dbg(&dir, &org, &new, &["-ff", "-dahh"], "ahhFF");
+    let (stdout, out) = run_dbg(dir.path(), &org, &new, &["-ff", "-dahh"], "ahhFF");
     assert_eq!(out.status.code(), Some(1));
     assert!(
         stdout.is_empty(),
         "no DBGAHH site in the 0.8.5 search loop: {stdout:?}"
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// DBGHSK (`-dhsk`) and DBGBKT (`-dbkt`) at 0.8.5: the hash moved from
@@ -293,16 +273,15 @@ fn ahh_findahead_lines_ff() {
 /// flags are accepted with **zero print sites** (spec §18.G/§21.13).
 #[test]
 fn dead_flags_hsk_bkt_are_silent() {
-    let dir = temp_dir("hsk-tiny");
+    let dir = common::scratch("hsk-tiny");
     for (tag, flag) in [("hsk", "-dhsk"), ("bkt", "-dbkt")] {
-        let (stdout, out) = run_dbg(&dir, ORG_A, NEW_B, &[flag], tag);
+        let (stdout, out) = run_dbg(dir.path(), ORG_A, NEW_B, &[flag], tag);
         assert_eq!(out.status.code(), Some(1));
         assert!(
             stdout.is_empty(),
             "{flag} has zero print sites at 0.8.5: {stdout:?}"
         );
     }
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Unknown `-d <name>` names are **silently ignored** (`main.cpp:446-472`:
@@ -311,16 +290,18 @@ fn dead_flags_hsk_bkt_are_silent() {
 /// stream, empty debug output, exit 1).
 #[test]
 fn unknown_name_is_silently_ignored() {
-    let dir = temp_dir("d-bogus");
-    let (stdout, out) = run_dbg(&dir, ORG_A, NEW_B, &["-d", "bogus"], "bog");
+    let dir = common::scratch("d-bogus");
+    let (stdout, out) = run_dbg(dir.path(), ORG_A, NEW_B, &["-d", "bogus"], "bog");
     assert_eq!(out.status.code(), Some(1));
     assert!(
         stdout.is_empty(),
         "no output for an unknown name: {stdout:?}"
     );
     // The patch is the normal tiny-pair patch (the run is a plain diff).
-    assert_eq!(fs::read(dir.join("bogp.bin")).unwrap(), PATCH_AB_TINY);
-    fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(
+        fs::read(dir.path().join("bogp.bin")).unwrap(),
+        PATCH_AB_TINY
+    );
 }
 
 /// DBGHSH (`-dhsh`): the constructor's "Hash Ini" line (pointers shape-only)
@@ -335,9 +316,9 @@ fn unknown_name_is_silently_ignored() {
 /// first store "Hash Add   352165         31 c8d9b3a9 .").
 #[test]
 fn hsh_ini_and_add_lines_big() {
-    let dir = temp_dir("hsh-big");
+    let dir = common::scratch("hsh-big");
     let (org, new) = big_pair();
-    let (stdout, out) = run_dbg(&dir, &org, &new, &["-i", "8", "-dhsh"], "hshB");
+    let (stdout, out) = run_dbg(dir.path(), &org, &new, &["-i", "8", "-dhsh"], "hshB");
     assert_eq!(out.status.code(), Some(1));
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 970, "Ini + 969 stores: {stdout:?}");
@@ -350,7 +331,6 @@ fn hsh_ini_and_add_lines_big() {
         lines[1], "Hash Add   352165         31 c8d9b3a9 .",
         "first store line"
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// DBGMCH (`-dmch`), 0.8.5 formats (Task 16 port): the isBest election line
@@ -365,9 +345,9 @@ fn hsh_ini_and_add_lines_big() {
 /// dump are gone at 0.8.5.)
 #[test]
 fn mch_lines_big() {
-    let dir = temp_dir("mch-big");
+    let dir = common::scratch("mch-big");
     let (org, new) = big_pair();
-    let (stdout, out) = run_dbg(&dir, &org, &new, &["-dmch"], "mchB");
+    let (stdout, out) = run_dbg(dir.path(), &org, &new, &["-dmch"], "mchB");
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         stdout,
@@ -379,7 +359,6 @@ fn mch_lines_big() {
         ),
         "exact Mch output"
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// DBGMCH on the tiny pair (`JMatchTable.cpp:156`): the table is empty at the
@@ -389,14 +368,13 @@ fn mch_lines_big() {
 /// line, exit 1).
 #[test]
 fn mch_match_failure_tiny() {
-    let dir = temp_dir("mch-tiny");
-    let (stdout, out) = run_dbg(&dir, ORG_A, NEW_B, &["-dmch"], "mchT");
+    let dir = common::scratch("mch-tiny");
+    let (stdout, out) = run_dbg(dir.path(), ORG_A, NEW_B, &["-dmch"], "mchT");
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         stdout, "Match Failure at 12\n",
         "exact getbest failure line"
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// DBGCMP (`-dcmp`), 0.8.5 formats (Task 16 port): the check() prologue
@@ -407,16 +385,15 @@ fn mch_match_failure_tiny() {
 /// engine's debug build).
 #[test]
 fn cmp_check_line_big() {
-    let dir = temp_dir("cmp-big");
+    let dir = common::scratch("cmp-big");
     let (org, new) = big_pair();
-    let (stdout, out) = run_dbg(&dir, &org, &new, &["-dcmp"], "cmpB");
+    let (stdout, out) = run_dbg(dir.path(), &org, &new, &["-dcmp"], "cmpB");
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         stdout,
         "Cmp Col (       250,       250,1024,1):        251        251 256 OK! ( )b9 == ( )b9\n",
         "exact check output"
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// DBGDST (`-ddst`) at 0.8.5: the flag is accepted but has **zero print
@@ -429,17 +406,16 @@ fn cmp_check_line_big() {
 /// completely empty.
 #[test]
 fn dst_flag_is_silent() {
-    let dir = temp_dir("dst-big");
+    let dir = common::scratch("dst-big");
     let org = lcg(1, 100_000);
     let mut new = org.clone();
     new[250] ^= 0xFF;
-    let (stdout, out) = run_dbg(&dir, &org, &new, &["-ddst"], "dstB");
+    let (stdout, out) = run_dbg(dir.path(), &org, &new, &["-ddst"], "dstB");
     assert_eq!(out.status.code(), Some(1));
     assert!(
         stdout.is_empty(),
         "-ddst has zero print sites at 0.8.5: {stdout:?}"
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// DBGBUF at 0.8.5 on the 100000-byte pair with an 8 MB buffer (`-m 16`):
@@ -451,9 +427,9 @@ fn dst_flag_is_silent() {
 /// 29-byte EQL/DEL/BKT patch.
 #[test]
 fn buf_open_only_no_seek_lines_sek() {
-    let dir = temp_dir("buf-sek");
+    let dir = common::scratch("buf-sek");
     let (org, new) = sek_pair();
-    let (stdout, out) = run_dbg(&dir, &org, &new, &["-m", "16", "-dbuf"], "sekB");
+    let (stdout, out) = run_dbg(dir.path(), &org, &new, &["-m", "16", "-dbuf"], "sekB");
     assert_eq!(out.status.code(), Some(0), "EQL-only patch: dta == 0");
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(
@@ -469,7 +445,6 @@ fn buf_open_only_no_seek_lines_sek() {
         lines[1].starts_with("ufFabOpn(New):(buf=0x"),
         "New open line: {stdout:?}"
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// DBGRED on the sek pair (plain and with `-f`, exercising reset, scrollback,
@@ -479,12 +454,12 @@ fn buf_open_only_no_seek_lines_sek() {
 /// data bytes, `dta == 0` → EXI_EQL under the swapped mapping.)
 #[test]
 fn red_double_verify_silent_sek() {
-    let dir = temp_dir("red-sek");
+    let dir = common::scratch("red-sek");
     let (org, new) = sek_pair();
     for (tag, extra) in [("sekR", vec!["-m", "16"]), ("sekE", vec!["-f", "-m", "16"])] {
         let mut opts = extra;
         opts.push("-dred");
-        let (stdout, out) = run_dbg(&dir, &org, &new, &opts, tag);
+        let (stdout, out) = run_dbg(dir.path(), &org, &new, &opts, tag);
         assert_eq!(out.status.code(), Some(0), "{tag}: EQL-only patch");
         assert!(
             stdout.is_empty(),
@@ -492,19 +467,18 @@ fn red_double_verify_silent_sek() {
              double-verify silent on correct buffer contents): {stdout:?}"
         );
     }
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Debug flags are output-neutral: the patch bytes with `-dmch` equal the
 /// plain-run patch (the debug flush's `put(ESC, 0, …)` is a writer no-op).
 #[test]
 fn dmch_leaves_patch_bytes_unchanged() {
-    let dir = temp_dir("mch-patch");
+    let dir = common::scratch("mch-patch");
     let (org, new) = big_pair();
-    let a = write_file(&dir.join("a.bin"), &org);
-    let b = write_file(&dir.join("b.bin"), &new);
-    let p0 = dir.join("p0.bin");
-    let p1 = dir.join("p1.bin");
+    let a = write_file(&dir.path().join("a.bin"), &org);
+    let b = write_file(&dir.path().join("b.bin"), &new);
+    let p0 = dir.path().join("p0.bin");
+    let p1 = dir.path().join("p1.bin");
 
     for (p, extra) in [(&p0, vec![]), (&p1, vec!["-dmch"])] {
         let mut args: Vec<std::ffi::OsString> =
@@ -514,10 +488,8 @@ fn dmch_leaves_patch_bytes_unchanged() {
             b.clone().into_os_string(),
             p.clone().into_os_string(),
         ]);
-        let out = Command::new(env!("CARGO_BIN_EXE_jdiff"))
-            .args(&args)
-            .output()
-            .expect("spawn jdiff");
+        let arg_refs: Vec<&std::ffi::OsStr> = args.iter().map(|a| a.as_os_str()).collect();
+        let out = common::jdiff(&arg_refs).output().expect("spawn jdiff");
         assert_eq!(out.status.code(), Some(1));
     }
     assert_eq!(fs::read(&p0).unwrap(), PATCH_BIG);
@@ -526,7 +498,6 @@ fn dmch_leaves_patch_bytes_unchanged() {
         PATCH_BIG,
         "-dmch must not change output"
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Every one of the 11 flags is accepted as an option (not a filename) in
@@ -539,25 +510,24 @@ fn dmch_leaves_patch_bytes_unchanged() {
 /// 0.8.5 syntax: `-d <name>` consumes the name; `-c` redirects the stream.
 #[test]
 fn all_eleven_flags_accepted() {
-    let dir = temp_dir("flags");
+    let dir = common::scratch("flags");
     let (org, new) = big_pair();
-    let a = write_file(&dir.join("a.bin"), &org);
-    let b = write_file(&dir.join("b.bin"), &new);
-    let p = dir.join("p.bin");
+    let a = write_file(&dir.path().join("a.bin"), &org);
+    let b = write_file(&dir.path().join("b.bin"), &new);
+    let p = dir.path().join("p.bin");
     for flag in [
         "hsh", "ahd", "cmp", "prg", "buf", "hsk", "ahh", "bkt", "red", "mch",
     ] {
-        let out = Command::new(env!("CARGO_BIN_EXE_jdiff"))
-            .args([
-                "-d",
-                flag,
-                "-c",
-                a.as_os_str().to_str().unwrap(),
-                b.as_os_str().to_str().unwrap(),
-                p.as_os_str().to_str().unwrap(),
-            ])
-            .output()
-            .expect("spawn jdiff");
+        let out = common::jdiff(&[
+            OsStr::new("-d"),
+            OsStr::new(flag),
+            OsStr::new("-c"),
+            a.as_os_str(),
+            b.as_os_str(),
+            p.as_os_str(),
+        ])
+        .output()
+        .expect("spawn jdiff");
         assert_eq!(
             out.status.code(),
             Some(1),
@@ -569,24 +539,22 @@ fn all_eleven_flags_accepted() {
     let org = lcg(1, 100_000);
     let mut new = org.clone();
     new[250] ^= 0xFF;
-    let a = write_file(&dir.join("a-big.bin"), &org);
-    let b = write_file(&dir.join("b-big.bin"), &new);
-    let out = Command::new(env!("CARGO_BIN_EXE_jdiff"))
-        .args([
-            "-d",
-            "dst",
-            "-c",
-            a.as_os_str().to_str().unwrap(),
-            b.as_os_str().to_str().unwrap(),
-            p.as_os_str().to_str().unwrap(),
-        ])
-        .output()
-        .expect("spawn jdiff");
+    let a = write_file(&dir.path().join("a-big.bin"), &org);
+    let b = write_file(&dir.path().join("b-big.bin"), &new);
+    let out = common::jdiff(&[
+        OsStr::new("-d"),
+        OsStr::new("dst"),
+        OsStr::new("-c"),
+        a.as_os_str(),
+        b.as_os_str(),
+        p.as_os_str(),
+    ])
+    .output()
+    .expect("spawn jdiff");
     assert_eq!(
         out.status.code(),
         Some(1),
         "-d dst must be an option, not a filename: {:?}",
         String::from_utf8_lossy(&out.stderr)
     );
-    fs::remove_dir_all(&dir).unwrap();
 }

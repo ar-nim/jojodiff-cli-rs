@@ -45,7 +45,7 @@
 
 use std::io::{Read, Seek, SeekFrom};
 
-use super::{JFile, ReadType};
+use super::{ByteOrEof, JFile, ReadType};
 #[cfg(feature = "debug")]
 use crate::defs::p8;
 use crate::defs::{EOB, EOF, EXI_OK, EXI_RED, EXI_SEK};
@@ -253,7 +253,7 @@ impl<R: Read + Seek> JFileAhead<R> {
                 }
 
                 // return data at current position (JFileAhead.cpp:197)
-                self.buf[off] as i32
+                i32::from(self.buf[off])
             }
         }
     }
@@ -280,7 +280,7 @@ impl<R: Read + Seek> JFileAhead<R> {
                 p8(pos),
                 typ as i32,
                 byte as char,
-                byte as u32,
+                u32::from(byte),
                 self.buf.as_ptr().wrapping_add(off),
             ));
         }
@@ -301,7 +301,7 @@ impl<R: Read + Seek> JFileAhead<R> {
                 p8(pos),
                 typ as i32,
                 byte as char,
-                byte as u32,
+                u32::from(byte),
                 self.buf.as_ptr().wrapping_add(off),
             ));
         }
@@ -312,7 +312,7 @@ impl<R: Read + Seek> JFileAhead<R> {
                 p8(pos),
                 typ as i32,
                 byte as char,
-                byte as u32,
+                u32::from(byte),
                 self.buf.as_ptr().wrapping_add(off),
             ));
         }
@@ -397,7 +397,7 @@ impl<R: Read + Seek> JFileAhead<R> {
                     pos,
                     az_len,
                     typ as i32,
-                    self.buf[off as usize] as u32,
+                    u32::from(self.buf[off as usize]),
                     self.buf.as_ptr().wrapping_add(off as usize),
                 ));
                 process::exit(-EXI_SEK);
@@ -452,98 +452,107 @@ impl<R: Read + Seek> JFileAhead<R> {
         }
 
         match li_sek {
-            BufOpr::Reset => {
-                // JFileAhead.cpp:310-333
-                if !self.seq {
-                    // Calculate position and length
-                    self.pos_inp = (pos / self.blk_sze) * self.blk_sze;
-                } else {
-                    // In sequential mode: jump forward and then append, keep
-                    // the buffer as large as possible
-                    self.pos_inp =
-                        ((pos - self.buf_sze + self.blk_sze) / self.blk_sze) * self.blk_sze;
-                }
-
-                // Reset buffer
-                self.ptr_inp = 0; // mpInp = mpBuf
-                self.pos_bse = self.pos_inp;
-                self.buf_usd = 0;
-
-                // Seek
-                if self.jseek(self.pos_inp) != EXI_OK {
-                    return BufDone::SeekError;
-                }
-                self.seeks += 1; // mlFabSek++
-
-                // Read
-                let (inp, pos, dne) = self.readblocks(self.ptr_inp, self.pos_inp, pos);
-                self.ptr_inp = inp;
-                self.pos_inp = pos;
-                if dne == EOF {
-                    return BufDone::EndOfFile;
-                }
-            }
-
-            BufOpr::Append => {
-                // JFileAhead.cpp:335-339
-                let (inp, pos, dne) = self.readblocks(self.ptr_inp, self.pos_inp, pos);
-                self.ptr_inp = inp;
-                self.pos_inp = pos;
-                if dne == EOF {
-                    return BufDone::EndOfFile;
-                }
-            }
-
-            BufOpr::Scrollback => {
-                // JFileAhead.cpp:341-383
-                // Calculate scrollback position
-                let lz_pos = (pos / self.blk_sze) * self.blk_sze; // position to seek
-                let mut lz_len = self.pos_inp - lz_pos; // new potential buffer length
-                let mut lp_inp: i64 = self.ptr_inp as i64 - lz_len;
-                if lz_len > self.ptr_inp as i64 {
-                    lp_inp += self.buf_sze;
-                }
-
-                // Make room in the buffer for the scrollback
-                if lz_len > self.buf_sze {
-                    lz_len -= self.buf_sze;
-                    self.buf_usd -= lz_len;
-                    self.pos_inp = lz_pos + self.buf_sze;
-                    if lz_len > self.ptr_inp as i64 {
-                        lp_inp += self.buf_sze;
-                    }
-                    self.ptr_inp = lp_inp as usize; // mpInp = lpInp
-                }
-
-                // Seek
-                if self.jseek(lz_pos) != EXI_OK {
-                    return BufDone::SeekError;
-                }
-                self.seeks += 1;
-
-                // Read loop
-                let (lp_inp, lz_pos, dne) =
-                    self.readblocks(lp_inp as usize, lz_pos, self.pos_inp - self.buf_usd - 1);
-                if dne == EOF {
-                    // A scrollback cannot issue an EOF unless there's a
-                    // hardware error or the file is being truncated while
-                    // we're reading it. In both cases, the outcome will
-                    // probably be unusable. The buffer variables are set here
-                    // just for the sake of "correctness".
-                    // (JFileAhead.cpp:367-376)
-                    self.ptr_inp = lp_inp; // mpInp = lpInp
-                    self.pos_inp = lz_pos; // mzPosInp = lzPos
-                    self.buf_usd = i64::from(dne); // miBufUsd = liDne (EOF = -1)
-                    return BufDone::ReadError;
-                }
-
-                // @Seek (JFileAhead.cpp:378-381)
-                if self.jseek(self.pos_inp) != EXI_OK {
-                    return BufDone::SeekError;
-                }
-                self.seeks += 1;
-            }
+            BufOpr::Reset => self.reset_to(pos),
+            BufOpr::Append => self.append_blocks(pos),
+            BufOpr::Scrollback => self.scroll_back(pos),
         }
+    }
+
+    /// Reset the buffer to serve `pos` (`JFileAhead.cpp:310-333`): seek to
+    /// the block-aligned position and read anew.
+    fn reset_to(&mut self, pos: i64) -> BufDone {
+        if !self.seq {
+            // Calculate position and length
+            self.pos_inp = (pos / self.blk_sze) * self.blk_sze;
+        } else {
+            // In sequential mode: jump forward and then append, keep
+            // the buffer as large as possible
+            self.pos_inp = ((pos - self.buf_sze + self.blk_sze) / self.blk_sze) * self.blk_sze;
+        }
+
+        // Reset buffer
+        self.ptr_inp = 0; // mpInp = mpBuf
+        self.pos_bse = self.pos_inp;
+        self.buf_usd = 0;
+
+        // Seek
+        if self.jseek(self.pos_inp) != EXI_OK {
+            return BufDone::SeekError;
+        }
+        self.seeks += 1; // mlFabSek++
+
+        // Read
+        let (inp, pos, dne) = self.readblocks(self.ptr_inp, self.pos_inp, pos);
+        self.ptr_inp = inp;
+        self.pos_inp = pos;
+        if dne == EOF {
+            return BufDone::EndOfFile;
+        }
+
+        BufDone::Added // JFileAhead.cpp:386
+    }
+
+    /// Append blocks to the buffer to serve `pos` (`JFileAhead.cpp:335-339`).
+    fn append_blocks(&mut self, pos: i64) -> BufDone {
+        let (inp, pos, dne) = self.readblocks(self.ptr_inp, self.pos_inp, pos);
+        self.ptr_inp = inp;
+        self.pos_inp = pos;
+        if dne == EOF {
+            return BufDone::EndOfFile;
+        }
+
+        BufDone::Added // JFileAhead.cpp:386
+    }
+
+    /// Scroll the buffer back to serve `pos` (`JFileAhead.cpp:341-383`):
+    /// keep as much of the buffered data as fits and read the missing head.
+    fn scroll_back(&mut self, pos: i64) -> BufDone {
+        // Calculate scrollback position
+        let lz_pos = (pos / self.blk_sze) * self.blk_sze; // position to seek
+        let mut lz_len = self.pos_inp - lz_pos; // new potential buffer length
+        let mut lp_inp: i64 = self.ptr_inp as i64 - lz_len;
+        if lz_len > self.ptr_inp as i64 {
+            lp_inp += self.buf_sze;
+        }
+
+        // Make room in the buffer for the scrollback
+        if lz_len > self.buf_sze {
+            lz_len -= self.buf_sze;
+            self.buf_usd -= lz_len;
+            self.pos_inp = lz_pos + self.buf_sze;
+            if lz_len > self.ptr_inp as i64 {
+                lp_inp += self.buf_sze;
+            }
+            self.ptr_inp = lp_inp as usize; // mpInp = lpInp
+        }
+
+        // Seek
+        if self.jseek(lz_pos) != EXI_OK {
+            return BufDone::SeekError;
+        }
+        self.seeks += 1;
+
+        // Read loop
+        let (lp_inp, lz_pos, dne) =
+            self.readblocks(lp_inp as usize, lz_pos, self.pos_inp - self.buf_usd - 1);
+        if dne == EOF {
+            // A scrollback cannot issue an EOF unless there's a
+            // hardware error or the file is being truncated while
+            // we're reading it. In both cases, the outcome will
+            // probably be unusable. The buffer variables are set here
+            // just for the sake of "correctness".
+            // (JFileAhead.cpp:367-376)
+            self.ptr_inp = lp_inp; // mpInp = lpInp
+            self.pos_inp = lz_pos; // mzPosInp = lzPos
+            self.buf_usd = i64::from(dne); // miBufUsd = liDne (EOF = -1)
+            return BufDone::ReadError;
+        }
+
+        // @Seek (JFileAhead.cpp:378-381)
+        if self.jseek(self.pos_inp) != EXI_OK {
+            return BufDone::SeekError;
+        }
+        self.seeks += 1;
 
         BufDone::Added // JFileAhead.cpp:386
     }
@@ -605,20 +614,22 @@ impl<R: Read + Seek> JFileAhead<R> {
 impl<R: Read + Seek> JFile for JFileAhead<R> {
     /// Gets one byte: the base-class sequential fast path over the read
     /// cursor, else `get_frombuffer` (C++ `JFile::get`, `JFile.h:73-81`;
-    /// replicated here because the trait cannot hold the cursor state).
-    fn get(&mut self, pos: i64, typ: ReadType) -> i32 {
+    /// replicated here because the trait cannot hold the cursor state). The
+    /// internal machinery stays i32-shaped (`get_frombuffer`/`getbuf_off`
+    /// speak the legacy sentinels); `from_raw` is the typed rim.
+    fn get(&mut self, pos: i64, typ: ReadType) -> ByteOrEof {
         if pos == self.pos_red && self.red_sze > 0 {
             // mzPosRed++; miRedSze--; return *mpRed++;
             self.pos_red += 1;
             self.red_sze -= 1;
-            let byte = self.buf[self.ptr_red] as i32;
+            let byte = self.buf[self.ptr_red];
             self.ptr_red += 1;
             if self.ptr_red == self.buf.len() {
                 self.ptr_red = 0;
             }
-            byte
+            ByteOrEof::Byte(byte)
         } else {
-            self.get_frombuffer(pos, typ)
+            ByteOrEof::from_raw(self.get_frombuffer(pos, typ))
         }
     }
 
@@ -655,16 +666,14 @@ impl<R: Read + Seek> JFile for JFileAhead<R> {
         self.pos_inp - self.buf_usd
     }
 
-    /// Size of the buffer (JFileAhead.cpp:111-113).
-    fn get_buf_sze(&self) -> i64 {
-        self.buf_sze
-    }
-
     /// Get access to buffered read (JFileAhead.cpp:210-254); the run never
-    /// wraps the ring, so a slice can represent it.
-    fn getbuf(&mut self, pos: i64, len: &mut i64, typ: ReadType) -> Option<&[u8]> {
-        let off = self.getbuf_off(pos, len, typ)?;
-        Some(&self.buf[off..off + *len as usize])
+    /// wraps the ring, so a slice can represent it — every `getbuf_off`
+    /// success path yields `len == slice.len()`, so the slice length speaks
+    /// for the C++ `lzLen` out-parameter.
+    fn getbuf(&mut self, pos: i64, typ: ReadType) -> Option<&[u8]> {
+        let mut len: i64 = 0;
+        let off = self.getbuf_off(pos, &mut len, typ)?;
+        Some(&self.buf[off..off + len as usize])
     }
 }
 
@@ -685,6 +694,12 @@ mod tests {
         ((i * 7 + 3) % 256) as i32
     }
 
+    /// Maps a legacy channel value (`0..=255`, `EOF`, `EOB`, `EXI_*`) onto
+    /// the typed form, so the expectations below keep their C-side literals.
+    fn raw(v: i32) -> ByteOrEof {
+        ByteOrEof::from_raw(v)
+    }
+
     fn mk(data: Vec<u8>) -> JFileAhead<Cursor<Vec<u8>>> {
         JFileAhead::new(Cursor::new(data), "Tst", 1024, 16)
     }
@@ -701,7 +716,7 @@ mod tests {
     fn sequential_read_uses_fast_path() {
         let mut f = mk(data(600));
         for i in 0..100 {
-            assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
+            assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
         assert_eq!(f.seekcount(), 0);
     }
@@ -712,15 +727,15 @@ mod tests {
     #[test]
     fn hard_ahead_far_forward_resets() {
         let mut f = mk(data(6000));
-        assert_eq!(f.get(5000, ReadType::HardAhead), pat(5000));
+        assert_eq!(f.get(5000, ReadType::HardAhead), raw(pat(5000)));
         assert_eq!(f.seekcount(), 1);
-        assert_eq!(f.get(5001, ReadType::Read), pat(5001));
+        assert_eq!(f.get(5001, ReadType::Read), raw(pat(5001)));
         assert_eq!(f.seekcount(), 1);
         // Back to the start: outside the window [4992, 5008), far before it
         // (0 + 1024 - 16 = 1008 <= 4992): reset, not scrollback.
-        assert_eq!(f.get(0, ReadType::HardAhead), pat(0));
+        assert_eq!(f.get(0, ReadType::HardAhead), raw(pat(0)));
         assert_eq!(f.seekcount(), 2);
-        assert_eq!(f.get(1, ReadType::Read), pat(1));
+        assert_eq!(f.get(1, ReadType::Read), raw(pat(1)));
         assert_eq!(f.seekcount(), 2);
     }
 
@@ -730,13 +745,13 @@ mod tests {
     #[test]
     fn eof_known_from_chkseq() {
         let mut f = mk(data(256));
-        assert_eq!(f.get(256, ReadType::Read), EOF);
+        assert_eq!(f.get(256, ReadType::Read), raw(EOF));
         assert_eq!(f.seekcount(), 0, "the probe's seeks are not counted");
-        assert_eq!(f.get(300, ReadType::Read), EOF);
+        assert_eq!(f.get(300, ReadType::Read), raw(EOF));
         assert_eq!(f.seekcount(), 0, "EOF needs no file access");
-        assert_eq!(f.get(255, ReadType::Read), pat(255));
+        assert_eq!(f.get(255, ReadType::Read), raw(pat(255)));
         assert_eq!(f.seekcount(), 0, "append read of the whole file");
-        assert_eq!(f.get(256, ReadType::Read), EOF);
+        assert_eq!(f.get(256, ReadType::Read), raw(EOF));
     }
 
     /// After an EOF read the read cursor sits at -1 (`get_frombuffer`'s
@@ -750,13 +765,21 @@ mod tests {
     fn get_at_negative_position_after_eof_returns_eof() {
         let mut f = mk(data(3));
         for i in 0..3 {
-            assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
+            assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
-        assert_eq!(f.get(3, ReadType::Read), EOF, "EOF at end");
+        assert_eq!(f.get(3, ReadType::Read), raw(EOF), "EOF at end");
         // The C++ zero-arg get() re-issues at the reset cursor (-1).
-        assert_eq!(f.get(-1, ReadType::Read), EOF, "EOF is sticky at -1");
-        assert_eq!(f.get(-1, ReadType::Read), EOF, "EOF stays sticky at -1");
-        assert_eq!(f.get(-42, ReadType::Read), EOF, "any negative position");
+        assert_eq!(f.get(-1, ReadType::Read), raw(EOF), "EOF is sticky at -1");
+        assert_eq!(
+            f.get(-1, ReadType::Read),
+            raw(EOF),
+            "EOF stays sticky at -1"
+        );
+        assert_eq!(
+            f.get(-42, ReadType::Read),
+            raw(EOF),
+            "any negative position"
+        );
     }
 
     /// Soft-ahead appends are bounded by the lookahead base:
@@ -767,20 +790,20 @@ mod tests {
     fn soft_append_bounded_by_implicit_base() {
         let mut f = mk(data(6000));
         for i in 0..16 {
-            assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
+            assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
         // Base is 0: bound = 0 + 1024 - 16 = 1008.
-        assert_eq!(f.get(1008, ReadType::SoftAhead), pat(1008));
-        assert_eq!(f.get(1040, ReadType::SoftAhead), EOB);
-        assert_eq!(f.get(5000, ReadType::SoftAhead), EOB);
+        assert_eq!(f.get(1008, ReadType::SoftAhead), raw(pat(1008)));
+        assert_eq!(f.get(1040, ReadType::SoftAhead), raw(EOB));
+        assert_eq!(f.get(5000, ReadType::SoftAhead), raw(EOB));
         assert_eq!(f.seekcount(), 0, "the bound EOBs without file access");
         // A far-forward hard read resets and re-bases (mzPosBse = 2992, the
         // block-aligned position): the new bound 2992 + 1024 - 16 = 4000
         // holds without set_lookahead_base.
-        assert_eq!(f.get(3000, ReadType::HardAhead), pat(3000));
+        assert_eq!(f.get(3000, ReadType::HardAhead), raw(pat(3000)));
         assert_eq!(f.seekcount(), 1);
-        assert_eq!(f.get(4009, ReadType::SoftAhead), EOB);
-        assert_eq!(f.get(4000, ReadType::SoftAhead), pat(4000));
+        assert_eq!(f.get(4009, ReadType::SoftAhead), raw(EOB));
+        assert_eq!(f.get(4000, ReadType::SoftAhead), raw(pat(4000)));
         assert_eq!(f.seekcount(), 1);
     }
 
@@ -791,18 +814,18 @@ mod tests {
     fn set_lookahead_base_bounds_soft_append() {
         let mut f = JFileAhead::new(Cursor::new(data(8192)), "Tst", 1024, 512);
         for i in 0..16 {
-            assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
+            assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
         // Hard appends only: pos_inp reaches 4096 without a reset.
         for i in 1..8 {
-            assert_eq!(f.get(512 * i, ReadType::HardAhead), pat(512 * i));
+            assert_eq!(f.get(512 * i, ReadType::HardAhead), raw(pat(512 * i)));
         }
         f.set_lookahead_base(4000); // bound = 4000 + 1024 - 512 = 4512
-        assert_eq!(f.get(4513, ReadType::SoftAhead), EOB);
+        assert_eq!(f.get(4513, ReadType::SoftAhead), raw(EOB));
         assert_eq!(f.seekcount(), 0, "the bound EOBs without file access");
-        assert_eq!(f.get(4512, ReadType::SoftAhead), pat(4512));
+        assert_eq!(f.get(4512, ReadType::SoftAhead), raw(pat(4512)));
         assert_eq!(f.seekcount(), 0, "append reads do not seek");
-        assert_eq!(f.get(4513, ReadType::SoftAhead), pat(4513));
+        assert_eq!(f.get(4513, ReadType::SoftAhead), raw(pat(4513)));
     }
 
     /// Brief step-1 test: bytes already fetched stay available; re-reading
@@ -812,11 +835,11 @@ mod tests {
     fn scroll_back_serves_history() {
         let mut f = mk(data(2048));
         for i in 0..600 {
-            assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
+            assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
-        assert_eq!(f.get(5, ReadType::Read), pat(5));
-        assert_eq!(f.get(5, ReadType::SoftAhead), pat(5));
-        assert_eq!(f.get(599, ReadType::Read), pat(599));
+        assert_eq!(f.get(5, ReadType::Read), raw(pat(5)));
+        assert_eq!(f.get(5, ReadType::SoftAhead), raw(pat(5)));
+        assert_eq!(f.get(599, ReadType::Read), raw(pat(599)));
         assert_eq!(f.seekcount(), 0);
     }
 
@@ -828,16 +851,16 @@ mod tests {
     fn scrollback_two_seeks_full_window() {
         let mut f = JFileAhead::new(Cursor::new(data(65536)), "Tst", 16384, 4096);
         for i in 0..65536 {
-            assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
+            assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
         assert_eq!(f.seekcount(), 0);
         // Window [49152, 65536); 49151 is just before it and within one
         // buffer of it (49151 + 16384 - 4096 = 61439 > 49152): scrollback.
-        assert_eq!(f.get(49151, ReadType::Read), pat(49151));
+        assert_eq!(f.get(49151, ReadType::Read), raw(pat(49151)));
         assert_eq!(f.seekcount(), 2, "back-seek + forward re-seek");
-        assert_eq!(f.get(49150, ReadType::Read), pat(49150));
+        assert_eq!(f.get(49150, ReadType::Read), raw(pat(49150)));
         assert_eq!(f.seekcount(), 2, "served from the scrolled-back buffer");
-        assert_eq!(f.get(65536, ReadType::Read), EOF);
+        assert_eq!(f.get(65536, ReadType::Read), raw(EOF));
     }
 
     /// A pipe-like sequential stream (every seek fails) is auto-detected at
@@ -850,27 +873,31 @@ mod tests {
         let mut f = pipe(4096);
         assert!(f.is_sequential(), "the seek-EOF probe detects the pipe");
         for i in 0..1024 {
-            assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
+            assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
         assert_eq!(f.seekcount(), 0, "forward reads never seek");
-        assert_eq!(f.get(0, ReadType::Read), pat(0), "history stays buffered");
+        assert_eq!(
+            f.get(0, ReadType::Read),
+            raw(pat(0)),
+            "history stays buffered"
+        );
         for i in 1024..4096 {
-            assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
+            assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
         assert_eq!(f.seekcount(), 0);
         // Window [3072, 4096): 2000 is before it — not allowed on a
         // sequential file.
-        assert_eq!(f.get(2000, ReadType::Read), EXI_SEK);
-        assert_eq!(f.get(2000, ReadType::HardAhead), EOB);
-        assert_eq!(f.get(2000, ReadType::SoftAhead), EOB);
+        assert_eq!(f.get(2000, ReadType::Read), raw(EXI_SEK));
+        assert_eq!(f.get(2000, ReadType::HardAhead), raw(EOB));
+        assert_eq!(f.get(2000, ReadType::SoftAhead), raw(EOB));
         assert_eq!(f.seekcount(), 0, "the sentinel paths do no I/O");
         // Beyond the buffer: reset — but the sequential reset's seek fails on
         // the pipe (`JFileAhead.cpp:316-326`).
-        assert_eq!(f.get(10000, ReadType::Read), EXI_SEK);
+        assert_eq!(f.get(10000, ReadType::Read), raw(EXI_SEK));
         assert_eq!(f.seekcount(), 0, "the failed seek is not counted");
         // The failed reset left the buffer invalid (buf_usd 0): everything
         // now counts as before-buffer.
-        assert_eq!(f.get(4096, ReadType::Read), EXI_SEK);
+        assert_eq!(f.get(4096, ReadType::Read), raw(EXI_SEK));
     }
 
     /// On a sequential stream EOF is only learned from a short read
@@ -880,12 +907,16 @@ mod tests {
     fn sequential_eof_latched_without_seek() {
         let mut f = pipe(4096);
         for i in 0..4096 {
-            assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
+            assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
         assert_eq!(f.seekcount(), 0);
-        assert_eq!(f.get(4096, ReadType::Read), EOF, "the append read hits EOF");
-        assert_eq!(f.get(4097, ReadType::Read), EOF);
-        assert_eq!(f.get(5000, ReadType::Read), EOF);
+        assert_eq!(
+            f.get(4096, ReadType::Read),
+            raw(EOF),
+            "the append read hits EOF"
+        );
+        assert_eq!(f.get(4097, ReadType::Read), raw(EOF));
+        assert_eq!(f.get(5000, ReadType::Read), raw(EOF));
         assert_eq!(f.seekcount(), 0);
     }
 
@@ -895,16 +926,15 @@ mod tests {
     fn reset_block_aligns_getbufpos() {
         let mut f = JFileAhead::new(Cursor::new(data(8192)), "Tst", 1024, 64);
         for i in 0..100 {
-            assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
+            assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
-        assert_eq!(f.get(5000, ReadType::HardAhead), pat(5000));
+        assert_eq!(f.get(5000, ReadType::HardAhead), raw(pat(5000)));
         assert_eq!(f.seekcount(), 1);
         assert_eq!(f.get_buf_pos() % 64, 0, "reset lands on a block boundary");
         assert_eq!(f.get_buf_pos(), 4992);
-        assert_eq!(f.get_buf_sze(), 1024);
         // A second reset from a far-before position (3000 + 1024 - 64 = 3960
         // <= 4992: reset, not scrollback) aligns the same way.
-        assert_eq!(f.get(3000, ReadType::Read), pat(3000));
+        assert_eq!(f.get(3000, ReadType::Read), raw(pat(3000)));
         assert_eq!(f.seekcount(), 2);
         assert_eq!(f.get_buf_pos() % 64, 0);
         assert_eq!(f.get_buf_pos(), 2944);
@@ -918,16 +948,16 @@ mod tests {
     fn short_read_latches_eof() {
         let mut f = JFileAhead::new(Cursor::new(data(300)), "Tst", 256, 128);
         for i in 0..300 {
-            assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
+            assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
-        assert_eq!(f.get(300, ReadType::Read), EOF);
-        assert_eq!(f.get(400, ReadType::Read), EOF);
+        assert_eq!(f.get(300, ReadType::Read), raw(EOF));
+        assert_eq!(f.get(400, ReadType::Read), raw(EOF));
         assert_eq!(f.seekcount(), 0);
         // Window [44, 300): 43 is just before it and within one buffer.
-        assert_eq!(f.get(43, ReadType::Read), pat(43));
+        assert_eq!(f.get(43, ReadType::Read), raw(pat(43)));
         assert_eq!(f.seekcount(), 2, "scrollback: back-seek + forward re-seek");
-        assert_eq!(f.get(150, ReadType::Read), pat(150));
-        assert_eq!(f.get(300, ReadType::Read), EOF, "EOF stays latched");
+        assert_eq!(f.get(150, ReadType::Read), raw(pat(150)));
+        assert_eq!(f.get(300, ReadType::Read), raw(EOF), "EOF stays latched");
     }
 
     /// Replaces the removed `Buffer out of bounds` exit(6) quirk test: tiny
@@ -937,22 +967,22 @@ mod tests {
     fn tiny_buffer_wraparound_integrity() {
         let mut f = JFileAhead::new(Cursor::new(data(256)), "Tst", 64, 16);
         for i in 0..256 {
-            assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
+            assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
         assert_eq!(f.seekcount(), 0);
         // Window [192, 256): 190 is just before it, within one buffer —
         // scrollback (2 seeks), not the 0.8.1 bool-collapsed reset.
-        assert_eq!(f.get(190, ReadType::Read), pat(190));
+        assert_eq!(f.get(190, ReadType::Read), raw(pat(190)));
         assert_eq!(f.seekcount(), 2);
-        assert_eq!(f.get(191, ReadType::Read), pat(191));
+        assert_eq!(f.get(191, ReadType::Read), raw(pat(191)));
         for i in 192..256 {
-            assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
+            assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
-        assert_eq!(f.get(256, ReadType::Read), EOF);
-        assert_eq!(f.get(256, ReadType::Read), EOF);
+        assert_eq!(f.get(256, ReadType::Read), raw(EOF));
+        assert_eq!(f.get(256, ReadType::Read), raw(EOF));
         // Far before the window: reset (0 + 64 - 16 = 48 <= 192).
         for i in 0..64 {
-            assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
+            assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
         assert_eq!(f.seekcount(), 3);
     }
@@ -964,16 +994,16 @@ mod tests {
     fn tiny_buffer_equal_block_sze() {
         let mut f = JFileAhead::new(Cursor::new(data(100)), "Tst", 16, 16);
         for i in 0..100 {
-            assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
+            assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
         assert_eq!(f.seekcount(), 0);
         // Window [84, 100): 83 + 16 - 16 = 83 <= 84 — reset.
-        assert_eq!(f.get(83, ReadType::Read), pat(83));
+        assert_eq!(f.get(83, ReadType::Read), raw(pat(83)));
         assert_eq!(f.seekcount(), 1);
-        assert_eq!(f.get(0, ReadType::Read), pat(0));
+        assert_eq!(f.get(0, ReadType::Read), raw(pat(0)));
         assert_eq!(f.seekcount(), 2);
-        assert_eq!(f.get(99, ReadType::Read), pat(99));
-        assert_eq!(f.get(100, ReadType::Read), EOF);
+        assert_eq!(f.get(99, ReadType::Read), raw(pat(99)));
+        assert_eq!(f.get(100, ReadType::Read), raw(EOF));
     }
 
     /// A failing `Seek` surfaces the raw `EXI_SEK` sentinel
@@ -984,24 +1014,24 @@ mod tests {
     fn seek_error_returns_exi_sek() {
         // Every seek fails: append reads still work (no seek), resets fail.
         let mut f = JFileAhead::new(FlakySeek::failing(0, 2048), "Tst", 1024, 16);
-        assert_eq!(f.get(0, ReadType::Read), pat(0));
-        assert_eq!(f.get(5000, ReadType::HardAhead), EXI_SEK);
+        assert_eq!(f.get(0, ReadType::Read), raw(pat(0)));
+        assert_eq!(f.get(5000, ReadType::HardAhead), raw(EXI_SEK));
         // One algorithm seek succeeds: the scrollback's back-seek — its
         // forward re-seek then fails (`JFileAhead.cpp:379-380`).
         let mut f = JFileAhead::new(FlakySeek::failing(2, 2048), "Tst", 1024, 16);
         for i in 0..1100 {
-            assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
+            assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
-        assert_eq!(f.get(70, ReadType::Read), EXI_SEK);
+        assert_eq!(f.get(70, ReadType::Read), raw(EXI_SEK));
         // Two algorithm seeks: the scrollback completes; the next scrollback
         // fails on its own back-seek.
         let mut f = JFileAhead::new(FlakySeek::failing(3, 2048), "Tst", 1024, 16);
         for i in 0..1100 {
-            assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
+            assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
-        assert_eq!(f.get(70, ReadType::Read), pat(70));
+        assert_eq!(f.get(70, ReadType::Read), raw(pat(70)));
         assert_eq!(f.seekcount(), 2);
-        assert_eq!(f.get(0, ReadType::Read), EXI_SEK);
+        assert_eq!(f.get(0, ReadType::Read), raw(EXI_SEK));
     }
 
     /// A scrollback whose refill read hits EOF mid-way reports ReadError
@@ -1011,37 +1041,42 @@ mod tests {
     fn scrollback_read_error_returns_exi_red() {
         let mut f = JFileAhead::new(TruncatingReader::after(5, 4096), "Tst", 1024, 256);
         for i in 0..1280 {
-            assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
+            assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
         // Window [256, 1280); 255 is just before it. The scrollback's refill
         // read finds EOF (the device stopped serving data): ReadError.
-        assert_eq!(f.get(255, ReadType::Read), EXI_RED);
+        assert_eq!(f.get(255, ReadType::Read), raw(EXI_RED));
         assert_eq!(f.seekcount(), 1, "only the back-seek was counted");
         // The failed refill latched pos_eof = 0 (the 0-byte read), so later
         // gets take the EOF branch — and buf_usd = EOF = -1 stays set.
-        assert_eq!(f.get(0, ReadType::Read), EOF);
+        assert_eq!(f.get(0, ReadType::Read), raw(EOF));
     }
 
     /// The trait-level `getbuf` fast path (`JFileAhead.cpp:210-254`): a slice
-    /// of the buffer run at the requested position with its length; EOF and
-    /// EOB come back as `None` with the sentinel in `len`.
+    /// of the buffer run at the requested position, its length carried by the
+    /// slice itself; EOF and EOB come back as `None`.
     #[test]
     fn getbuf_direct_fast_path() {
         let mut f = mk(data(2048));
         for i in 0..100 {
-            assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
+            assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
-        let mut len: i64 = -999;
-        let run = f.getbuf(50, &mut len, ReadType::Read).expect("buffered");
-        assert_eq!(len, 62, "bytes available from pos to the input position");
-        assert_eq!(run[0] as i32, pat(50));
-        assert_eq!(run[61] as i32, pat(111));
+        let run = f.getbuf(50, ReadType::Read).expect("buffered");
+        assert_eq!(
+            run.len(),
+            62,
+            "bytes available from pos to the input position"
+        );
+        assert_eq!(i32::from(run[0]), pat(50));
+        assert_eq!(i32::from(run[61]), pat(111));
         assert_eq!(f.seekcount(), 0, "in-buffer getbuf does no I/O");
+        // The failure sentinels stay observable through the internal
+        // `getbuf_off` (the trait-level `getbuf` collapses them to `None`).
         let mut len = 0;
-        assert!(f.getbuf(2048, &mut len, ReadType::Read).is_none());
+        assert_eq!(f.getbuf_off(2048, &mut len, ReadType::Read), None);
         assert_eq!(len, i64::from(EOF));
         let mut len = 0;
-        assert!(f.getbuf(1500, &mut len, ReadType::SoftAhead).is_none());
+        assert_eq!(f.getbuf_off(1500, &mut len, ReadType::SoftAhead), None);
         assert_eq!(len, i64::from(EOB), "beyond-buffer soft read");
         assert_eq!(f.seekcount(), 0);
     }
@@ -1065,32 +1100,29 @@ mod tests {
     fn debug_asserts_silent_at_invariant_boundaries() {
         let mut f = JFileAhead::new(Cursor::new(data(256)), "Tst", 64, 16);
         for i in 0..256 {
-            assert_eq!(f.get(i, ReadType::Read), pat(i), "byte {i}");
+            assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
         // pos_inp = 256, buffer window [192, 256), ptr_inp wrapped to 0.
         // Oldest buffered byte: assert 2's `pos < pos_inp - buf_usd` is an
         // exact boundary (192 == 256 - 64) — must not fire.
-        let mut len: i64 = -999;
-        let run = f.getbuf(192, &mut len, ReadType::Read).expect("buffered");
-        assert_eq!(len, 64, "full window available from the oldest byte");
-        assert_eq!(run[0] as i32, pat(192));
+        let run = f.getbuf(192, ReadType::Read).expect("buffered");
+        assert_eq!(run.len(), 64, "full window available from the oldest byte");
+        assert_eq!(i32::from(run[0]), pat(192));
         // Newest buffered byte: off lands on buf_sze - 1 (assert 1's
         // `off >= buf.len()` boundary).
-        let mut len: i64 = -999;
-        let run = f.getbuf(255, &mut len, ReadType::Read).expect("buffered");
-        assert_eq!(len, 1);
-        assert_eq!(run[0] as i32, pat(255));
+        let run = f.getbuf(255, ReadType::Read).expect("buffered");
+        assert_eq!(run.len(), 1);
+        assert_eq!(i32::from(run[0]), pat(255));
         // Mid-window byte across the ring seam (ptr_inp == 0): off wraps.
-        let mut len: i64 = -999;
-        let run = f.getbuf(224, &mut len, ReadType::Read).expect("buffered");
-        assert_eq!(len, 32);
-        assert_eq!(run[0] as i32, pat(224));
-        assert_eq!(run[31] as i32, pat(255));
+        let run = f.getbuf(224, ReadType::Read).expect("buffered");
+        assert_eq!(run.len(), 32);
+        assert_eq!(i32::from(run[0]), pat(224));
+        assert_eq!(i32::from(run[31]), pat(255));
         // The EOF gate precedes the asserts: a negative position returns
         // EOF (§21.17) rather than reaching the `pos < pos_inp - buf_usd`
         // assert arm that the C++ debug build dies on (exit 6).
         let mut len: i64 = -999;
-        assert!(f.getbuf(-1, &mut len, ReadType::Read).is_none());
+        assert_eq!(f.getbuf_off(-1, &mut len, ReadType::Read), None);
         assert_eq!(len, i64::from(EOF));
     }
 

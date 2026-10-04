@@ -20,10 +20,17 @@
 
 use std::io::Write;
 
-use crate::defs::{BKT, DEL, EOF, EQL, ESC, EXI_ERR, EXI_OK, INS, MOD, ReadType, p8};
+use crate::defs::{EOF, EXI_ERR, Op, ReadType, p8, print_char};
+use crate::error::JDiffError;
 use crate::jdebug::dbg_print;
 use crate::jfile::JFile;
 use crate::jfileout::JFileOut;
+use crate::jout::wire::LenTier;
+
+/// The escape wire byte (`0xA7`) as an `i32` data value: the decoder's data
+/// and length arithmetic computes with C `int`s (EOF = -1 included), so the
+/// escape opcode appears as a byte value wherever it rides the data channel.
+const ESC_BYTE: i32 = Op::Esc as i32;
 
 /// Patch applier (`JPatcht`, `JPatcht.h:34-114`): holds the source file, the
 /// patch file, the output file and the verbosity level.
@@ -73,8 +80,12 @@ impl<'a, W: Write> JPatcht<'a, W> {
     /// Read)`): the file's cursor advances by one on every successful read
     /// and is reset to -1 on EOF/error (`JFile.h:73-81`,
     /// `JFileAhead.cpp:142-147`).
+    ///
+    /// One patch byte or `EOF` (`JPatcht.cpp`). The decoder's length
+    /// arithmetic computes with `EOF` like the C, so this is deliberately
+    /// the i32 representation boundary of the typed reader.
     fn pch_get(&mut self) -> i32 {
-        let li_inp = self.fil_pch.get(self.pos_pch, ReadType::Read);
+        let li_inp = self.fil_pch.get(self.pos_pch, ReadType::Read).to_i32();
         if li_inp < 0 {
             self.pos_pch = -1;
         } else {
@@ -90,36 +101,40 @@ impl<'a, W: Write> JPatcht<'a, W> {
     fn uf_get_int(&mut self) -> i64 {
         let mut li_val: i64 = i64::from(self.pch_get());
 
-        if li_val < 252 {
-            li_val + 1
-        } else if li_val == 252 {
-            253 + i64::from(self.pch_get())
-        } else if li_val == 253 {
-            li_val = i64::from(self.pch_get());
-            li_val = (li_val << 8) + i64::from(self.pch_get());
-            li_val
-        } else if li_val == 254 {
-            li_val = i64::from(self.pch_get());
-            li_val = (li_val << 8) + i64::from(self.pch_get());
-            li_val = (li_val << 8) + i64::from(self.pch_get());
-            li_val = (li_val << 8) + i64::from(self.pch_get());
-            li_val
-        } else {
-            /* 64-bit form (`JDIFF_LARGEFILE`, live in the oracle build and
-             * in this port). The non-LARGEFILE branch
-             * (`fprintf(stderr, "64-bit length numbers not supported!\n");
-             * return EXI_LRG;`, `JPatcht.cpp:80-83`) is unreachable here and
-             * is ported as dead code by omission of the `#else` body
-             * (spec §21.13). */
-            li_val = i64::from(self.pch_get());
-            li_val = (li_val << 8) + i64::from(self.pch_get());
-            li_val = (li_val << 8) + i64::from(self.pch_get());
-            li_val = (li_val << 8) + i64::from(self.pch_get());
-            li_val = (li_val << 8) + i64::from(self.pch_get());
-            li_val = (li_val << 8) + i64::from(self.pch_get());
-            li_val = (li_val << 8) + i64::from(self.pch_get());
-            li_val = (li_val << 8) + i64::from(self.pch_get());
-            li_val
+        match LenTier::from_lead(li_val) {
+            /* `li_val + 1` uses the original `li_val` (EOF/-1 → 0): the C
+             * arithmetic computes with the read result, no error path. */
+            LenTier::L252 => li_val + 1,
+            LenTier::L508 => 253 + i64::from(self.pch_get()),
+            LenTier::L16 => {
+                li_val = i64::from(self.pch_get());
+                li_val = (li_val << 8) + i64::from(self.pch_get());
+                li_val
+            }
+            LenTier::L32 => {
+                li_val = i64::from(self.pch_get());
+                li_val = (li_val << 8) + i64::from(self.pch_get());
+                li_val = (li_val << 8) + i64::from(self.pch_get());
+                li_val = (li_val << 8) + i64::from(self.pch_get());
+                li_val
+            }
+            LenTier::L64 => {
+                /* 64-bit form (`JDIFF_LARGEFILE`, live in the oracle build and
+                 * in this port). The non-LARGEFILE branch
+                 * (`fprintf(stderr, "64-bit length numbers not supported!\n");
+                 * return EXI_LRG;`, `JPatcht.cpp:80-83`) is unreachable here and
+                 * is ported as dead code by omission of the `#else` body
+                 * (spec §21.13). */
+                li_val = i64::from(self.pch_get());
+                li_val = (li_val << 8) + i64::from(self.pch_get());
+                li_val = (li_val << 8) + i64::from(self.pch_get());
+                li_val = (li_val << 8) + i64::from(self.pch_get());
+                li_val = (li_val << 8) + i64::from(self.pch_get());
+                li_val = (li_val << 8) + i64::from(self.pch_get());
+                li_val = (li_val << 8) + i64::from(self.pch_get());
+                li_val = (li_val << 8) + i64::from(self.pch_get());
+                li_val
+            }
         }
     }
 
@@ -130,23 +145,22 @@ impl<'a, W: Write> JPatcht<'a, W> {
         &mut self,
         lz_pos_org: i64,
         lz_pos_out: i64,
-        li_opr: i32,
+        li_opr: Op,
         ai_dta: i32,
         az_off: i64,
     ) -> i32 {
-        self.fil_out.putc(ai_dta);
+        // The C++ `fputc` result is never checked here (unlike copyfrom's
+        // checked writes): the always-1 return below is the port of that
+        // behavior, so a write error on the MOD/INS path is swallowed.
+        let _ = self.fil_out.putc(ai_dta);
         if self.verbse > 1 {
             dbg_print(format_args!(
                 "{} {} {} {:02x} {}\n",
-                p8(lz_pos_org + if li_opr == MOD { az_off } else { 0 }),
+                p8(lz_pos_org + if li_opr == Op::Mod { az_off } else { 0 }),
                 p8(lz_pos_out + az_off),
-                if li_opr == MOD { "MOD" } else { "INS" },
+                if li_opr == Op::Mod { "MOD" } else { "INS" },
                 ai_dta,
-                if (32..=127).contains(&ai_dta) {
-                    char::from_u32(ai_dta as u32).unwrap_or(' ')
-                } else {
-                    ' '
-                },
+                print_char(ai_dta),
             ));
         }
         1
@@ -155,16 +169,16 @@ impl<'a, W: Write> JPatcht<'a, W> {
     /// Read a data sequence INS or MOD (`JPatcht::ufGetDta`,
     /// `JPatcht.cpp:120-196`): outputs the pending bytes, then reads data
     /// until EOF or a new operator; `lz_mod` accumulates the offset counter.
-    /// Returns the new operator or `EOF`.
+    /// Returns the new operator, or `None` at EOF.
     fn uf_get_dta(
         &mut self,
         lz_pos_org: i64,
         lz_pos_out: i64,
-        li_opr: i32,
+        li_opr: Op,
         lz_mod: &mut i64,
         li_pnd: i32,
         li_dbl: i32,
-    ) -> i32 {
+    ) -> Option<Op> {
         let mut li_inp: i32; /* Input from mpFilPch */
         let mut li_new: i32; /* New operator */
 
@@ -178,7 +192,7 @@ impl<'a, W: Write> JPatcht<'a, W> {
         (comment as in the C++; the code outputs one ESC for ESC ESC.) */
         if li_pnd != EOF {
             *lz_mod += i64::from(self.uf_put_dta(lz_pos_org, lz_pos_out, li_opr, li_pnd, *lz_mod));
-            if li_pnd == ESC && li_dbl != ESC {
+            if li_pnd == ESC_BYTE && li_dbl != ESC_BYTE {
                 *lz_mod +=
                     i64::from(self.uf_put_dta(lz_pos_org, lz_pos_out, li_opr, li_dbl, *lz_mod));
             }
@@ -192,16 +206,40 @@ impl<'a, W: Write> JPatcht<'a, W> {
             }
 
             // Handle ESC-code
-            if li_inp == ESC {
+            if li_inp == ESC_BYTE {
                 li_new = self.pch_get();
-                match li_new {
-                    DEL | EQL | BKT | MOD | INS => {} // new operator: handled below
-                    ESC => {
+                /* `li_new as u8`: EOF (-1) truncates to 0xFF, which is not an
+                 * opcode, so an EOF right after an ESC lands in the
+                 * not-an-opcode arm like any unknown byte — the C++
+                 * `default` arm, which outputs it as data. */
+                match Op::from_byte(li_new as u8) {
+                    Some(opr) if opr != Op::Esc => {
+                        if opr == li_opr {
+                            // <ESC> MOD within an <ESC> MOD is meaningless: handle as data
+                            // <ESC> INS within an <ESC> INS is meaningless: handle as data
+                            if self.verbse > 2 {
+                                dbg_print(format_args!(
+                                    "{} {} ESC {:02x}\n",
+                                    p8(lz_pos_org + if li_opr == Op::Mod { *lz_mod } else { 0 }),
+                                    p8(lz_pos_out + *lz_mod),
+                                    li_new,
+                                ));
+                            }
+
+                            *lz_mod += i64::from(
+                                self.uf_put_dta(lz_pos_org, lz_pos_out, li_opr, li_inp, *lz_mod),
+                            );
+                            li_inp = li_new; // will be output below
+                        } else {
+                            return Some(opr);
+                        }
+                    }
+                    Some(_) => {
                         // Double ESC: drop one
                         if self.verbse > 2 {
                             dbg_print(format_args!(
                                 "{} {} ESC ESC\n",
-                                p8(lz_pos_org + if li_opr == MOD { *lz_mod } else { 0 }),
+                                p8(lz_pos_org + if li_opr == Op::Mod { *lz_mod } else { 0 }),
                                 p8(lz_pos_out + *lz_mod),
                             ));
                         }
@@ -212,12 +250,12 @@ impl<'a, W: Write> JPatcht<'a, W> {
                         );
                         continue;
                     }
-                    _ => {
+                    None => {
                         // ESC <xxx> with <xxx> not an opcode: output as they are
                         if self.verbse > 2 {
                             dbg_print(format_args!(
                                 "{} {} ESC XXX\n",
-                                p8(lz_pos_org + if li_opr == MOD { *lz_mod } else { 0 }),
+                                p8(lz_pos_org + if li_opr == Op::Mod { *lz_mod } else { 0 }),
                                 p8(lz_pos_out + *lz_mod),
                             ));
                         }
@@ -232,49 +270,33 @@ impl<'a, W: Write> JPatcht<'a, W> {
                         continue;
                     }
                 }
-                if li_new == li_opr {
-                    // <ESC> MOD within an <ESC> MOD is meaningless: handle as data
-                    // <ESC> INS within an <ESC> INS is meaningless: handle as data
-                    if self.verbse > 2 {
-                        dbg_print(format_args!(
-                            "{} {} ESC {:02x}\n",
-                            p8(lz_pos_org + if li_opr == MOD { *lz_mod } else { 0 }),
-                            p8(lz_pos_out + *lz_mod),
-                            li_new,
-                        ));
-                    }
-
-                    *lz_mod +=
-                        i64::from(self.uf_put_dta(lz_pos_org, lz_pos_out, li_opr, ESC, *lz_mod));
-                    li_inp = li_new; // will be output below
-                } else {
-                    return li_new;
-                }
             }
 
             // Handle data
             *lz_mod += i64::from(self.uf_put_dta(lz_pos_org, lz_pos_out, li_opr, li_inp, *lz_mod));
         } /* while ! EOF */
 
-        EOF // we
+        None // EOF
     }
 
     /// Patch function (`JPatcht::jpatch`, `JPatcht.cpp:209-338`).
     ///
-    /// Returns [`EXI_OK`] on success and the raw negative `EXI_*`/length
-    /// sentinels on errors (`EXI_ERR` on the trailing-ESC warning, the
-    /// truncated negative lengths from `uf_get_int`, `EXI_RED`/`EXI_WRI`
-    /// from the EQL copy).
+    /// Returns `Ok(())` on success and the mapped errors otherwise:
+    /// [`JDiffError::Raw`] carries the raw negative sentinels (`EXI_ERR` on
+    /// the trailing-ESC warning and the truncated negative lengths from
+    /// `uf_get_int` — arbitrary values the exit switch dispatches by code),
+    /// `EXI_RED`/`EXI_WRI` arrive as [`JDiffError::Read`]/[`JDiffError::Write`]
+    /// from the EQL copy's `copyfrom`.
     ///
     /// The C++ clears the pending-byte mirrors (`liDbl = EOF`, `liInp = EOF`,
     /// `:238-239`, `:254`, `:257-258`) in branches where nothing reads them
     /// anymore; the stores are ported as written, so the dead-store lint is
     /// silenced for this function.
     #[allow(unused_assignments)]
-    pub fn jpatch(&mut self) -> i32 {
+    pub fn jpatch(&mut self) -> Result<(), JDiffError> {
         let mut li_inp: i32; /* 1st Pending byte (EOF = no pending byte) */
         let mut li_dbl: i32 = EOF; /* 2nd Pending byte (EOF = no pending byte) */
-        let mut li_opr: i32; /* Current operand */
+        let mut li_opr: Option<Op>; /* Current operand (None = read next from input) */
         /* Current operand's offset. The C++ leaves `lzOff` uninitialized on
          * entry (ufGetDta sets it through the reference; DEL/EQL/BKT assign
          * before use); Rust requires an initializer, which is behaviorally
@@ -283,40 +305,42 @@ impl<'a, W: Write> JPatcht<'a, W> {
         let mut lz_pos_org: i64 = 0; /* Position in source file */
         let mut lz_pos_out: i64 = 0; /* Position in destination file */
 
-        li_opr = 0; // no operator
-        while li_opr != EOF {
+        li_opr = None; // no operator
+        loop {
             // Read operator from input, unless this has already been done
-            if li_opr == 0 {
+            if li_opr.is_none() {
                 li_inp = self.pch_get();
                 if li_inp == EOF {
                     break;
                 }
 
                 // Handle ESC <opr>
-                if li_inp == ESC {
+                if li_inp == ESC_BYTE {
                     li_dbl = self.pch_get();
-                    match li_dbl {
-                        EQL | DEL | BKT | MOD | INS => {
-                            li_opr = li_dbl;
+                    /* `li_dbl as u8`: EOF (-1) truncates to 0xFF, not an
+                     * opcode, so it is classified separately below. */
+                    match Op::from_byte(li_dbl as u8) {
+                        Some(opr) if opr != Op::Esc => {
+                            li_opr = Some(opr);
                             li_dbl = EOF;
                             li_inp = EOF;
                         } // new operator found, all ok !
-                        EOF => {
+                        None if li_dbl == EOF => {
                             // serious error, let's call this a trailing byte
                             eprintln!(
                                 "Warning: unexpected trailing byte at end of file, \
                                  patch file may be corrupted."
                             );
-                            return EXI_ERR;
+                            return Err(JDiffError::Raw(EXI_ERR));
                         }
+                        // ESC ESC or ESC <unknown> at the start of a sequence:
+                        // resolve by double pending bytes: liInp and liDbl
                         _ => {
-                            // ESC xxx or ESC ESC at the start of a sequence
-                            // Resolve by double pending bytes: liInp and liDbl
-                            li_opr = MOD;
+                            li_opr = Some(Op::Mod);
                         }
                     }
                 } else {
-                    li_opr = MOD; // If an ESC <opr> is missing, set default operator (gaining two bytes)
+                    li_opr = Some(Op::Mod); // If an ESC <opr> is missing, set default operator (gaining two bytes)
                     li_dbl = EOF;
                 }
             } else {
@@ -325,16 +349,11 @@ impl<'a, W: Write> JPatcht<'a, W> {
             }
 
             // Execute the operator
-            match li_opr {
-                MOD => {
-                    li_opr = self.uf_get_dta(
-                        lz_pos_org,
-                        lz_pos_out,
-                        li_opr,
-                        &mut lz_off,
-                        li_inp,
-                        li_dbl,
-                    );
+            let opr = li_opr.expect("operator just read or carried over");
+            match opr {
+                Op::Mod => {
+                    li_opr =
+                        self.uf_get_dta(lz_pos_org, lz_pos_out, opr, &mut lz_off, li_inp, li_dbl);
                     if self.verbse == 1 {
                         dbg_print(format_args!(
                             "{} {} MOD {}\n",
@@ -345,17 +364,14 @@ impl<'a, W: Write> JPatcht<'a, W> {
                     }
                     lz_pos_org += lz_off;
                     lz_pos_out += lz_off;
+                    if li_opr.is_none() {
+                        break; // EOF: end of patch
+                    }
                 }
 
-                INS => {
-                    li_opr = self.uf_get_dta(
-                        lz_pos_org,
-                        lz_pos_out,
-                        li_opr,
-                        &mut lz_off,
-                        li_inp,
-                        li_dbl,
-                    );
+                Op::Ins => {
+                    li_opr =
+                        self.uf_get_dta(lz_pos_org, lz_pos_out, opr, &mut lz_off, li_inp, li_dbl);
                     if self.verbse == 1 {
                         dbg_print(format_args!(
                             "{} {} INS {}\n",
@@ -365,12 +381,15 @@ impl<'a, W: Write> JPatcht<'a, W> {
                         ));
                     }
                     lz_pos_out += lz_off;
+                    if li_opr.is_none() {
+                        break; // EOF: end of patch
+                    }
                 }
 
-                DEL => {
+                Op::Del => {
                     lz_off = self.uf_get_int();
                     if lz_off < 0 {
-                        return lz_off as i32;
+                        return Err(JDiffError::Raw(lz_off as i32));
                     }
                     if self.verbse >= 1 {
                         dbg_print(format_args!(
@@ -381,14 +400,14 @@ impl<'a, W: Write> JPatcht<'a, W> {
                         ));
                     }
                     lz_pos_org += lz_off;
-                    li_opr = 0; // to read next operator from input
+                    li_opr = None; // to read next operator from input
                 }
 
-                EQL => {
+                Op::Eql => {
                     /* get length of operation */
                     lz_off = self.uf_get_int();
                     if lz_off < 0 {
-                        return lz_off as i32;
+                        return Err(JDiffError::Raw(lz_off as i32));
                     }
 
                     /* show feedback */
@@ -402,21 +421,18 @@ impl<'a, W: Write> JPatcht<'a, W> {
                     }
 
                     /* execute operation */
-                    let li_ret = self.fil_out.copyfrom(self.fil_org, lz_pos_org, lz_off);
-                    if li_ret != EXI_OK {
-                        return li_ret;
-                    }
+                    self.fil_out.copyfrom(self.fil_org, lz_pos_org, lz_off)?;
                     lz_pos_org += lz_off;
                     lz_pos_out += lz_off;
 
                     /* Next operator */
-                    li_opr = 0; // to read next operator from input
+                    li_opr = None; // to read next operator from input
                 }
 
-                BKT => {
+                Op::Bkt => {
                     lz_off = self.uf_get_int();
                     if lz_off < 0 {
-                        return lz_off as i32;
+                        return Err(JDiffError::Raw(lz_off as i32));
                     }
                     if self.verbse >= 1 {
                         dbg_print(format_args!(
@@ -427,38 +443,39 @@ impl<'a, W: Write> JPatcht<'a, W> {
                         ));
                     }
                     lz_pos_org -= lz_off;
-                    li_opr = 0; // to read next operator from input
+                    li_opr = None; // to read next operator from input
                 }
 
-                /* No default in the C++ switch; li_opr is always one of the
-                 * five operators here (or EOF, excluded by the loop). */
-                _ => {}
+                /* `Esc` is the escape byte, never an operator: the
+                 * read-operator branch above resolves every escape (or dies
+                 * on the trailing-ESC warning). */
+                Op::Esc => {}
             }
-        } /* while ! EOF */
+        } /* loop */
 
         if self.verbse >= 1 {
             dbg_print(format_args!("{} {} EOF\n", p8(lz_pos_org), p8(lz_pos_out)));
         }
 
-        EXI_OK
+        Ok(())
     } /* jpatch */
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::defs::{EXI_ERR, EXI_OK, EXI_RED};
+    use crate::defs::{EXI_ERR, EXI_RED};
     use crate::jfile::JFileMem;
 
-    /// u8 mirrors of the opcode consts (the `defs` consts are i32 like the
-    /// C++ ints; patch byte arrays are u8). The local definitions shadow the
-    /// glob import for the test byte arrays below.
-    const ESC: u8 = crate::defs::ESC as u8;
-    const MOD: u8 = crate::defs::MOD as u8;
-    const INS: u8 = crate::defs::INS as u8;
-    const DEL: u8 = crate::defs::DEL as u8;
-    const EQL: u8 = crate::defs::EQL as u8;
-    const BKT: u8 = crate::defs::BKT as u8;
+    /// u8 wire bytes of the opcodes (patch byte arrays are u8, the `Op`
+    /// enum carries the wire values). The local definitions shadow the glob
+    /// import for the test byte arrays below.
+    const ESC: u8 = Op::Esc.byte();
+    const MOD: u8 = Op::Mod.byte();
+    const INS: u8 = Op::Ins.byte();
+    const DEL: u8 = Op::Del.byte();
+    const EQL: u8 = Op::Eql.byte();
+    const BKT: u8 = Op::Bkt.byte();
 
     /// 17-byte fixture differing only in the tail (the round-trip.rs pair).
     const ORG_A: &[u8] = b"hello world hello";
@@ -480,7 +497,7 @@ mod tests {
     ];
 
     /// Applies `patch` to `org` at verbosity `v`; returns (rc, output).
-    fn apply(org: &[u8], patch: &[u8], v: i32) -> (i32, Vec<u8>) {
+    fn apply(org: &[u8], patch: &[u8], v: i32) -> (Result<(), JDiffError>, Vec<u8>) {
         let mut org_f = JFileMem::new(org.to_vec());
         let mut pch_f = JFileMem::new(patch.to_vec());
         let out = JFileOut::new(Vec::new());
@@ -494,7 +511,7 @@ mod tests {
     #[test]
     fn applies_085_implicit_mod_patch() {
         let (rc, out) = apply(ORG_A, PATCH_AB, 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out, NEW_B);
     }
 
@@ -504,7 +521,7 @@ mod tests {
     #[test]
     fn applies_081_explicit_mod_patch() {
         let (rc, out) = apply(ORG_A, PATCH_AB_081, 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out, NEW_B);
     }
 
@@ -513,7 +530,7 @@ mod tests {
     #[test]
     fn empty_patch_succeeds() {
         let (rc, out) = apply(ORG_A, &[], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert!(out.is_empty());
     }
 
@@ -524,7 +541,7 @@ mod tests {
     #[test]
     fn esc_esc_at_sequence_start_is_mod_data() {
         let (rc, out) = apply(b"0123456789", &[ESC, ESC, b'A', b'B'], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out, [0xA7, b'A', b'B']);
     }
 
@@ -533,7 +550,7 @@ mod tests {
     #[test]
     fn esc_unknown_at_sequence_start_is_mod_data() {
         let (rc, out) = apply(b"0123456789", &[ESC, b'x', b'y'], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out, [0xA7, b'x', b'y']);
     }
 
@@ -545,7 +562,7 @@ mod tests {
     #[test]
     fn plain_byte_at_sequence_start_is_implicit_mod_data() {
         let (rc, out) = apply(b"0123456789", &[b'X', ESC, EQL, 0x03], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         // 'X' as MOD data (pos_org 0 -> 1), then EQL 4 copies org[1..5].
         assert_eq!(out, b"X1234");
     }
@@ -555,7 +572,7 @@ mod tests {
     #[test]
     fn esc_same_opr_inside_run_is_data() {
         let (rc, out) = apply(b"0123456789", &[ESC, MOD, b'A', ESC, MOD, b'B'], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out, [b'A', 0xA7, 0xA6, b'B']);
     }
 
@@ -564,7 +581,7 @@ mod tests {
     #[test]
     fn esc_other_opr_switches_operator() {
         let (rc, out) = apply(b"0123456789", &[ESC, MOD, b'A', ESC, INS, b'B'], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out, b"AB");
     }
 
@@ -572,7 +589,7 @@ mod tests {
     #[test]
     fn esc_esc_inside_run_yields_one_esc() {
         let (rc, out) = apply(b"0123456789", &[ESC, MOD, b'A', ESC, ESC, b'B'], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out, [b'A', 0xA7, b'B']);
     }
 
@@ -585,7 +602,7 @@ mod tests {
             ESC, EQL, 0x03, ESC, INS, b'X', ESC, BKT, 0x03, ESC, INS, b'Y',
         ];
         let (rc, out) = apply(b"0123456789", &patch, 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out, b"0123XY");
     }
 
@@ -595,28 +612,29 @@ mod tests {
     fn length_tiers_decode() {
         // 1-byte tier: 0x03 -> 4 bytes.
         let (rc, out) = apply(b"0123456789", &[ESC, EQL, 0x03], 0);
-        assert_eq!((rc, out.as_slice()), (EXI_OK, &b"0123"[..]));
+        assert!(rc.is_ok());
+        assert_eq!(out.as_slice(), &b"0123"[..]);
 
         // 2-byte tier: 252-marker, x=97 -> 253+97 = 350 bytes (org padded).
         let org = vec![0x5Au8; 400];
         let (rc, out) = apply(&org, &[ESC, EQL, 252, 97], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out.len(), 350);
 
         // 16-bit tier: 253-marker, 0x0100 -> 256 bytes.
         let (rc, out) = apply(&org, &[ESC, EQL, 253, 0x01, 0x00], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out.len(), 256);
 
         // 32-bit tier: 254-marker, 0x0000012C -> 300 bytes.
         let (rc, out) = apply(&org, &[ESC, EQL, 254, 0, 0, 1, 0x2C], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out.len(), 300);
 
         // 64-bit tier: 255-marker, 0x000000000000012C -> 300 bytes.
         let patch = [ESC, EQL, 255, 0, 0, 0, 0, 0, 0, 1, 0x2C];
         let (rc, out) = apply(&org, &patch, 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out.len(), 300);
     }
 
@@ -627,19 +645,19 @@ mod tests {
     fn truncated_length_eof_arithmetic() {
         // [ESC DEL 252] at EOF: 253 + (-1) = 252 -> DEL 252, success, empty.
         let (rc, out) = apply(ORG_A, &[ESC, DEL, 252], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert!(out.is_empty());
 
         // First length byte at EOF: -1 < 252 -> -1 + 1 = 0 -> EQL 0.
         let (rc, out) = apply(ORG_A, &[ESC, EQL], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert!(out.is_empty());
 
         // 8-byte form truncated after 7 bytes: (0xFF..FF << 8) + (-1) =
         // -257 -> negative length, jpatch returns it truncated to int.
         let patch = [ESC, DEL, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
         let (rc, out) = apply(ORG_A, &patch, 0);
-        assert_eq!(rc, -257);
+        assert_eq!(rc.unwrap_err().exit_code(), -257);
         assert!(out.is_empty());
     }
 
@@ -650,7 +668,7 @@ mod tests {
     #[test]
     fn trailing_esc_at_sequence_start_is_exi_err() {
         let (rc, out) = apply(ORG_A, &[ESC], 0);
-        assert_eq!(rc, EXI_ERR);
+        assert_eq!(rc.unwrap_err().exit_code(), EXI_ERR);
         assert!(out.is_empty());
     }
 
@@ -660,7 +678,7 @@ mod tests {
     #[test]
     fn trailing_esc_after_data_appends_esc_and_ff() {
         let (rc, out) = apply(b"0123456789", &[ESC, MOD, b'x', ESC], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out, [b'x', 0xA7, 0xFF]);
     }
 
@@ -669,7 +687,7 @@ mod tests {
     #[test]
     fn eql_past_source_end_is_exi_red() {
         let (rc, out) = apply(ORG_A, &[ESC, EQL, 99], 0); // len 100 > 17
-        assert_eq!(rc, EXI_RED);
+        assert_eq!(rc.unwrap_err().exit_code(), EXI_RED);
         assert_eq!(out, ORG_A); // everything readable was copied first
     }
 
@@ -678,7 +696,7 @@ mod tests {
     #[test]
     fn identical_pair_single_eql_restores() {
         let (rc, out) = apply(ORG_A, &[ESC, EQL, 0x10], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert_eq!(out, ORG_A);
     }
 
@@ -691,13 +709,13 @@ mod tests {
     fn bkt_before_start_succeeds_until_next_copy() {
         // BKT 4 alone: position -4 is never read, plain success.
         let (rc, out) = apply(b"0123456789", &[ESC, BKT, 0x03], 0);
-        assert_eq!(rc, EXI_OK);
+        assert!(rc.is_ok());
         assert!(out.is_empty());
 
         // BKT 4 followed by EQL 4: the copy reads at -4 -> EXI_RED.
         let patch = [ESC, BKT, 0x03, ESC, EQL, 0x03];
         let (rc, out) = apply(b"0123456789", &patch, 0);
-        assert_eq!(rc, EXI_RED);
+        assert_eq!(rc.unwrap_err().exit_code(), EXI_RED);
         assert!(out.is_empty());
     }
 

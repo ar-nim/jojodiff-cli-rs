@@ -29,7 +29,7 @@
 //! permutation state — `optind` (index of the first operand in the permuted
 //! argv) = `1 + (number of argv slots held by options and their detached
 //! arguments)`, and `liOptArgCnt = optind - 1`, so `nargs = argc -
-//! liOptArgCnt` counts the operands plus argv[0]. [`Getopt::optind`] reports
+//! liOptArgCnt` counts the operands plus `argv[0]`. [`Getopt::optind`] reports
 //! exactly that; the operands themselves come from [`Getopt::operands`].
 
 use std::ffi::OsString;
@@ -195,7 +195,7 @@ pub enum Opt {
     End,
 }
 
-/// glibc-style scanner over the full argv (argv[0] included, like `main`).
+/// glibc-style scanner over the full argv (`argv[0]` included, like `main`).
 pub struct Getopt {
     args: Vec<OsString>,
     /// `argv[0]` as passed, used verbatim in the error messages.
@@ -263,7 +263,7 @@ impl Getopt {
             if self.nextchar != 0 {
                 // None = cluster exhausted (scan_short reset nextchar; the
                 // token itself was consumed when the cluster started).
-                match self.scan_short(&self.cluster.clone()) {
+                match self.scan_cluster() {
                     Some(opt) => return opt,
                     None => continue,
                 }
@@ -292,8 +292,8 @@ impl Getopt {
                 // operand.
                 self.optind += 1;
                 self.nextchar = 1;
-                self.cluster = bytes.clone();
-                if let Some(opt) = self.scan_short(&bytes) {
+                self.cluster = bytes;
+                if let Some(opt) = self.scan_cluster() {
                     return opt;
                 }
                 continue;
@@ -303,6 +303,16 @@ impl Getopt {
             self.operands.push(tok);
             self.optind += 1;
         }
+    }
+
+    /// Scans the next option from `self.cluster` without cloning it per
+    /// character: the token is moved out so `scan_short` can borrow `&mut
+    /// self` and the cluster text simultaneously, then restored.
+    fn scan_cluster(&mut self) -> Option<Opt> {
+        let tok = std::mem::take(&mut self.cluster);
+        let opt = self.scan_short(&tok);
+        self.cluster = tok;
+        opt
     }
 
     /// Scans the short cluster starting at `self.nextchar` in `tok`.
