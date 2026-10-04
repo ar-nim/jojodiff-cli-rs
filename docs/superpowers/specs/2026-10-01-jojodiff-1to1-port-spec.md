@@ -1144,13 +1144,29 @@ upstream option matrix informs §22's test matrix. The de-facto changelog is the
     port's saturating `c_atoi` does not share). The port refuses them
     cleanly:
 
-    * **Layer A** (`cli::run`, Linux only): before any file is opened, the
+    * **Layer A** (`cli::run`): before any file is opened, the
       exact allocation footprint (two input buffers, hash table, match
-      table) is compared against `MemAvailable + SwapFree − 512 MiB`
-      (`/proc/meminfo`); exceeding it prints a per-option byte breakdown
-      and exits 10 (`EXI_MEM`, "Error allocating memory !"), the C++ exit
-      code reserved for this condition. Configurations that fit run
-      byte-identical.
+      table) is compared against the platform's available-anonymous
+      ceiling minus a 512 MiB headroom; exceeding it prints a per-option
+      byte breakdown and exits 10 (`EXI_MEM`, "Error allocating memory
+      !"), the C++ exit code reserved for this condition. Configurations
+      that fit run byte-identical. The port must cater for **Windows,
+      macOS and Linux**; the ceiling source is per platform (std-only —
+      no `unsafe`, no new dependencies; each platform's own reporting
+      source is parsed):
+      - **Linux**: `/proc/meminfo` — `MemAvailable + SwapFree` (exact).
+      - **macOS**: `vm_stat` free + inactive + speculative pages × page
+        size (a heuristic `MemAvailable` analogue — active/compressed
+        pages do not count) plus free swap from `sysctl vm.swapusage`.
+      - **Windows**: `Win32_OperatingSystem.FreeVirtualMemory` (KB =
+        available physical + available paging file) via one
+        `powershell -NoProfile` spawn per run (~0.5–2 s — the price of a
+        no-FFI implementation; `GlobalMemoryStatusEx` would need
+        `unsafe`).
+      - **Any other target**: ceiling unknown — Layer B only.
+      CI exercises only the Linux source; the macOS/Windows parsers are
+      pure functions unit-tested on every platform, and their wrappers
+      use target-neutral `std::process` APIs.
     * **Layer B** (all platforms): the three engine constructors allocate
       via `try_reserve`; an OS refusal is `JDiffError::Memory` → exit 10,
       never a Rust allocation abort.
