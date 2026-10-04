@@ -9,12 +9,13 @@
 use std::ffi::{OsStr, OsString};
 
 use crate::cli::opts::{Getopt, Opt, VAL_COMPAT_081};
-use crate::defs::c_atoi;
+use crate::defs::{c_atoi, get_lower_prime};
 use crate::jdebug::{DBG_TO_STDOUT, dbg_print};
 #[cfg(feature = "debug")]
 use crate::jdebug::{
     DBGAHD, DBGAHH, DBGBKT, DBGBUF, DBGCMP, DBGDST, DBGHSH, DBGHSK, DBGMCH, DBGPRG, DBGRED, dbg_set,
 };
+use crate::jfile::ahead::effective_geometry;
 
 /// Function to execute (`enum {Diff, Patch, Dedup, Test} liFun`,
 /// `main.cpp:293`). Dedup/Test are ported per rulings §21.4/§21.3.
@@ -407,6 +408,53 @@ pub fn size_buffers(opts: &Options) -> Buffers {
     }
 }
 
+/// Memory-budget breakdown in bytes: everything one diff run allocates —
+/// the two input buffers (`JFileAhead`), the hashtable (`JHashPos`) and
+/// the matching table (`JMatchTable` nodes + two bucket tables). The
+/// `-t` patch phase reuses only the two buffers after the diff phase
+/// dropped its tables, so this sum is the process peak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MemoryPlan {
+    pub total: u64,
+    pub buffers: u64,
+    pub index_table: u64,
+    pub match_table: u64,
+}
+
+/// The exact allocations the engines will make for `opts`/`buffers`
+/// (memguard Layer A). Saturating arithmetic: absurd option values must
+/// overflow to `u64::MAX` (gate refuses), never wrap small.
+pub(crate) fn memory_footprint(opts: &Options, buffers: &Buffers) -> MemoryPlan {
+    let org = effective_geometry(buffers.ll_buf_org, buffers.blk_sze)
+        .0
+        .max(0) as u64;
+    let new = effective_geometry(buffers.ll_buf_new, buffers.blk_sze)
+        .0
+        .max(0) as u64;
+    let buf_bytes = org.saturating_add(new);
+
+    let prime_i = get_lower_prime(crate::jhashpos::elements_for_mb(opts.hsh_mbt));
+    let index_table = crate::jhashpos::size_bytes_for(prime_i).max(0) as u64;
+
+    let nodes = u64::try_from(crate::jmatchtable::NODE_SIZE)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(u64::try_from(opts.mch_max.max(13)).unwrap_or(u64::MAX));
+    let buckets = u64::try_from(crate::jmatchtable::mch_pme_for(opts.mch_max).max(0))
+        .unwrap_or(u64::MAX)
+        .saturating_mul(16);
+    let match_table = nodes.saturating_add(buckets);
+
+    let total = buf_bytes
+        .saturating_add(index_table)
+        .saturating_add(match_table);
+    MemoryPlan {
+        total,
+        buffers: buf_bytes,
+        index_table,
+        match_table,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,6 +462,50 @@ mod tests {
 
     fn argv0(name: &str) -> OsString {
         OsString::from(name)
+    }
+
+    /// `memory_footprint` (memguard plan): the exact bytes the engines will
+    /// allocate for one diff run. Vectors verified against the live binary
+    /// (NODE_SIZE=104; get_lower_prime(256)=251, (2048)=2039).
+    #[test]
+    fn footprint_default_options() {
+        let o = parse(&[argv0("jdiff"), OsString::from("a"), OsString::from("b")]);
+        let b = size_buffers(&o);
+        let p = memory_footprint(&o, &b);
+        assert_eq!(p.buffers, 2 * 1024 * 1024);
+        assert_eq!(p.index_table, 33_554_172); // 12 * 2796181 (-i 32)
+        assert_eq!(p.match_table, 104 * 128 + 16 * 251); // nodes + buckets
+        assert_eq!(p.total, 35_668_652);
+    }
+
+    #[test]
+    fn footprint_m_2048_and_x_1024() {
+        let o = parse(&[
+            argv0("jdiff"),
+            OsString::from("-m"),
+            OsString::from("2048"),
+            OsString::from("-x"),
+            OsString::from("1024"),
+        ]);
+        let b = size_buffers(&o);
+        let p = memory_footprint(&o, &b);
+        assert_eq!(p.buffers, 2_147_483_648); // 1 GiB each
+        assert_eq!(p.match_table, 104 * 1024 + 16 * 2039);
+        assert_eq!(p.total, 2_147_483_648 + 33_554_172 + 104 * 1024 + 16 * 2039);
+    }
+
+    #[test]
+    fn footprint_saturated_values_overflow_to_u64_max() {
+        // -m 99999999999999999999 saturates to i32::MAX MB per buffer:
+        // the total must saturate, never wrap or underflow.
+        let o = parse(&[
+            argv0("jdiff"),
+            OsString::from("-m"),
+            OsString::from("99999999999999999999"),
+        ]);
+        let b = size_buffers(&o);
+        let p = memory_footprint(&o, &b);
+        assert!(p.total > 1_000_000_000_000_000); // petabyte-scale
     }
 
     #[test]
