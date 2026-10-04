@@ -667,6 +667,18 @@ Register the module import: `use crate::cli::config::{self, Function};` already 
 
 - [ ] **Step 4: Run** — `rtk cargo test --release --test memguard` → 3/3 PASS. Full suite `rtk cargo test --release` → PASS (the gate is invisible at every size the suites use).
 
+- [ ] **Step 4b (execution finding): opt the byte-contract harnesses out of the gate.** The
+first full-suite run exposed a plan gap: `tests/oracle.rs`, `tests/roundtrip.rs` and
+`tests/crossver.rs` pin `-m 2048` (a valid, oracle-pinned configuration) — on hosts where
+`MemAvailable + SwapFree − 512 MiB` dips below its 2080 MB footprint (this workstation under
+load: ~2.5 GB available), the gate refuses it while the sparse zero pages previously ran fine.
+Byte-contract suites must be RAM-independent (Global Constraints forbid GB-scale
+machine-dependence), so their binary-spawning helpers set the documented escape hatch —
+`JDIFF_UNSAFE_NO_MEMGUARD=1` in `tests/oracle.rs` `run_in`, `tests/common/mod.rs` `jdiff` and
+`tests/crossver.rs` `run_copied` — and the guard stays exercised by `tests/memguard.rs`
+(petabyte-scale, machine-independent). The §21.19 "sparse-overcommit now fails fast" note
+remains true in production; in the harnesses it is the pre-existing behavior.
+
 - [ ] **Step 5: Commit**
 
 ```bash
