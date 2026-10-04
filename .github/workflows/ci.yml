@@ -1,6 +1,18 @@
 name: ci
 
-on: [push, pull_request]
+# One run per change: PRs run on the pull_request event only (a branch
+# push does not double-trigger), pushes run only on main (post-merge /
+# direct commits).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded in-progress runs when new commits land on the same
+# branch instead of stacking full suites.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
