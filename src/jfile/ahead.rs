@@ -112,7 +112,35 @@ pub struct JFileAhead<R: Read + Seek> {
     pos_bse: i64,   // mzPosBse (JFileAhead.h:169)
 }
 
+/// The buffer arithmetic of `JFileAhead::new` (`JFileAhead.cpp:44-57`),
+/// pure so the CLI memory budget can compute the exact allocation without
+/// building a reader: zero `buf_sze` -> 1024; zero `blk_sze` -> 1; shrink
+/// `buf_sze` down to a block multiple; a zero result grows to `blk_sze`.
+pub(crate) fn effective_geometry(mut buf_sze: i64, blk_sze: i32) -> (i64, i64) {
+    if buf_sze == 0 {
+        buf_sze = 1024;
+    }
+    let mut blk_sze = i64::from(blk_sze);
+    if blk_sze == 0 {
+        blk_sze = 1;
+    }
+    if buf_sze % blk_sze != 0 {
+        buf_sze -= buf_sze % blk_sze;
+    }
+    if buf_sze == 0 {
+        buf_sze = blk_sze;
+    }
+    (buf_sze, blk_sze)
+}
+
 impl<R: Read + Seek> JFileAhead<R> {
+    /// Test-only view of the constructor's final buffer geometry (the
+    /// `effective_geometry` cross-check).
+    #[cfg(test)]
+    fn test_geometry(&self) -> (i64, i64) {
+        (self.buf_sze, self.blk_sze)
+    }
+
     /// Buffers `file` with a `buf_sze`-byte circular buffer read in
     /// `blk_sze`-byte chunks (C++ `JFileAhead::JFileAhead`,
     /// `JFileAhead.cpp:39-84`; a zero `buf_sze` falls back to 1024, `:41`).
@@ -683,6 +711,26 @@ mod tests {
     use crate::defs::EXI_RED;
     use std::cell::Cell;
     use std::io::Cursor;
+
+    /// `effective_geometry` mirrors `JFileAhead::new`'s buffer arithmetic
+    /// exactly (JFileAhead.cpp:44-57): zero-floors and block alignment.
+    #[test]
+    fn effective_geometry_matches_ctor() {
+        assert_eq!(effective_geometry(0, 16), (1024, 16));
+        assert_eq!(effective_geometry(1024, 0), (1024, 1));
+        assert_eq!(effective_geometry(100, 16), (96, 16));
+        assert_eq!(effective_geometry(8, 16), (16, 16)); // shrunk to 0 -> blk
+        assert_eq!(effective_geometry(2048, 4096), (4096, 4096));
+        // No drift: the constructor produces the same pair for each vector.
+        for (buf, blk) in [(0i64, 16i32), (1024, 0), (100, 16), (8, 16), (2048, 4096)] {
+            let f = JFileAhead::new(Cursor::new(Vec::new()), "T", buf, blk).test_geometry();
+            assert_eq!(
+                f,
+                effective_geometry(buf, blk),
+                "ctor vs helper ({buf},{blk})"
+            );
+        }
+    }
 
     /// Deterministic file contents: byte `i` is `(i * 7 + 3) % 256`.
     fn data(n: usize) -> Vec<u8> {

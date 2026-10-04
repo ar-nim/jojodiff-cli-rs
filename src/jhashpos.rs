@@ -75,6 +75,20 @@ use crate::jdebug::{DBGHSH, dbg};
 /// (`JHashPos.cpp:33`).
 pub const COLLISION_THRESHOLD: i32 = 4;
 
+/// MB -> element count (`JHashPos.cpp:53-59`): `mb * 1024 * 1024 / 12`,
+/// `mb < 1` behaves like 1, product computed in i64 and clamped to
+/// `i32::MAX` (the C++ int multiply overflows for mb > 2047 — UB there).
+pub(crate) fn elements_for_mb(mb: i32) -> i32 {
+    let sze: i64 = if mb < 1 { 1 } else { i64::from(mb) };
+    (sze * 1024 * 1024 / 12).min(i64::from(i32::MAX)) as i32
+}
+
+/// Element count -> table bytes: 12 per element (i64 position + u32 key,
+/// spec §21.18). i64 so `-i >= 2049` cannot overflow (finding 2).
+pub(crate) fn size_bytes_for(prime: i32) -> i64 {
+    i64::from(prime) * 12
+}
+
 /// Rate at which high-quality samples should override (`JHashPos.cpp:34`).
 pub const COLLISION_HIGH: i32 = 4;
 
@@ -131,13 +145,12 @@ impl JHashPos {
     /// i64 and clamps to `i32::MAX` for determinism.
     pub fn new(mb: i32) -> Self {
         /* get largest prime < elements (JHashPos.cpp:53-61) */
-        let sze: i64 = if mb < 1 { 1 } else { i64::from(mb) };
-        let elements = (sze * 1024 * 1024 / 12).min(i64::from(i32::MAX)) as i32;
+        let elements = elements_for_mb(mb);
         let prime = get_lower_prime(elements);
 
         // miHshSze = prime * (sizeof(off_t) + sizeof(hkey)) on the port's
         // 64-bit off_t / 32-bit hkey build = prime * (8 + 4).
-        let size_bytes = prime * 12;
+        let size_bytes = size_bytes_for(prime) as i32;
         let tbl = JHashPos {
             tbl_pos: vec![0i64; prime as usize],
             tbl_hsh: vec![0u32; prime as usize],
@@ -402,6 +415,21 @@ impl JHashPos {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    /// `elements_for_mb` / `size_bytes_for` (JHashPos.cpp:53-61): MB ->
+    /// elements with the i32 clamp, then the 12-bytes-per-element footprint.
+    #[test]
+    fn element_and_size_helpers() {
+        assert_eq!(elements_for_mb(32), 2_796_202);
+        assert_eq!(elements_for_mb(1), 87_381);
+        assert_eq!(elements_for_mb(0), 87_381); // mb < 1 behaves like 1
+        assert_eq!(elements_for_mb(-5), 87_381);
+        assert_eq!(elements_for_mb(i32::MAX), i32::MAX); // clamped, no overflow
+        assert_eq!(size_bytes_for(2_796_181), 33_554_172);
+        // -i 2049: the product that overflows i32 (finding 2) — exact here.
+        assert_eq!(size_bytes_for(179_044_297), 2_148_531_564);
+        assert_eq!(size_bytes_for(536_870_909), 6_442_450_908);
+    }
 
     /// MB ctor → elements `mb*1024*1024/12` → [`get_lower_prime`] (spec
     /// §21.18: `JHashPos.cpp:53-61` with the port variant's element size

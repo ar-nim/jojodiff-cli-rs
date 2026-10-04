@@ -64,6 +64,25 @@ use crate::jfile::{ByteOrEof, JFile};
 #[cfg(feature = "debug")]
 use std::sync::atomic::{AtomicI64, Ordering};
 
+use std::mem::size_of;
+
+/// `size_of::<Node>()` — pinned at 104 by test. The CLI memory budget
+/// multiplies this by the (clamped) -x value.
+pub(crate) const NODE_SIZE: usize = size_of::<Node>();
+
+/// Bucket prime for a -x value (`JMatchTable.cpp:97`): from the UNCLAMPED
+/// `mch_sze * 2`, i64 product clamped to `i32::MAX` (the C++ int multiply
+/// overflows for huge -x — UB there). Pure: non-positive results are the
+/// caller's (the ctor asserts; the budget clamps).
+pub(crate) fn mch_pme_for(mch_sze: i32) -> i32 {
+    let two_sze = i64::from(mch_sze) * 2;
+    if two_sze > i64::from(i32::MAX) {
+        get_lower_prime(i32::MAX)
+    } else {
+        get_lower_prime(two_sze as i32)
+    }
+}
+
 // Continuous runs of 8 (> 7) equal bytes are worth the jump
 // Extend to 12 to explore, so we can prefer longer runs
 // These settings provide a good tradeoff between maximum equal bytes and minimum overhead bytes
@@ -324,12 +343,7 @@ impl JMatchTable {
         let clamped = if mch_sze < 13 { 13 } else { mch_sze };
 
         // miMchPme = getLowerPrime(aiMchSze * 2) — the UNCLAMPED value (:97).
-        let two_sze = i64::from(mch_sze) * 2;
-        let mch_pme = if two_sze > i64::from(i32::MAX) {
-            get_lower_prime(i32::MAX)
-        } else {
-            get_lower_prime(two_sze as i32)
-        };
+        let mch_pme = mch_pme_for(mch_sze);
         // calloc(miMchPme, sizeof(tMch*)) for negative/zero primes fails in
         // the C++ (null, then UB on first use — no throw in the oracle
         // build); the port panics instead of dereferencing null.
@@ -1497,6 +1511,25 @@ mod tests {
     use super::*;
     use crate::jfile::{JFileAhead, JFileMem};
     use std::io::Cursor;
+
+    /// `NODE_SIZE` pins the footprint formula: 3 × Option<usize> (16 bytes
+    /// each — usize has no niche) + 2 × i32 + 5 × i64 + CmpVal = 104.
+    /// If a Node field ever changes, this assert fails so the memory
+    /// budget cannot silently under-count.
+    #[test]
+    fn node_size_is_104() {
+        assert_eq!(NODE_SIZE, 104);
+    }
+
+    /// `mch_pme_for` (JMatchTable.cpp:97): bucket prime from the UNCLAMPED
+    /// -x value, i64-clamped product (mirrors the ctor exactly).
+    #[test]
+    fn mch_pme_for_values() {
+        assert_eq!(mch_pme_for(64), 127);
+        assert_eq!(mch_pme_for(5), 7);
+        assert_eq!(mch_pme_for(0), 0); // ctor asserts; helper stays pure
+        assert_eq!(mch_pme_for(i32::MAX), 2_147_483_647); // Mersenne prime
+    }
 
     /// Both files all-zero: every compare succeeds, so `check` runs to the
     /// EQLMAX cap and verified matches classify as Best.
