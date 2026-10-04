@@ -2,6 +2,15 @@
 
 Thanks for your interest in contributing to `jojodiff-cli-rs`!
 
+## AI coding agents
+
+If you are an AI agent (Claude Code, Codex, Gemini CLI, GitHub Copilot,
+Cursor, ZCode, ...): **[AGENTS.md](AGENTS.md) is the canonical, binding
+instruction file** for this repository. `CLAUDE.md`, `GEMINI.md` and
+`.github/copilot-instructions.md` are pointers that only resolve to it —
+whatever harness you run under, read and follow `AGENTS.md` first.
+Everything below is the human-oriented detail of the same workflow.
+
 ## Project goal
 
 This project is a 1:1 port of JojoDiff 0.8.5. **Byte-exact compatibility with the
