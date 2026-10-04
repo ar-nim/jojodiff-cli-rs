@@ -1137,6 +1137,39 @@ upstream option matrix informs §22's test matrix. The de-facto changelog is the
     acceptance oracle; the remap machinery is deleted and golden85 regenerated from
     un-overridden oracle defaults.
 
+19. **Memory guard (exit 10 instead of allocation abort; plan
+    `2026-10-04-memguard-bugfix`).** The C++ never checks its `malloc`s:
+    oversized `-m`/`-x`/`-i`/`-k` values die in the allocator (and C `atoi`
+    truncates them to small values anyway, a UB-adjacent divergence the
+    port's saturating `c_atoi` does not share). The port refuses them
+    cleanly:
+
+    * **Layer A** (`cli::run`, Linux only): before any file is opened, the
+      exact allocation footprint (two input buffers, hash table, match
+      table) is compared against `MemAvailable + SwapFree − 512 MiB`
+      (`/proc/meminfo`); exceeding it prints a per-option byte breakdown
+      and exits 10 (`EXI_MEM`, "Error allocating memory !"), the C++ exit
+      code reserved for this condition. Configurations that fit run
+      byte-identical.
+    * **Layer B** (all platforms): the three engine constructors allocate
+      via `try_reserve`; an OS refusal is `JDiffError::Memory` → exit 10,
+      never a Rust allocation abort.
+    * `JDIFF_UNSAFE_NO_MEMGUARD=1` disables Layer A (the OS overcommit
+      heuristic decides, as in the pre-guard builds).
+    * New stderr text exists ONLY on these paths — the pre-fix binary
+      produced no jdiff output there (SIGABRT), so no pinned bytes changed.
+    * Known deliberate effect: sparse-overcommit runs (e.g. a 25 GB `-i` on
+      a 4 GB machine with small inputs) that previously "worked" by luck
+      now fail fast with exit 10. The byte-contract test harnesses set the
+      escape hatch so golden comparisons stay RAM-independent
+      (`tests/oracle.rs`, `tests/common/mod.rs`, `tests/crossver.rs`).
+    * Hashtable `miHshSze` is i64: the C++ int product `prime * 12`
+      overflows for `-i >= 2049` (debug-build panic, wrong `-vv` statistic
+      in release); the port's statistic is exact.
+    * Post-parse floor: `-f`×8 / `-b`×12 flag chains drive `mch_max <= 0`
+      (C++: `calloc(0)` + modulo-zero UB; port: ctor-assert panic) — the
+      CLI floors it to 1024 like a non-positive `-x` value.
+
 ## 22. Acceptance gates (0.8.5 — supersede Part I §16)
 
 1. **Round-trip:** for every fixture pair × every option set in the matrix below:

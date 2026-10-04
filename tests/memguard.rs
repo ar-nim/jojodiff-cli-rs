@@ -103,3 +103,55 @@ fn escape_hatch_lets_the_os_decide() {
         .stderr(contains("Error allocating memory !"))
         .stderr(contains("(RAM + swap)").not());
 }
+
+/// "Don't break valid big patches": patch/destination files are STREAMED
+/// through the fixed buffers — their SIZE is never bounded by the memory
+/// guard, only the option VALUES are. A 32 MiB pair with edits produces a
+/// real patch; applying it with defaults and with -m 256 must both be
+/// byte-exact. (32 MiB keeps the run in the seconds range.)
+fn lcg_bytes(seed: u32, n: usize) -> Vec<u8> {
+    let mut s = seed;
+    (0..n)
+        .map(|_| {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            (s >> 8) as u8
+        })
+        .collect()
+}
+
+#[test]
+fn big_patch_files_stream_unbounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let org = lcg_bytes(1, 32 * 1024 * 1024);
+    let mut new = org.clone();
+    new[..16].copy_from_slice(&org[16 * 1024..16 * 1024 + 16]); // edit near head
+    new[10_000_000..10_000_128].fill(0); // edit mid-file
+    let a = dir.path().join("big.org");
+    let b = dir.path().join("big.new");
+    std::fs::write(&a, &org).unwrap();
+    std::fs::write(&b, &new).unwrap();
+    let patch = dir.path().join("big.patch");
+
+    for m in ["64", "256"] {
+        jdiff()
+            .args(["-m", m, "-j"])
+            .arg(&a)
+            .arg(&b)
+            .arg(&patch)
+            .assert()
+            .code(1);
+        let out = dir.path().join("big.out");
+        jdiff()
+            .args(["-u", "-m", m])
+            .arg(&a)
+            .arg(&patch)
+            .arg(&out)
+            .assert()
+            .code(0);
+        assert_eq!(
+            std::fs::read(&out).unwrap(),
+            new,
+            "roundtrip byte-exact with -m {m}"
+        );
+    }
+}
