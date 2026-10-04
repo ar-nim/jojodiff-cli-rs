@@ -67,6 +67,7 @@ pub mod opts;
 pub mod patch_phase;
 pub mod report;
 pub mod run;
+pub(crate) mod sysmem;
 
 pub use config::{Buffers, Function, Options, function_from_argv0, parse, size_buffers};
 pub use opts::{Getopt, HasArg, OPT_LNG, OPT_SHT};
