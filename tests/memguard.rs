@@ -5,6 +5,7 @@
 //! any conceivable machine — the tests are machine-independent.
 
 use assert_cmd::Command;
+use predicates::boolean::PredicateBooleanExt;
 use predicates::str::contains;
 
 fn jdiff() -> Command {
@@ -80,4 +81,25 @@ fn sane_sizes_still_run_and_roundtrip() {
         .assert()
         .code(0);
     assert_eq!(std::fs::read(&out).unwrap(), std::fs::read(&b).unwrap());
+}
+
+/// Layer B / escape hatch: with the guard disabled, a petabyte request is
+/// refused by the OS (`try_reserve`) — exit 10 with the refusal note, NOT
+/// the Layer-A "(RAM + swap)" text and NOT a SIGABRT. Petabyte scale keeps
+/// this machine-independent (no OS grants 2.25 PB to one process).
+#[test]
+fn escape_hatch_lets_the_os_decide() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = fixtures(dir.path());
+    jdiff()
+        .env("JDIFF_UNSAFE_NO_MEMGUARD", "1")
+        .args(["-m", "99999999999999999999", "-j"])
+        .arg(&a)
+        .arg(&b)
+        .arg(dir.path().join("out.patch"))
+        .assert()
+        .code(10)
+        .stderr(contains("refused the"))
+        .stderr(contains("Error allocating memory !"))
+        .stderr(contains("(RAM + swap)").not());
 }

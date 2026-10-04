@@ -139,7 +139,12 @@ pub fn run(args: &[OsString]) -> Result<i32, JDiffError> {
         buffers.blk_sze,
     ) {
         Ok(inputs) => inputs,
-        Err(e) => return Ok(report(Err(e), verbose)),
+        Err(e) => {
+            if matches!(e, JDiffError::Memory) {
+                print_mem_refusal_note(&mem_plan);
+            }
+            return Ok(report(Err(e), verbose));
+        }
     };
 
     /* Open output (`main.cpp:754-774`); Dedup does not open one (its crash
@@ -184,6 +189,12 @@ pub fn run(args: &[OsString]) -> Result<i32, JDiffError> {
 
     /* Cleanup: the readers and writers drop in the phase calls above. */
 
+    /* Layer-B note (memguard plan): the pre-flight gate passed (or is
+     * disabled) but the OS refused an allocation during the phase. */
+    if let Err(JDiffError::Memory) = &li_ret {
+        print_mem_refusal_note(&mem_plan);
+    }
+
     /* Exit (`main.cpp:897-932`): the single boundary prints the pinned error
      * text (if any) and yields the positive process exit code. */
     Ok(report(li_ret, verbose))
@@ -218,6 +229,17 @@ fn print_memguard_refusal(plan: &config::MemoryPlan, avail: u64) {
     ));
 }
 
+/// Layer-B note: the pre-flight gate passed (or is disabled) but the OS
+/// refused an allocation anyway (overcommit limits, non-Linux). The two
+/// arms that can see this call here; the boundary prints the pinned
+/// family line and exits 10.
+fn print_mem_refusal_note(plan: &config::MemoryPlan) {
+    dbg_print(format_args!(
+        "Error: the operating system refused the {} memory allocation (allocation failed or overcommit limit reached). Lower -m, -i or -x.\n",
+        mb(plan.total),
+    ));
+}
+
 /// The two input readers (`lpJflOrg`/`lpJflNew`).
 pub(crate) struct Inputs {
     pub(crate) org: Box<dyn JFile>,
@@ -237,10 +259,10 @@ pub(crate) fn open_inputs(
     blk_sze: i32,
 ) -> Result<Inputs, JDiffError> {
     let org: Box<dyn JFile> = if *nam_org == *"-" {
-        Box::new(JFileAhead::new(open_dash(), "Org", buf_org, blk_sze))
+        Box::new(JFileAhead::new(open_dash(), "Org", buf_org, blk_sze)?)
     } else {
         match File::open(nam_org) {
-            Ok(file) => Box::new(JFileAhead::new(file, "Org", buf_org, blk_sze)),
+            Ok(file) => Box::new(JFileAhead::new(file, "Org", buf_org, blk_sze)?),
             Err(source) => {
                 return Err(JDiffError::OpenFirst {
                     name: nam_org.to_os_string(),
@@ -251,10 +273,10 @@ pub(crate) fn open_inputs(
     };
 
     let new: Box<dyn JFile> = if *nam_new == *"-" {
-        Box::new(JFileAhead::new(open_dash(), "New", buf_new, blk_sze))
+        Box::new(JFileAhead::new(open_dash(), "New", buf_new, blk_sze)?)
     } else {
         match File::open(nam_new) {
-            Ok(file) => Box::new(JFileAhead::new(file, "New", buf_new, blk_sze)),
+            Ok(file) => Box::new(JFileAhead::new(file, "New", buf_new, blk_sze)?),
             Err(source) => {
                 return Err(JDiffError::OpenSecond {
                     name: nam_new.to_os_string(),

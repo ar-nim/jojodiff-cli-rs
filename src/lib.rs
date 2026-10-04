@@ -44,6 +44,19 @@ pub mod jmatchtable;
 pub mod jout;
 pub mod jpatcht;
 
+/// Allocation-guarded zeroed Vec (memory guard Layer B, plan
+/// 2026-10-04-memguard-bugfix): `try_reserve_exact` instead of the
+/// aborting `vec![fill; len]`, mapping an OS refusal (allocation failure,
+/// overcommit limit) to [`error::JDiffError::Memory`] — exit 10 at the CLI
+/// boundary instead of a Rust allocation abort.
+pub(crate) fn try_zeroed_vec<T: Clone>(len: usize, fill: T) -> Result<Vec<T>, error::JDiffError> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(len)
+        .map_err(|_| error::JDiffError::Memory)?;
+    v.resize(len, fill);
+    Ok(v)
+}
+
 /// Shared test utilities (test builds only).
 #[cfg(test)]
 pub(crate) mod test_util {

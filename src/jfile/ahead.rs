@@ -49,6 +49,7 @@ use super::{ByteOrEof, JFile, ReadType};
 #[cfg(feature = "debug")]
 use crate::defs::p8;
 use crate::defs::{EOB, EOF, EXI_OK, EXI_RED, EXI_SEK};
+use crate::error::JDiffError;
 use crate::jdebug::dbg_print;
 #[cfg(feature = "debug")]
 use crate::jdebug::{DBGBUF, DBGRED, dbg};
@@ -147,7 +148,12 @@ impl<R: Read + Seek> JFileAhead<R> {
     /// This is the collapsed adapter constructor too: it ends with the
     /// chkSeq seek-EOF probe like `JFileAheadStdio.cpp:25-31`, so
     /// non-seekable streams are auto-detected as sequential (spec §21.11).
-    pub fn new(file: R, fid: &str, buf_sze: i64, blk_sze: i32) -> Self {
+    ///
+    /// # Errors
+    /// [`JDiffError::Memory`] when the OS refuses the buffer allocation
+    /// (memory guard Layer B — exit 10 at the CLI boundary instead of an
+    /// allocation abort).
+    pub fn new(file: R, fid: &str, buf_sze: i64, blk_sze: i32) -> Result<Self, JDiffError> {
         // Block size cannot be zero and cannot be larger than buffer size;
         // buffer size must be aligned on block size (JFileAhead.cpp:44-57).
         let mut buf_sze = if buf_sze == 0 { 1024 } else { buf_sze };
@@ -188,7 +194,7 @@ impl<R: Read + Seek> JFileAhead<R> {
             buf_sze,
             blk_sze,
             buf_usd: 0,
-            buf: vec![0_u8; buf_sze as usize],
+            buf: crate::try_zeroed_vec(buf_sze.max(0) as usize, 0_u8)?,
             ptr_inp: 0,
             pos_bse: 0,
         };
@@ -207,7 +213,7 @@ impl<R: Read + Seek> JFileAhead<R> {
         // chkSeq (JFile.cpp:37-46) — adapter ctor tail (JFileAheadStdio.cpp:30).
         fab.chk_seq();
 
-        fab
+        Ok(fab)
     }
 
     /// `JFile::chkSeq` (`JFile.cpp:37-46`): check if the file can be seeked
@@ -723,7 +729,9 @@ mod tests {
         assert_eq!(effective_geometry(2048, 4096), (4096, 4096));
         // No drift: the constructor produces the same pair for each vector.
         for (buf, blk) in [(0i64, 16i32), (1024, 0), (100, 16), (8, 16), (2048, 4096)] {
-            let f = JFileAhead::new(Cursor::new(Vec::new()), "T", buf, blk).test_geometry();
+            let f = JFileAhead::new(Cursor::new(Vec::new()), "T", buf, blk)
+                .expect("test alloc")
+                .test_geometry();
             assert_eq!(
                 f,
                 effective_geometry(buf, blk),
@@ -749,13 +757,13 @@ mod tests {
     }
 
     fn mk(data: Vec<u8>) -> JFileAhead<Cursor<Vec<u8>>> {
-        JFileAhead::new(Cursor::new(data), "Tst", 1024, 16)
+        JFileAhead::new(Cursor::new(data), "Tst", 1024, 16).expect("test alloc")
     }
 
     /// Pipe-like sequential stream: every seek fails, so the constructor's
     /// EOF probe (chkSeq, `JFile.cpp:37-46`) detects a sequential file.
     fn pipe(n: usize) -> JFileAhead<FlakySeek> {
-        JFileAhead::new(FlakySeek::failing(0, n), "Tst", 1024, 256)
+        JFileAhead::new(FlakySeek::failing(0, n), "Tst", 1024, 256).expect("test alloc")
     }
 
     /// Brief step-1 test: sequential reads are served by the fast path from
@@ -860,7 +868,7 @@ mod tests {
     /// position) and never touch the base.
     #[test]
     fn set_lookahead_base_bounds_soft_append() {
-        let mut f = JFileAhead::new(Cursor::new(data(8192)), "Tst", 1024, 512);
+        let mut f = JFileAhead::new(Cursor::new(data(8192)), "Tst", 1024, 512).expect("test alloc");
         for i in 0..16 {
             assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
@@ -897,7 +905,8 @@ mod tests {
     /// is exact — at the cost of 2 seeks (back, then forward again).
     #[test]
     fn scrollback_two_seeks_full_window() {
-        let mut f = JFileAhead::new(Cursor::new(data(65536)), "Tst", 16384, 4096);
+        let mut f =
+            JFileAhead::new(Cursor::new(data(65536)), "Tst", 16384, 4096).expect("test alloc");
         for i in 0..65536 {
             assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
@@ -972,7 +981,7 @@ mod tests {
     /// through `getBufPos` (`:102-104`).
     #[test]
     fn reset_block_aligns_getbufpos() {
-        let mut f = JFileAhead::new(Cursor::new(data(8192)), "Tst", 1024, 64);
+        let mut f = JFileAhead::new(Cursor::new(data(8192)), "Tst", 1024, 64).expect("test alloc");
         for i in 0..100 {
             assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
@@ -994,7 +1003,7 @@ mod tests {
     /// latched.
     #[test]
     fn short_read_latches_eof() {
-        let mut f = JFileAhead::new(Cursor::new(data(300)), "Tst", 256, 128);
+        let mut f = JFileAhead::new(Cursor::new(data(300)), "Tst", 256, 128).expect("test alloc");
         for i in 0..300 {
             assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
@@ -1013,7 +1022,7 @@ mod tests {
     /// append-around-the-ring and a final reset.
     #[test]
     fn tiny_buffer_wraparound_integrity() {
-        let mut f = JFileAhead::new(Cursor::new(data(256)), "Tst", 64, 16);
+        let mut f = JFileAhead::new(Cursor::new(data(256)), "Tst", 64, 16).expect("test alloc");
         for i in 0..256 {
             assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
@@ -1040,7 +1049,7 @@ mod tests {
     /// resets serve exact data.
     #[test]
     fn tiny_buffer_equal_block_sze() {
-        let mut f = JFileAhead::new(Cursor::new(data(100)), "Tst", 16, 16);
+        let mut f = JFileAhead::new(Cursor::new(data(100)), "Tst", 16, 16).expect("test alloc");
         for i in 0..100 {
             assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
@@ -1061,19 +1070,22 @@ mod tests {
     #[test]
     fn seek_error_returns_exi_sek() {
         // Every seek fails: append reads still work (no seek), resets fail.
-        let mut f = JFileAhead::new(FlakySeek::failing(0, 2048), "Tst", 1024, 16);
+        let mut f =
+            JFileAhead::new(FlakySeek::failing(0, 2048), "Tst", 1024, 16).expect("test alloc");
         assert_eq!(f.get(0, ReadType::Read), raw(pat(0)));
         assert_eq!(f.get(5000, ReadType::HardAhead), raw(EXI_SEK));
         // One algorithm seek succeeds: the scrollback's back-seek — its
         // forward re-seek then fails (`JFileAhead.cpp:379-380`).
-        let mut f = JFileAhead::new(FlakySeek::failing(2, 2048), "Tst", 1024, 16);
+        let mut f =
+            JFileAhead::new(FlakySeek::failing(2, 2048), "Tst", 1024, 16).expect("test alloc");
         for i in 0..1100 {
             assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
         assert_eq!(f.get(70, ReadType::Read), raw(EXI_SEK));
         // Two algorithm seeks: the scrollback completes; the next scrollback
         // fails on its own back-seek.
-        let mut f = JFileAhead::new(FlakySeek::failing(3, 2048), "Tst", 1024, 16);
+        let mut f =
+            JFileAhead::new(FlakySeek::failing(3, 2048), "Tst", 1024, 16).expect("test alloc");
         for i in 0..1100 {
             assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
@@ -1087,7 +1099,8 @@ mod tests {
     /// buffer invalid (`miBufUsd = EOF`, `:374`).
     #[test]
     fn scrollback_read_error_returns_exi_red() {
-        let mut f = JFileAhead::new(TruncatingReader::after(5, 4096), "Tst", 1024, 256);
+        let mut f = JFileAhead::new(TruncatingReader::after(5, 4096), "Tst", 1024, 256)
+            .expect("test alloc");
         for i in 0..1280 {
             assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }
@@ -1146,7 +1159,7 @@ mod tests {
     #[cfg(feature = "debug")]
     #[test]
     fn debug_asserts_silent_at_invariant_boundaries() {
-        let mut f = JFileAhead::new(Cursor::new(data(256)), "Tst", 64, 16);
+        let mut f = JFileAhead::new(Cursor::new(data(256)), "Tst", 64, 16).expect("test alloc");
         for i in 0..256 {
             assert_eq!(f.get(i, ReadType::Read), raw(pat(i)), "byte {i}");
         }

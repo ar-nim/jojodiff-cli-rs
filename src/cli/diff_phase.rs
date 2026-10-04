@@ -88,7 +88,7 @@ pub(crate) fn diff_phase(
         opts.mch_min,
         i64::from(ahd_max),
         opts.cmp_all,
-    );
+    )?;
 
     /* Show execution parameters (`main.cpp:822-836`), verbatim including
      * the stale `(-s)`/`(-b)` letters and the "disbale" typo. */

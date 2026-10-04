@@ -52,7 +52,7 @@
 //! ```
 //! use jojodiff_cli_rs::jhashpos::JHashPos;
 //!
-//! let mut tbl = JHashPos::new(1); // 1 MB: 87381 elements -> prime 87359
+//! let mut tbl = JHashPos::new(1).expect("doc table"); // 1 MB: 87381 elements -> prime 87359
 //! let mut key = 0u32;
 //! let mut old = -1i32;
 //! let mut eql = 0i32;
@@ -67,6 +67,7 @@
 //! ```
 
 use crate::defs::{SMPSZE, get_lower_prime};
+use crate::error::JDiffError;
 use crate::jdebug::dbg_print;
 #[cfg(feature = "debug")]
 use crate::jdebug::{DBGHSH, dbg};
@@ -143,7 +144,12 @@ impl JHashPos {
     /// MB values above 2047 overflow the C++ `int` product
     /// `aiSze*1024*1024` (undefined behavior there); the port computes in
     /// i64 and clamps to `i32::MAX` for determinism.
-    pub fn new(mb: i32) -> Self {
+    ///
+    /// # Errors
+    /// [`JDiffError::Memory`] when the OS refuses the table allocation
+    /// (memory guard Layer B — exit 10 at the CLI boundary instead of an
+    /// allocation abort).
+    pub fn new(mb: i32) -> Result<Self, JDiffError> {
         /* get largest prime < elements (JHashPos.cpp:53-61) */
         let elements = elements_for_mb(mb);
         let prime = get_lower_prime(elements);
@@ -152,8 +158,8 @@ impl JHashPos {
         // 64-bit off_t / 32-bit hkey build = prime * (8 + 4).
         let size_bytes = size_bytes_for(prime) as i32;
         let tbl = JHashPos {
-            tbl_pos: vec![0i64; prime as usize],
-            tbl_hsh: vec![0u32; prime as usize],
+            tbl_pos: crate::try_zeroed_vec(prime as usize, 0_i64)?,
+            tbl_hsh: crate::try_zeroed_vec(prime as usize, 0_u32)?,
             prime,
             size_bytes,
             col_max: COLLISION_THRESHOLD,
@@ -184,7 +190,7 @@ impl JHashPos {
             ));
         }
 
-        tbl
+        Ok(tbl)
     }
 
     /// Hashtable add (`JHashPos.cpp:99-139`).
@@ -437,21 +443,33 @@ mod tests {
     /// (`JHashPos.cpp:54-57`).
     #[test]
     fn prime_selection_mb_ctor() {
-        assert_eq!(JHashPos::new(32).hash_prime(), 2796181); // 0.8.5 default MB
-        assert_eq!(JHashPos::new(8).hash_prime(), 699037);
-        assert_eq!(JHashPos::new(2).hash_prime(), 174761);
-        assert_eq!(JHashPos::new(1).hash_prime(), 87359); // floor at mb >= 1
-        assert_eq!(JHashPos::new(0).hash_prime(), 87359); // aiSze < 1 -> 1 MB
-        assert_eq!(JHashPos::new(-3).hash_prime(), 87359);
+        assert_eq!(JHashPos::new(32).expect("test table").hash_prime(), 2796181); // 0.8.5 default MB
+        assert_eq!(JHashPos::new(8).expect("test table").hash_prime(), 699037);
+        assert_eq!(JHashPos::new(2).expect("test table").hash_prime(), 174761);
+        assert_eq!(JHashPos::new(1).expect("test table").hash_prime(), 87359); // floor at mb >= 1
+        assert_eq!(JHashPos::new(0).expect("test table").hash_prime(), 87359); // aiSze < 1 -> 1 MB
+        assert_eq!(JHashPos::new(-3).expect("test table").hash_prime(), 87359);
         // Element counts on get_lower_prime's default branch (downward
         // search): 128 MB -> 11184810 elements, 256 MB -> 22369621. (The
         // exact switch cases need MB multiples of 12 — 384 MB → 32M elements
         // etc. — too large to allocate here.)
-        assert_eq!(JHashPos::new(128).hash_prime(), 11184799);
-        assert_eq!(JHashPos::new(256).hash_prime(), 22369601);
+        assert_eq!(
+            JHashPos::new(128).expect("test table").hash_prime(),
+            11184799
+        );
+        assert_eq!(
+            JHashPos::new(256).expect("test table").hash_prime(),
+            22369601
+        );
         // Size in bytes stays prime * 12 (port hkey u32 + off_t i64).
-        assert_eq!(JHashPos::new(32).hash_size_bytes(), 33554172);
-        assert_eq!(JHashPos::new(8).hash_size_bytes(), 8388444);
+        assert_eq!(
+            JHashPos::new(32).expect("test table").hash_size_bytes(),
+            33554172
+        );
+        assert_eq!(
+            JHashPos::new(8).expect("test table").hash_size_bytes(),
+            8388444
+        );
     }
 
     /// The table is zero-initialized (spec §21.5 deviation: 0.8.5 `malloc`s
@@ -459,7 +477,7 @@ mod tests {
     /// bucket answers `get(0)` with `(true, 0)`.
     #[test]
     fn zero_initialized_table() {
-        let mut tbl = JHashPos::new(1);
+        let mut tbl = JHashPos::new(1).expect("test table");
         let mut pos = -1i64;
         assert!(tbl.get(0, &mut pos));
         assert_eq!(pos, 0);
@@ -472,7 +490,7 @@ mod tests {
     /// high-quality add stores as well.
     #[test]
     fn down_counter_store_cadence() {
-        let mut tbl = JHashPos::new(1);
+        let mut tbl = JHashPos::new(1).expect("test table");
         let mut pos = 0i64;
 
         tbl.add(10, 100, 0); // 4 - 4 = 0 <= 0: stored, col_cnt reset to 4
@@ -488,7 +506,7 @@ mod tests {
 
         // Quality gate at SMPSZE * 2 = 64 (`JHashPos.cpp:116`): eql_cnt 64
         // is still high quality (the 0.8.1 gate was SMPSZE - 4 = 28).
-        let mut hi = JHashPos::new(1);
+        let mut hi = JHashPos::new(1).expect("test table");
         hi.add(10, 100, 64);
         assert!(hi.get(10, &mut pos));
         assert_eq!(pos, 100);
@@ -497,7 +515,7 @@ mod tests {
         // on a fresh table 4 - 1 = 3 > 0, so it does NOT store (0.8.1's
         // up-counter stored the first low-quality add: 4 + 1 = 5 >= 4). Four
         // low-quality adds reach 0: 3, 2, 1, 0.
-        let mut lo = JHashPos::new(1);
+        let mut lo = JHashPos::new(1).expect("test table");
         lo.add(10, 100, 65);
         assert!(!lo.get(10, &mut pos));
         lo.add(10, 101, 65);
@@ -514,7 +532,7 @@ mod tests {
     /// the prime while raising col_max and rlb by 4.
     #[test]
     fn load_rollover_counts_down() {
-        let mut tbl = JHashPos::new(1);
+        let mut tbl = JHashPos::new(1).expect("test table");
         assert_eq!(tbl.reliability(), SMPSZE + SMPSZE / 2); // seed 48
         assert_eq!(tbl.hash_colmax(), 4);
 
@@ -551,7 +569,7 @@ mod tests {
     #[test]
     fn add_then_get_roundtrip_and_hits() {
         const PRIME: u32 = 87359;
-        let mut tbl = JHashPos::new(1);
+        let mut tbl = JHashPos::new(1).expect("test table");
         let mut pos = -1i64;
 
         // The table is zero-initialized (spec §21.5): an untouched bucket

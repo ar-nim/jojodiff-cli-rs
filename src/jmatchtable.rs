@@ -46,7 +46,7 @@
 //! // Two all-zero files; a hash hit claims a match org 1000 / new 500.
 //! let mut org = JFileMem::new(vec![0u8; 4096]);
 //! let mut new = JFileMem::new(vec![0u8; 4096]);
-//! let mut tbl = JMatchTable::new(64, true, 1024);
+//! let mut tbl = JMatchTable::new(64, true, 1024).expect("doc table");
 //! assert_eq!(tbl.add(1000, 500, 600, &mut org, &mut new), MchRet::Best);
 //!
 //! // cleanup verifies and elects the best; getbest returns the tracked
@@ -58,6 +58,7 @@
 use crate::defs::{ReadType, SMPSZE, get_lower_prime};
 #[cfg(feature = "debug")]
 use crate::defs::{p8, print_char};
+use crate::error::JDiffError;
 #[cfg(feature = "debug")]
 use crate::jdebug::{DBGCMP, DBGMCH, dbg, dbg_print};
 use crate::jfile::{ByteOrEof, JFile};
@@ -338,7 +339,7 @@ impl JMatchTable {
     ///
     /// `cmp_all` selects hard vs soft compare-ahead in `check`; `ahd_max` is
     /// stored but never read (dead, `:86`).
-    pub fn new(mch_sze: i32, cmp_all: bool, ahd_max: i32) -> Self {
+    pub fn new(mch_sze: i32, cmp_all: bool, ahd_max: i32) -> Result<Self, JDiffError> {
         // miMchSze(aiMchSze < 13 ? 13 : aiMchSze), miMchFre(miMchSze) (:85)
         let clamped = if mch_sze < 13 { 13 } else { mch_sze };
 
@@ -352,8 +353,9 @@ impl JMatchTable {
             "JMatchTable: getLowerPrime({mch_sze} * 2) = {mch_pme} is not positive (C++ calloc failure / UB)"
         );
 
-        JMatchTable {
-            nodes: vec![
+        Ok(JMatchTable {
+            nodes: crate::try_zeroed_vec(
+                clamped as usize,
                 Node {
                     nxt: None,
                     col: None,
@@ -366,14 +368,13 @@ impl JMatchTable {
                     dlt: 0,
                     tst: 0,
                     cmp: CmpVal::Run(0),
-                };
-                clamped as usize
-            ],
+                },
+            )?,
             mch_sze: clamped,
             mch_fre: clamped,
             mch_pme,
-            col_tbl: vec![None; mch_pme as usize],
-            gld_tbl: vec![None; mch_pme as usize],
+            col_tbl: crate::try_zeroed_vec(mch_pme as usize, None)?,
+            gld_tbl: crate::try_zeroed_vec(mch_pme as usize, None)?,
             mp_old: None,
             mp_new: None,
             mp_lst: None,
@@ -386,7 +387,7 @@ impl JMatchTable {
             ahd_max,
             rlb: 0,
             hsh_rpr: 0,
-        }
+        })
     }
 
     /// Add given match to the array of matches (`JMatchTable::add`,
@@ -1545,7 +1546,7 @@ mod tests {
     #[test]
     fn two_table_bucket_math() {
         // 2 * 64 = 128 -> get_lower_prime = 127.
-        let mut m = JMatchTable::new(64, true, 1024);
+        let mut m = JMatchTable::new(64, true, 1024).expect("test table");
         assert_eq!(m.mch_pme, 127);
         let mut org = zeros(4096);
         let mut new = zeros(4096);
@@ -1578,7 +1579,7 @@ mod tests {
     /// (`:227-232`): `fnd_new - beg` when within beg + SMPSZE, else SMPSZE.
     #[test]
     fn gliding_join_sets_recurrence() {
-        let mut m = JMatchTable::new(64, true, 1024);
+        let mut m = JMatchTable::new(64, true, 1024).expect("test table");
         let mut org = zeros(8192);
         let mut new = zeros(8192);
 
@@ -1619,7 +1620,7 @@ mod tests {
     /// reusable); a 14th add reuses the aging head instead of failing.
     #[test]
     fn aging_list_reuse_when_full() {
-        let mut m = JMatchTable::new(13, true, 1024); // pme = get_lower_prime(26) = 23
+        let mut m = JMatchTable::new(13, true, 1024).expect("test table"); // pme = get_lower_prime(26) = 23
         assert_eq!(m.mch_pme, 23);
         let mut org = zeros(4096);
         let mut new = zeros(4096);
@@ -1672,7 +1673,7 @@ mod tests {
     /// value's observable effect is the bucket prime below.
     #[test]
     fn mch_quirks_at_x5() {
-        let mut m = JMatchTable::new(5, true, 1024);
+        let mut m = JMatchTable::new(5, true, 1024).expect("test table");
         assert_eq!(m.mch_sze, 13); // max(13, 5)
         assert_eq!(m.mch_fre, 13); // miMchFre(miMchSze): clamped, per the C++
         assert_eq!(m.mch_pme, 7); // get_lower_prime(5 * 2): the unclamped quirk
@@ -1702,14 +1703,14 @@ mod tests {
 
         // Scenario 1: counters tied at 1 — the first-elected candidate (A,
         // delta 0) keeps the best; B (delta 2000) would answer (4500, 2500).
-        let mut m = JMatchTable::new(64, true, 1024);
+        let mut m = JMatchTable::new(64, true, 1024).expect("test table");
         assert_eq!(m.add(2000, 2000, 2500, &mut org, &mut new), MchRet::Best); // A
         assert_eq!(m.add(3500, 1500, 2500, &mut org, &mut new), MchRet::Best); // B
         assert_eq!(m.cleanup(0, 2500, 48, &mut org, &mut new), MchRet::Best);
         assert_eq!(m.getbest(0, 2500), Some((2500, 2500)));
 
         // Scenario 2: B is confirmed twice (cnt 2) and wins the tiebreak.
-        let mut m = JMatchTable::new(64, true, 1024);
+        let mut m = JMatchTable::new(64, true, 1024).expect("test table");
         assert_eq!(m.add(2000, 2000, 2500, &mut org, &mut new), MchRet::Best); // A
         assert_eq!(m.add(3500, 1500, 2500, &mut org, &mut new), MchRet::Best); // B
         assert_eq!(
@@ -1720,7 +1721,7 @@ mod tests {
         assert_eq!(m.getbest(0, 2500), Some((4500, 2500)));
 
         // No candidates at all: no solution.
-        let mut m = JMatchTable::new(64, true, 1024);
+        let mut m = JMatchTable::new(64, true, 1024).expect("test table");
         assert_eq!(m.cleanup(0, 2500, 48, &mut org, &mut new), MchRet::Invalid);
         assert_eq!(m.getbest(0, 2500), None);
     }
@@ -1731,7 +1732,7 @@ mod tests {
     #[test]
     fn cleanup_return_taxonomy() {
         // Invalid: nothing in the table, room left.
-        let mut m = JMatchTable::new(64, true, 1024);
+        let mut m = JMatchTable::new(64, true, 1024).expect("test table");
         let mut org = zeros(4096);
         let mut new = zeros(4096);
         assert_eq!(m.cleanup(0, 1000, 48, &mut org, &mut new), MchRet::Invalid);
@@ -1743,7 +1744,7 @@ mod tests {
         // Good: the run stops at 100 bytes (EQLSZE <= cmp < EQLMAX). A fresh
         // table: the delta-500 match of the Best case above would otherwise
         // swallow this add as a colliding Enlarged join.
-        let mut m = JMatchTable::new(64, true, 1024);
+        let mut m = JMatchTable::new(64, true, 1024).expect("test table");
         let mut org = {
             let mut d = vec![1u8; 4096];
             d[1500..1600].fill(7);
@@ -1774,9 +1775,11 @@ mod tests {
         // cmp_all = false: the compares read SOFT ahead, which is what EOBs
         // at the window bound (with cmp_all the hard reads would sail past
         // the window and verify 256-byte runs instead).
-        let mut m = JMatchTable::new(13, false, 1024);
-        let mut org = JFileAhead::new(Cursor::new(vec![0u8; 8192]), "Tst", 1024, 16);
-        let mut new = JFileAhead::new(Cursor::new(vec![0u8; 8192]), "Tst", 1024, 16);
+        let mut m = JMatchTable::new(13, false, 1024).expect("test table");
+        let mut org =
+            JFileAhead::new(Cursor::new(vec![0u8; 8192]), "Tst", 1024, 16).expect("test alloc");
+        let mut new =
+            JFileAhead::new(Cursor::new(vec![0u8; 8192]), "Tst", 1024, 16).expect("test alloc");
 
         // 13 matches ahead of red_new = 2000: soft reads at 2000+ exceed the
         // fresh window (0 + 1024 - 16) and EOB, so every candidate is stored
@@ -1815,13 +1818,13 @@ mod tests {
 
         // red_new 50 > last-found 10: the EOF-refuted compare marks the
         // element CMPINV and repairs the hash hit.
-        let mut a = JMatchTable::new(64, true, 1024);
+        let mut a = JMatchTable::new(64, true, 1024).expect("test table");
         assert_eq!(a.get_hsh_rpr(), 0);
         assert_eq!(a.add(100, 10, 50, &mut org, &mut new), MchRet::Invalid);
         assert_eq!(a.get_hsh_rpr(), 1);
 
         // A second instance is untouched — no process-global state.
-        let b = JMatchTable::new(64, true, 1024);
+        let b = JMatchTable::new(64, true, 1024).expect("test table");
         assert_eq!(b.get_hsh_rpr(), 0);
     }
 
@@ -1938,8 +1941,10 @@ mod tests {
     /// the real end of file answers EOF, which is 0 ("surely unequal").
     #[test]
     fn check_cmpeob_on_soft_eob() {
-        let mut org = JFileAhead::new(Cursor::new(vec![0u8; 8192]), "Tst", 1024, 16);
-        let mut new = JFileAhead::new(Cursor::new(vec![0u8; 8192]), "Tst", 1024, 16);
+        let mut org =
+            JFileAhead::new(Cursor::new(vec![0u8; 8192]), "Tst", 1024, 16).expect("test alloc");
+        let mut new =
+            JFileAhead::new(Cursor::new(vec![0u8; 8192]), "Tst", 1024, 16).expect("test alloc");
         let (mut po, mut pn) = (2000i64, 2000i64);
         assert_eq!(
             check(

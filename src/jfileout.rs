@@ -175,7 +175,7 @@ mod tests {
         let src = data(600);
 
         // One getbuf run (buffer 1024, block 16).
-        let mut f = JFileAhead::new(Cursor::new(src.clone()), "Tst", 1024, 16);
+        let mut f = JFileAhead::new(Cursor::new(src.clone()), "Tst", 1024, 16).expect("test alloc");
         let mut o = JFileOut::new(Vec::new());
         assert!(o.copyfrom(&mut f, 10, 300).is_ok());
         assert_eq!(o.into_inner(), src[10..310]);
@@ -185,7 +185,7 @@ mod tests {
         // reuses the in/out variable). The copy must end before EOF: once the
         // buffer window reaches the end, getbuf returns null and the copy
         // reports a short read (JFileOut.cpp:41-44) — covered below.
-        let mut f = JFileAhead::new(Cursor::new(src.clone()), "Tst", 1024, 16);
+        let mut f = JFileAhead::new(Cursor::new(src.clone()), "Tst", 1024, 16).expect("test alloc");
         let mut o = JFileOut::new(Vec::new());
         assert!(o.copyfrom(&mut f, 0, 512).is_ok());
         assert_eq!(o.into_inner(), src[0..512]);
@@ -233,7 +233,7 @@ mod tests {
 
         // Buffered path (JFileAhead): getbuf eventually returns null with
         // *len == EOF, the in-loop null check fires (JFileOut.cpp:41-44).
-        let mut f = JFileAhead::new(Cursor::new(src), "Tst", 1024, 16);
+        let mut f = JFileAhead::new(Cursor::new(src), "Tst", 1024, 16).expect("test alloc");
         let mut o = JFileOut::new(Vec::new());
         assert_eq!(o.copyfrom(&mut f, 0, 100).unwrap_err().exit_code(), EXI_RED);
     }
@@ -245,7 +245,7 @@ mod tests {
     fn copyfrom_write_error_is_exi_wri() {
         let src = data(64);
 
-        let mut f = JFileAhead::new(Cursor::new(src.clone()), "Tst", 1024, 16);
+        let mut f = JFileAhead::new(Cursor::new(src.clone()), "Tst", 1024, 16).expect("test alloc");
         let mut o = JFileOut::new(FailWriter);
         assert_eq!(
             o.copyfrom(&mut f, 0, 32).unwrap_err().exit_code(),
@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn copyfrom_zero_length_is_exi_ok() {
         let src = data(8);
-        let mut f = JFileAhead::new(Cursor::new(src.clone()), "Tst", 1024, 16);
+        let mut f = JFileAhead::new(Cursor::new(src.clone()), "Tst", 1024, 16).expect("test alloc");
         let mut o = JFileOut::new(Vec::new());
         assert!(o.copyfrom(&mut f, 0, 0).is_ok());
         assert!(o.into_inner().is_empty());
