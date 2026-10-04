@@ -1151,22 +1151,18 @@ upstream option matrix informs §22's test matrix. The de-facto changelog is the
       byte breakdown and exits 10 (`EXI_MEM`, "Error allocating memory
       !"), the C++ exit code reserved for this condition. Configurations
       that fit run byte-identical. The port must cater for **Windows,
-      macOS and Linux**; the ceiling source is per platform (std-only —
-      no `unsafe`, no new dependencies; each platform's own reporting
-      source is parsed):
-      - **Linux**: `/proc/meminfo` — `MemAvailable + SwapFree` (exact).
-      - **macOS**: `vm_stat` free + inactive + speculative pages × page
-        size (a heuristic `MemAvailable` analogue — active/compressed
-        pages do not count) plus free swap from `sysctl vm.swapusage`.
-      - **Windows**: `Win32_OperatingSystem.FreeVirtualMemory` (KB =
-        available physical + available paging file) via one
-        `powershell -NoProfile` spawn per run (~0.5–2 s — the price of a
-        no-FFI implementation; `GlobalMemoryStatusEx` would need
-        `unsafe`).
-      - **Any other target**: ceiling unknown — Layer B only.
-      CI exercises only the Linux source; the macOS/Windows parsers are
-      pure functions unit-tested on every platform, and their wrappers
-      use target-neutral `std::process` APIs.
+      macOS and Linux**; the ceiling query goes through the `sysinfo`
+      crate (§13 dependency record, `default-features = false` +
+      `system`) — one maintained, `unsafe`-free-at-call-site API instead
+      of hand-maintained platform parsers. Semantics behind the getters:
+      Linux `MemAvailable + SwapFree` (exact); macOS mach free estimates
+      plus swap; Windows free *physical* memory (conservative — the
+      paging file is not counted, so the gate may only be more reluctant
+      than the pre-guard sparse behavior). A failed/unsupported query
+      (all-zero totals) means ceiling unknown — Layer B only. Known
+      future improvement: `sysinfo::cgroup_limits()` for
+      container-correct ceilings (host figures over-report inside a
+      container; Layer B still catches the hard failures).
     * **Layer B** (all platforms): the three engine constructors allocate
       via `try_reserve`; an OS refusal is `JDiffError::Memory` → exit 10,
       never a Rust allocation abort.

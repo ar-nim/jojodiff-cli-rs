@@ -22,8 +22,12 @@ and release notes live under `docs/superpowers/`.
 - **Byte contract**: no change to any stdout/stderr byte or exit code for
   configurations that run today. New output is allowed only on paths that
   previously crashed (e.g. the memory guard's exit-10 refusal text).
-- **MSRV 1.85** (edition 2024 — no let-chains), **no `unsafe`**, **no new
-  dependencies** without a spec decision record (§13).
+- **MSRV 1.85** (edition 2024 — no let-chains) and **no `unsafe`** stay
+  hard. Dependencies: prefer std, but zero-dependency is not a goal in
+  itself — a small, well-maintained crate that replaces hand-maintained
+  platform code is welcome; record every adoption in the dependency
+  decision table (§13 of the refactor spec). Behavioral surface (option
+  parsing, output formatting) stays dependency-free.
 - **Conventional Commits** (`feat:`, `fix:`, `docs:`, `test:`,
   `refactor:`, `ci:`), one logical change per commit.
 - The full gate must pass before you claim done:
