@@ -57,9 +57,15 @@ fn copy_binary_as(dir: &Path, name: &str) -> PathBuf {
 /// test's child may inherit the copy's still-open write handle at clone time
 /// (fd tables are copied at fork and `fs::copy` opens without `O_CLOEXEC`)
 /// and keep it open through exec, failing `execve` with `Text file busy`.
+/// The memguard opt-out keeps the byte-contract suite RAM-independent
+/// (same rationale as tests/common/mod.rs and tests/oracle.rs).
 fn run_copied(exe: &Path, args: &[&Path]) -> Output {
     for attempt in 0..100 {
-        match Command::new(exe).args(args).output() {
+        match Command::new(exe)
+            .args(args)
+            .env("JDIFF_UNSAFE_NO_MEMGUARD", "1")
+            .output()
+        {
             Ok(out) => return out,
             Err(err) if err.raw_os_error() == Some(26) && attempt < 99 => {
                 std::thread::sleep(std::time::Duration::from_millis(100));

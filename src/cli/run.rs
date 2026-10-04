@@ -13,6 +13,7 @@ use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use crate::cli::config::{self, Function};
 use crate::cli::error::report;
 use crate::cli::report::{print_greeting, print_notes, print_usage};
+use crate::cli::sysmem;
 use crate::error::JDiffError;
 use crate::jdebug::{DBG_TO_STDOUT, dbg_print};
 use crate::jfile::{JFile, JFileAhead};
@@ -107,6 +108,21 @@ pub fn run(args: &[OsString]) -> Result<i32, JDiffError> {
     // default — moved to `cli::config::size_buffers` (unit-tested there).
     let buffers = config::size_buffers(&opts);
 
+    /* Memory guard, Layer A (plan 2026-10-04-memguard-bugfix): refuse
+     * option combinations whose allocations exceed what the machine can
+     * back (RAM + swap) — these die as allocation-failure aborts today.
+     * Exit 10 (EXI_MEM) with an actionable breakdown; disabled by
+     * JDIFF_UNSAFE_NO_MEMGUARD or when the ceiling is unknown (non-Linux). */
+    let mem_plan = config::memory_footprint(&opts, &buffers);
+    if sysmem::memguard_enabled() {
+        if let Some(avail) = sysmem::available_anon_bytes() {
+            if mem_plan.total > avail.saturating_sub(sysmem::MEMGUARD_HEADROOM) {
+                print_memguard_refusal(&mem_plan, avail);
+                return Ok(report(Err(JDiffError::Memory), verbose));
+            }
+        }
+    }
+
     /* Open files and create file handlers (`main.cpp:647-752`). The inputs
      * may be opened a second time for `-t`'s patch phase (deviation 2).
      * This open stays ahead of the output open — the C++ order (647-752
@@ -171,6 +187,35 @@ pub fn run(args: &[OsString]) -> Result<i32, JDiffError> {
     /* Exit (`main.cpp:897-932`): the single boundary prints the pinned error
      * text (if any) and yields the positive process exit code. */
     Ok(report(li_ret, verbose))
+}
+
+/// `fmt_mb` clamped for u64 budget values (saturated footprints print as
+/// i64::MAX MiB, never a negative wrap).
+fn mb(bytes: u64) -> String {
+    crate::defs::fmt_mb(i64::try_from(bytes).unwrap_or(i64::MAX))
+}
+
+/// Layer-A refusal block (site-printed like the JFileOut family; the
+/// boundary then prints the pinned "\nError allocating memory !\n" family
+/// line and exits 10).
+fn print_memguard_refusal(plan: &config::MemoryPlan, avail: u64) {
+    dbg_print(format_args!(
+        "Error: jdiff needs {} of memory, but only {} is available (RAM + swap).\n\n",
+        mb(plan.total),
+        mb(avail),
+    ));
+    dbg_print(format_args!("  buffers (-m)     : {}\n", mb(plan.buffers)));
+    dbg_print(format_args!(
+        "  index table (-i) : {}\n",
+        mb(plan.index_table)
+    ));
+    dbg_print(format_args!(
+        "  match table (-x) : {}\n",
+        mb(plan.match_table)
+    ));
+    dbg_print(format_args!(
+        "\nLower -m, -i or -x (see jdiff -hh), close memory-hungry programs, or add\nswap. To skip this check and let the OS overcommit decide, re-run with\nJDIFF_UNSAFE_NO_MEMGUARD=1.\n",
+    ));
 }
 
 /// The two input readers (`lpJflOrg`/`lpJflNew`).

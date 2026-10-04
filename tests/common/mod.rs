@@ -17,8 +17,17 @@ pub fn scratch(tag: &str) -> TempDir {
 }
 
 /// Spawns the jdiff binary with args.
+///
+/// `JDIFF_UNSAFE_NO_MEMGUARD=1` opts the harness out of the Layer-A
+/// pre-flight gate (spec §21.19): the option matrices include `-m 2048`,
+/// whose footprint fits a big machine but exceeds
+/// `MemAvailable + SwapFree − headroom` on small/loaded ones where the
+/// sparse zero pages previously ran fine. These suites pin the byte
+/// contract, not the host's RAM; the guard itself is exercised
+/// (petabyte-scale, machine-independent) in tests/memguard.rs.
 pub fn jdiff(args: &[&OsStr]) -> assert_cmd::Command {
     let mut c = assert_cmd::Command::new(env!("CARGO_BIN_EXE_jdiff"));
+    c.env("JDIFF_UNSAFE_NO_MEMGUARD", "1");
     c.args(args);
     c
 }
