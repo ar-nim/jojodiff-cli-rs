@@ -26,9 +26,12 @@
 //!
 //! Dependencies (spec §13): [`thiserror`](https://docs.rs/thiserror) derives
 //! the `Display`/`std::error::Error` impls of [`error::JDiffError`] (compile-
-//! time only, no runtime code beyond the generated impls), and
+//! time only, no runtime code beyond the generated impls),
 //! [`anyhow`](https://docs.rs/anyhow) wraps `cli::run` in the thin `jdiff`
-//! binary — no `anyhow` types cross into the library. There is no `unsafe`.
+//! binary (no `anyhow` types cross into the library), and
+//! [`sysinfo`](https://docs.rs/sysinfo) provides the memory guard's
+//! platform ceiling (default features off, `system` only). There is no
+//! `unsafe` in this crate.
 //! See the repository README for project status and the docs in
 //! `docs/superpowers/` for the port plan and functional specification.
 
