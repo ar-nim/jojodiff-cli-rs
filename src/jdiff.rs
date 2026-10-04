@@ -166,6 +166,11 @@ impl<'a> JDiff<'a> {
     /// the full index build. The matching table receives the **unclamped**
     /// `ahd_max`, like the C++ passes the raw `aiAhdMax` to JMatchTable
     /// (`:124`).
+    ///
+    /// # Errors
+    /// [`JDiffError::Memory`] when the OS refuses one of the engine
+    /// allocations (memory guard Layer B — exit 10 at the CLI boundary
+    /// instead of an allocation abort).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         org: Box<dyn JFile + 'a>,
@@ -179,17 +184,17 @@ impl<'a> JDiff<'a> {
         mch_min: i32,
         ahd_max: i64,
         cmp_all: bool,
-    ) -> Self {
+    ) -> Result<Self, JDiffError> {
         // The C++ ctor parameter is `const int aiAhdMax`; the CLI cannot
         // produce values beyond the i32 range (atoi clamps), so narrowing
         // saturates only for values the C++ would already have truncated.
         let ahd_max = i32::try_from(ahd_max).unwrap_or(i32::MAX);
-        JDiff {
+        Ok(JDiff {
             org,
             r#new,
             out,
-            hsh: JHashPos::new(hsh_sze),
-            mch: JMatchTable::new(mch_max, cmp_all, ahd_max),
+            hsh: JHashPos::new(hsh_sze)?,
+            mch: JMatchTable::new(mch_max, cmp_all, ahd_max)?,
             verbose,
             src_bkt,
             mch_max,
@@ -214,7 +219,7 @@ impl<'a> JDiff<'a> {
                 rlb: 0,
                 hsh_err: 0,
             },
-        }
+        })
     }
 
     /// Hashtable accessor for the post-run statistics (`getHsh`,
@@ -1364,7 +1369,7 @@ mod tests {
         r#new: Box<dyn JFile + 'a>,
         out: Box<dyn JOut + 'a>,
     ) -> JDiff<'a> {
-        JDiff::new(org, r#new, out, 1, 0, true, true, 8, 4, 256 * 1024, true)
+        JDiff::new(org, r#new, out, 1, 0, true, true, 8, 4, 256 * 1024, true).expect("test engine")
     }
 
     /// Drives the engine over the given file pair and returns (ret, ops).
@@ -1637,7 +1642,8 @@ mod tests {
             4,     // mch_min
             256 * 1024,
             true, // cmp_all
-        );
+        )
+        .expect("test engine");
         assert!(jd.jdiff().is_ok());
         assert_eq!(
             ops.0.borrow().clone(),
@@ -1680,7 +1686,8 @@ mod tests {
             99,  // mch_min > mch_max: clamps to mch_max - 1
             100, // ahd_max < 1024: clamps up to 1024
             true,
-        );
+        )
+        .expect("test engine");
         assert_eq!(jd.mch_min, 31, "mch_min clamps to mch_max - 1");
         assert_eq!(jd.ahd_max, 1024, "ahd_max is raised to 1024");
         assert_eq!(jd.hash().hash_prime(), 2_796_181, "hsh_sze=32 MB wiring");

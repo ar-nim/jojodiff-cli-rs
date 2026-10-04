@@ -148,10 +148,20 @@ fn oracle_dir() -> Option<PathBuf> {
 }
 
 /// Run a binary with OsString `args` inside `dir`.
+///
+/// `JDIFF_UNSAFE_NO_MEMGUARD=1` opts the harness out of the Layer-A
+/// pre-flight gate (spec §21.19): the option matrix includes `-m 2048`,
+/// whose 2 GiB footprint fits a big machine but exceeds
+/// `MemAvailable + SwapFree − headroom` on small/loaded ones where the
+/// sparse zero pages previously ran fine. The oracle suite pins the byte
+/// contract of the diff engine, not the host's RAM — without the opt-out
+/// it would be RAM-dependent. The guard itself is exercised (petabyte-scale,
+/// machine-independent) in tests/memguard.rs.
 fn run_in(dir: &Path, exe: &Path, args: &[OsString]) -> Output {
     Command::new(exe)
         .args(args)
         .current_dir(dir)
+        .env("JDIFF_UNSAFE_NO_MEMGUARD", "1")
         .output()
         .unwrap_or_else(|e| panic!("spawn {}: {e}", exe.display()))
 }

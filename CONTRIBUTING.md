@@ -2,6 +2,15 @@
 
 Thanks for your interest in contributing to `jojodiff-cli-rs`!
 
+## AI coding agents
+
+If you are an AI agent (Claude Code, Codex, Gemini CLI, GitHub Copilot,
+Cursor, ZCode, ...): **[AGENTS.md](AGENTS.md) is the canonical, binding
+instruction file** for this repository. `CLAUDE.md`, `GEMINI.md` and
+`.github/copilot-instructions.md` are pointers that only resolve to it —
+whatever harness you run under, read and follow `AGENTS.md` first.
+Everything below is the human-oriented detail of the same workflow.
+
 ## Project goal
 
 This project is a 1:1 port of JojoDiff 0.8.5. **Byte-exact compatibility with the
@@ -14,8 +23,11 @@ explicitly (§20/§21 of `docs/superpowers/specs/2026-10-01-jojodiff-1to1-port-s
 ## Development setup
 
 - Rust 1.85 or newer (`rustup update stable`); the project uses edition 2024.
-- Runtime dependencies are `thiserror` (library error impls, derive-only) and
-  `anyhow` (the thin binary wrapper only); no `unsafe`. See the README's
+- Runtime dependencies are `thiserror` (library error impls, derive-only),
+  `anyhow` (the thin binary wrapper only) and `sysinfo` (the memory guard's
+  platform ceiling, default-features off); no `unsafe`. Zero-dependency is
+  not a dogma — new crates are fine when they replace hand-maintained
+  platform code and get a §13 decision record. See the README's
   [Dependencies](README.md#dependencies) section and spec §13 for the record.
 - Before committing:
   ```

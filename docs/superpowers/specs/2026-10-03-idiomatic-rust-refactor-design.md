@@ -285,12 +285,20 @@ comment citing the oracle rows.
 
 ## 13. Dependency decision record
 
+**Policy (amended 2026-10-04):** std comes first, but zero-dependency is not a
+goal in itself. A small, well-maintained, `unsafe`-free-at-call-site crate is
+welcome whenever it replaces hand-maintained platform code or clearly earns
+its keep; every adoption gets a row here. Behavioral surface stays
+dependency-free (no arg parsing, no output formatting crates — see the
+rejected table).
+
 Adopted:
 
 | Crate | Role | Why |
 |---|---|---|
 | `thiserror = "2"` | lib, engine-wide error enum | Idiomatic typed errors; replaces 27 `-> i32` APIs |
 | `anyhow = "1"` | binary wrapper only | Ergonomic context at the top level |
+| `sysinfo = "0.36"` (`default-features = false`, `features = ["system"]`) | lib, memory-guard ceiling (spec §21.19, added 2026-10-04) | One maintained, FFI-internals API for the machine memory ceiling (`available_memory` + `free_swap`) on Windows/macOS/Linux instead of three hand-maintained parsers (a PowerShell spawn on Windows, a heuristic `vm_stat` parse on macOS). MSRV 1.75 fits the 1.85 floor (0.37+ needs 1.88). Verified: 214M downloads, high reputation; the platform runners in CI exercise it natively. Rejected candidate: `memory-stats` 1.2 — it reports the **current process's** RSS/pagefile usage, not system-wide available memory, so it cannot serve the gate. Known future improvement: `sysinfo::cgroup_limits()` for container-correct ceilings. |
 | `tempfile = "3"` | dev | Replaces 193 hand-rolled temp-dir sites; RAII cleanup |
 | `assert_cmd = "2"`, `predicates = "3"` | dev | Standard CLI-test ergonomics for 13 subprocess sites |
 | `proptest = "1"` (optional, post-refactor) | dev | Property-based round-trip fuzzing, size-capped |

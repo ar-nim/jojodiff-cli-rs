@@ -48,6 +48,7 @@ thiserror = "2"
 # nothing but `thiserror`; `JDiffError` crosses into `anyhow::Error` via its
 # `std::error::Error + Send + Sync + 'static` impls.
 anyhow = "1"
+sysinfo = { version = "0.36", default-features = false, features = ["system"] }
 
 [dev-dependencies]
 jojodiff = "0.1.2"   # francisdb crate, cross-validation only (tests/oracle.rs)

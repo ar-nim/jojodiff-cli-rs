@@ -88,12 +88,12 @@ pub(crate) fn diff_phase(
         opts.mch_min,
         i64::from(ahd_max),
         opts.cmp_all,
-    );
+    )?;
 
     /* Show execution parameters (`main.cpp:822-836`), verbatim including
      * the stale `(-s)`/`(-b)` letters and the "disbale" typo. */
     if opts.verbose > 1 {
-        let hashsize = i64::from(lo_jdiff.hash().hash_size_bytes());
+        let hashsize = lo_jdiff.hash().hash_size_bytes();
         dbg_print(format_args!("\n"));
         dbg_print(format_args!(
             "Index table size (default: 64Mb) (-s): {}Mb ({} samples)\n",
