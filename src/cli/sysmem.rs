@@ -53,6 +53,7 @@ pub(crate) fn available_anon_bytes() -> Option<u64> {
 
 /// (MemAvailable, SwapFree) in kB out of a Linux `/proc/meminfo` body;
 /// `None` when either field is missing or unparsable.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn parse_meminfo(text: &str) -> Option<(u64, u64)> {
     let mut avail = None;
     let mut swap = None;
