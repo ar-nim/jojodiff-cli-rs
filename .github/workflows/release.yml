@@ -36,18 +36,12 @@ jobs:
       - run: cargo test --all-features
       - run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package zip (Linux — jptch as relative symlink)
-        if: runner.os == 'Linux'
-        run: |
-          set -euo pipefail
-          mkdir stage
-          cp "target/${{ matrix.target }}/release/jdiff" stage/jdiff
-          ln -s jdiff stage/jptch
-          # -y stores jptch as a symlink instead of following it into a copy
-          (cd stage && zip -y "../jojodiff-cli-rs-${GITHUB_REF_NAME}-${{ matrix.target }}.zip" jdiff jptch)
-
-      - name: Package zip (macOS — jptch as duplicate copy)
-        if: runner.os == 'macOS'
+      # jptch is a real duplicate copy on every OS (a zip symlink entry
+      # stores "jdiff" as content and extractors that ignore unix mode
+      # bits — Python zipfile, GUI tools — materialize a broken 5-byte
+      # text file; argv[0] dispatch makes the copy behave identically).
+      - name: Package zip (POSIX — jptch as duplicate copy)
+        if: runner.os != 'Windows'
         run: |
           set -euo pipefail
           mkdir stage

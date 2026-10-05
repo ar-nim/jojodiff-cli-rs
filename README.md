@@ -176,11 +176,14 @@ release behave identically. Do not use `-t`; it exists for fidelity only.
 ## Prebuilt binaries
 
 Each [`v*` tag](https://github.com/ar-nim/jojodiff-cli-rs/releases) is built by CI
-into three zips, alongside a `SHA256SUMS.txt` digest list:
+into three zips, alongside a `SHA256SUMS.txt` digest list. Every zip contains
+`jptch` as a **real duplicate copy** of the binary (never a symlink — symlink
+zip entries break in extractors that ignore unix mode bits, e.g. Python's
+`zipfile` or GUI tools), so any extractor works and both names run in place:
 
 | Zip | Contents |
 | --- | ------- |
-| `jojodiff-cli-rs-v<version>-x86_64-unknown-linux-gnu.zip` | `jdiff` + relative symlink `jptch → jdiff` (extract with `unzip`, which preserves symlinks) |
+| `jojodiff-cli-rs-v<version>-x86_64-unknown-linux-gnu.zip` | `jdiff` + duplicate copy `jptch` |
 | `jojodiff-cli-rs-v<version>-aarch64-apple-darwin.zip` | `jdiff` + duplicate copy `jptch` |
 | `jojodiff-cli-rs-v<version>-x86_64-pc-windows-msvc.zip` | `jdiff.exe` + duplicate copy `jptch.exe` |
 
