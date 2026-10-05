@@ -1,0 +1,102 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # Smoke-test path (Task 2): builds and packages zips on demand, but the
+  # tag-gate on the release job means these runs never publish anything.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --all-features
+      - run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package zip (Linux — jptch as relative symlink)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          mkdir stage
+          cp "target/${{ matrix.target }}/release/jdiff" stage/jdiff
+          ln -s jdiff stage/jptch
+          # -y stores jptch as a symlink instead of following it into a copy
+          (cd stage && zip -y "../jojodiff-cli-rs-${GITHUB_REF_NAME}-${{ matrix.target }}.zip" jdiff jptch)
+
+      - name: Package zip (macOS — jptch as duplicate copy)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          mkdir stage
+          cp "target/${{ matrix.target }}/release/jdiff" stage/jdiff
+          cp "target/${{ matrix.target }}/release/jdiff" stage/jptch
+          (cd stage && zip "../jojodiff-cli-rs-${GITHUB_REF_NAME}-${{ matrix.target }}.zip" jdiff jptch)
+
+      - name: Package zip (Windows — jptch as duplicate copy)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path stage | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/jdiff.exe" stage/jdiff.exe
+          Copy-Item "target/${{ matrix.target }}/release/jdiff.exe" stage/jptch.exe
+          Compress-Archive -Path stage/* -DestinationPath "jojodiff-cli-rs-$env:GITHUB_REF_NAME-${{ matrix.target }}.zip"
+
+      - name: Upload zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: jojodiff-cli-rs-*.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    # Tag pushes only: workflow_dispatch smoke runs build and package but
+    # must not create or publish a GitHub release.
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4   # the curated release-notes draft (body_path) lives in-repo
+      - name: Download zips from all three builds
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: cd dist && sha256sum *.zip > SHA256SUMS.txt
+
+      - name: Locate curated release notes (optional, by convention)
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          notes=$(ls docs/superpowers/notes/*-"${ver}"-release-notes.md 2>/dev/null | head -n 1 || true)
+          echo "BODY_PATH=${notes}" >> "$GITHUB_ENV"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: ${{ env.BODY_PATH }}
+          files: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          generate_release_notes: true
