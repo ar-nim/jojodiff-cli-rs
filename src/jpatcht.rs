@@ -292,7 +292,7 @@ impl<'a, W: Write> JPatcht<'a, W> {
     /// `:238-239`, `:254`, `:257-258`) in branches where nothing reads them
     /// anymore; the stores are ported as written, so the dead-store lint is
     /// silenced for this function.
-    #[allow(unused_assignments)]
+    #[expect(unused_assignments)]
     pub fn jpatch(&mut self) -> Result<(), JDiffError> {
         let mut li_inp: i32; /* 1st Pending byte (EOF = no pending byte) */
         let mut li_dbl: i32 = EOF; /* 2nd Pending byte (EOF = no pending byte) */

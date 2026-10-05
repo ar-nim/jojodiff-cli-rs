@@ -171,7 +171,9 @@ impl<'a> JDiff<'a> {
     /// [`JDiffError::Memory`] when the OS refuses one of the engine
     /// allocations (memory guard Layer B — exit 10 at the CLI boundary
     /// instead of an allocation abort).
-    #[allow(clippy::too_many_arguments)]
+    /// Eleven parameters, the C++ constructor's exact arity
+    /// (`JDiff.cpp:103-125`) — kept 1:1.
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         org: Box<dyn JFile + 'a>,
         r#new: Box<dyn JFile + 'a>,

@@ -309,7 +309,7 @@ pub struct JMatchTable {
     ///
     /// Dead code: the C++ constructor stores it but no 0.8.5 method reads it
     /// — kept for parity (spec §21.13).
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     ahd_max: i32,
     /// Current reliability range from the hashtable (`miRlb`), refreshed by
     /// `cleanup` (mechanically passed in — see the module docs).
@@ -917,7 +917,7 @@ impl JMatchTable {
                     // determine number of bytes to check (:482-486)
                     let mut d = n.beg - tst_new; // lzDst
                     // The C++ spells the clamp as if/else-if (:483-486) — kept 1:1.
-                    #[allow(clippy::manual_clamp)]
+                    #[expect(clippy::manual_clamp)]
                     if d < MINDST {
                         d = MINDST;
                     } else if d > MAXDST {
@@ -1436,7 +1436,7 @@ fn check(
 
     /* Compare bytes (:833-855): the two break branches are separate
      * conditions in the C++ (`liEql >= EQLSZE` / `aiLen <= 0`) — kept 1:1. */
-    #[allow(clippy::if_same_then_else)]
+    #[expect(clippy::if_same_then_else)]
     while eql < EQLMAX {
         lc_org = org.get(*pos_org, sft);
         /* `lcOrg < 0` (:835): EOF, EOB (soft reads) and the error sentinels
