@@ -8,6 +8,11 @@ on:
   # tag-gate on the release job means these runs never publish anything.
   workflow_dispatch:
 
+# Least privilege: build jobs only need read access to the repo. The release
+# job below overrides this with contents: write to publish the GitHub release.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
