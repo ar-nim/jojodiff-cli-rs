@@ -173,6 +173,21 @@ exactly — including in `debug` builds: the debug-only invariant assert upstrea
 is unreachable in the port (fresh input re-open plus the EOF gate below), so debug and
 release behave identically. Do not use `-t`; it exists for fidelity only.
 
+## Prebuilt binaries
+
+Each [`v*` tag](https://github.com/ar-nim/jojodiff-cli-rs/releases) is built by CI
+into three zips, alongside a `SHA256SUMS.txt` digest list:
+
+| Zip | Contents |
+| --- | ------- |
+| `jojodiff-cli-rs-v<version>-x86_64-unknown-linux-gnu.zip` | `jdiff` + relative symlink `jptch → jdiff` (extract with `unzip`, which preserves symlinks) |
+| `jojodiff-cli-rs-v<version>-aarch64-apple-darwin.zip` | `jdiff` + duplicate copy `jptch` |
+| `jojodiff-cli-rs-v<version>-x86_64-pc-windows-msvc.zip` | `jdiff.exe` + duplicate copy `jptch.exe` |
+
+The crate version is the packaging version; the ported engine is JojoDiff
+**0.8.5**, which is what the `jdiff -v` greeting reports. Intel-Mac and other
+targets: build from source (below).
+
 ## Building
 
 Rust 1.85 or newer (edition 2024); the dependencies are listed under
