@@ -81,29 +81,32 @@ const PGSMSK: i64 = 0x1ffffff;
 /// advances. Extracted from `JDiff` so the scan methods can borrow the
 /// state and the file readers disjointly — the C++ reaches into these
 /// members through pointer aliasing, which the two field-disjoint
-/// destructures used to emulate.
+/// destructures used to emulate. The rolling-hash member triplets
+/// (`mlHsh*`/`miPrv*`/`miEql*`) are bundled in [`RollingHash`].
 struct SearchState {
     /// Current ahead position on the original file (`mzAhdOrg`). Not reset on
     /// backtrack anymore (0.8.5).
     az_org: i64,
     /// Current ahead position on the new file (`mzAhdNew`).
     az_new: i64,
-    /// Current hash value for the original file (`mlHshOrg`).
-    hsh_org: u32,
-    /// Current hash value for the new file (`mlHshNew`).
-    hsh_new: u32,
-    /// Previous file value, original (`miPrvOrg`).
-    prv_org: i32,
+    /// Rolling sample hash, original: the C++ `mlHshOrg`/`miPrvOrg`/
+    /// `miEqlOrg` member triplet (`JDiff.h:267-269,272`) bundled into
+    /// [`RollingHash`]. Initialized to the member defaults (key 0, previous
+    /// byte **0**, equal-run 0) — the `src_scn == 0` paths hash straight
+    /// from them (`JDiff.cpp:186,206,441`); deliberately NOT
+    /// [`RollingHash::new`], whose EOF previous-byte seed is the C++
+    /// local/reseed seed.
+    rh_org: RollingHash,
     /// Current file value, new (`miValNew`). Typed read result: a data
     /// byte, or the sentinel (`EOF`/`EOB`/error) of the read that ended the
     /// scan — checked by the error gate after the scan loops.
     val_new: ByteOrEof,
-    /// Previous file value, new (`miPrvNew`).
-    prv_new: i32,
-    /// Equal-run counter in the current sample, original (`miEqlOrg`).
-    eql_org: i32,
-    /// Equal-run counter in the current sample, new (`miEqlNew`).
-    eql_new: i32,
+    /// Rolling sample hash, new: the C++ `mlHshNew`/`miPrvNew`/`miEqlNew`
+    /// member triplet (`JDiff.h:268,271,273`) bundled into [`RollingHash`],
+    /// with the same zero member defaults as `rh_org`. `search` reseeds it
+    /// with [`RollingHash::new`] (key 0, equal-run 0, previous byte EOF,
+    /// `JDiff.cpp:543-545`) before the look-ahead loop reads it.
+    rh_new: RollingHash,
     /// Reliability range for the current hashtable (`miRlb`, cached by
     /// `search` after each prescan; the 085ac tuning commit, spec §18.E).
     rlb: i32,
@@ -211,13 +214,23 @@ impl<'a> JDiff<'a> {
             sst: SearchState {
                 az_org: 0,
                 az_new: 0,
-                hsh_org: 0,
-                hsh_new: 0,
-                prv_org: 0,
+                // C++ member defaults (`JDiff.h:267-273`): key 0, previous
+                // byte **0**, equal-run 0. Deliberately not
+                // `RollingHash::new()` — its EOF previous-byte seed is the
+                // C++ local/reseed seed (`JDiff.cpp:545`, `:731`); seeding
+                // EOF here would change the hash of a first 0x00 byte on
+                // the `src_scn == 0` paths (byte contract).
+                rh_org: RollingHash {
+                    key: 0,
+                    prv: 0,
+                    eql: 0,
+                },
+                rh_new: RollingHash {
+                    key: 0,
+                    prv: 0,
+                    eql: 0,
+                },
                 val_new: ByteOrEof::Byte(0),
-                prv_new: 0,
-                eql_org: 0,
-                eql_new: 0,
                 rlb: 0,
                 hsh_err: 0,
             },
@@ -271,14 +284,12 @@ impl<'a> JDiff<'a> {
     /// original stream's rolling key and add the sample to the hashtable.
     /// Only reached while `miSrcScn == 0 && lzPosOrg == mzAhdOrg`.
     fn hash_add_org(&mut self, lc_org: i32) {
-        self.sst.hsh_org = hash_key(
-            self.sst.hsh_org,
-            &mut self.sst.prv_org,
-            lc_org,
-            &mut self.sst.eql_org,
+        self.sst.rh_org.roll(lc_org);
+        self.hsh.add(
+            self.sst.rh_org.key(),
+            self.sst.az_org,
+            self.sst.rh_org.eql(),
         );
-        self.hsh
-            .add(self.sst.hsh_org, self.sst.az_org, self.sst.eql_org);
         self.sst.az_org += 1;
     }
 
@@ -677,14 +688,12 @@ impl<'a> JDiff<'a> {
                     ByteOrEof::Byte(lc_org) => lc_org,
                     _ => break,
                 };
-                self.sst.hsh_org = hash_key(
-                    self.sst.hsh_org,
-                    &mut self.sst.prv_org,
-                    i32::from(lc_org),
-                    &mut self.sst.eql_org,
+                self.sst.rh_org.roll(i32::from(lc_org));
+                self.hsh.add(
+                    self.sst.rh_org.key(),
+                    self.sst.az_org,
+                    self.sst.rh_org.eql(),
                 );
-                self.hsh
-                    .add(self.sst.hsh_org, self.sst.az_org, self.sst.eql_org);
                 self.sst.az_org += 1;
                 li_scan -= 1;
             }
@@ -801,9 +810,9 @@ impl<'a> JDiff<'a> {
                     li_bck = SMPSZE * 2 - 1; // to initialize mkHsh and miEql
                 }
                 self.sst.az_new -= 1; // switch to pre-increments
-                self.sst.hsh_new = 0;
-                self.sst.eql_new = 0;
-                self.sst.prv_new = EOF;
+                // Fresh look-ahead hash state (JDiff.cpp:543-545): key 0,
+                // equal-run 0, previous byte EOF.
+                self.sst.rh_new = RollingHash::new();
                 let mut li_idx: i32 = 0;
                 while li_idx < li_bck {
                     self.sst.val_new = self.r#new.get(self.sst.az_new + 1, li_sft_new); // ++mzAhdNew
@@ -817,12 +826,7 @@ impl<'a> JDiff<'a> {
                         self.sst.az_new -= 1;
                         break;
                     };
-                    self.sst.hsh_new = hash_key(
-                        self.sst.hsh_new,
-                        &mut self.sst.prv_new,
-                        i32::from(*lc_val),
-                        &mut self.sst.eql_new,
-                    );
+                    self.sst.rh_new.roll(i32::from(*lc_val));
 
                     // The following line needs some explication.
                     // The goal of this line is to terminate the initialization ASAP.
@@ -841,7 +845,7 @@ impl<'a> JDiff<'a> {
                     // and initialization will be ok after SMPSZE-1 bytes (position D in the example)
                     // Reset can be detected by miEql != liIdx. Hence, when miEql != liIdx,
                     // we can reduce liMax to liIdx + SMPSZE - 1.
-                    if li_idx != self.sst.eql_new && li_bck > li_idx + (SMPSZE - 1) {
+                    if li_idx != self.sst.rh_new.eql() && li_bck > li_idx + (SMPSZE - 1) {
                         li_bck = li_idx + (SMPSZE - 1);
                     }
                     li_idx += 1;
@@ -868,17 +872,12 @@ impl<'a> JDiff<'a> {
                     self.sst.az_new -= 1;
                     break;
                 };
-                self.sst.hsh_new = hash_key(
-                    self.sst.hsh_new,
-                    &mut self.sst.prv_new,
-                    i32::from(*lc_val),
-                    &mut self.sst.eql_new,
-                );
+                self.sst.rh_new.roll(i32::from(*lc_val));
                 li_max -= 1;
 
                 /* lookup the new value in the hashtable and add it to the
                  * table of matches... (JDiff.cpp:594) */
-                if let Some(lz_fnd_org) = self.hsh.get(self.sst.hsh_new) {
+                if let Some(lz_fnd_org) = self.hsh.get(self.sst.rh_new.key()) {
                     /* ...unless it's not usable because we've been instructed
                      * not to backtrack on source file (JDiff.cpp:596) */
                     if lz_fnd_org > lz_bse_org {
@@ -1069,10 +1068,10 @@ impl<'a> JDiff<'a> {
             org, hsh, verbose, ..
         } = self;
 
-        let mut lk_hsh_org: u32 = 0; // Current hash value for original file
-        let mut li_eql_org: i32 = 0; // Number of times current value occurs in hash value
+        // The C++ locals (`JDiff.cpp:728-731`): fresh rolling-hash state —
+        // key 0, equal-run 0, previous byte EOF.
+        let mut rh = RollingHash::new();
         let mut lc_val_org = ByteOrEof::Byte(0); // Current  file value (C: int zero-init)
-        let mut lc_val_prv: i32 = EOF; // Previous file value
         let mut lz_pos_org: i64 = -1; // Position within original file
 
         let mut li_idx: i32;
@@ -1093,12 +1092,7 @@ impl<'a> JDiff<'a> {
             let ByteOrEof::Byte(lc_val) = &lc_val_org else {
                 break;
             };
-            lk_hsh_org = hash_key(
-                lk_hsh_org,
-                &mut lc_val_prv,
-                i32::from(*lc_val),
-                &mut li_eql_org,
-            );
+            rh.roll(i32::from(*lc_val));
             li_idx += 1;
         }
 
@@ -1114,13 +1108,8 @@ impl<'a> JDiff<'a> {
             let ByteOrEof::Byte(lc_val) = &lc_val_org else {
                 break;
             };
-            lk_hsh_org = hash_key(
-                lk_hsh_org,
-                &mut lc_val_prv,
-                i32::from(*lc_val),
-                &mut li_eql_org,
-            );
-            hsh.add(lk_hsh_org, lz_pos_org, li_eql_org);
+            rh.roll(i32::from(*lc_val));
+            hsh.add(rh.key(), lz_pos_org, rh.eql());
 
             /* Debug: hash trace (JDiff.cpp:758-762); the trailing field
              * is `%8d` of the literal 0 here, not a P8zd position. */
@@ -1129,7 +1118,7 @@ impl<'a> JDiff<'a> {
                 dbg_print(format_args!(
                     "ufHshAdd({:2x} -> {:8x}, {}, {:8})\n",
                     u32::from(*lc_val),
-                    lk_hsh_org,
+                    rh.key(),
                     crate::defs::p8(lz_pos_org),
                     0,
                 ));
@@ -1164,6 +1153,54 @@ impl<'a> JDiff<'a> {
             _ => Ok(()),
         }
     } /* buildFullIndex */
+}
+
+/// The rolling sample hash (`ufHshAdd` state): the current key, the previous
+/// byte, and the equal-run counter, bundled so the three values update as one
+/// unit instead of threading through `&mut` out-parameters.
+///
+/// Two seeds matter (C++ port anchors):
+///
+/// * [`RollingHash::new`] is the C++ *fresh* state — key 0, previous byte
+///   EOF, equal-run 0 — the `JDiff.cpp:728-731` index locals and the
+///   `:543-545` look-ahead reseed.
+/// * The `JDiff.h:267-273` *member* defaults seed the previous byte to 0:
+///   the org-side members are hashed straight from that default in the
+///   `src_scn == 0` paths (`JDiff.cpp:186,206,441`), so the port mirrors
+///   them with a literal at the [`SearchState`] initializer instead.
+#[derive(Clone, Copy)]
+pub(crate) struct RollingHash {
+    key: u32, // current hash value (lzHshOrg / lzHshNew)
+    prv: i32, // previous byte (EOF-seeded)
+    eql: i32, // equal-character run feeding the hash
+}
+
+impl RollingHash {
+    /// Fresh state, matching the C++ locals' zero/EOF initialization
+    /// (`JDiff.cpp:728-731`, reseed `:543-545`).
+    pub(crate) fn new() -> Self {
+        RollingHash {
+            key: 0,
+            prv: EOF,
+            eql: 0,
+        }
+    }
+
+    /// Fold one byte (the raw i32 channel value, EOF included) into the hash.
+    pub(crate) fn roll(&mut self, new: i32) -> u32 {
+        self.key = hash_key(self.key, &mut self.prv, new, &mut self.eql);
+        self.key
+    }
+
+    /// Current key (for table lookups and adds).
+    pub(crate) fn key(&self) -> u32 {
+        self.key
+    }
+
+    /// Current equal-run length (the `add` quality argument).
+    pub(crate) fn eql(&self) -> i32 {
+        self.eql
+    }
 }
 
 /// The hash function (`JDiff::hash`, `JDiff.cpp:361-371`): generate a new
@@ -1267,6 +1304,24 @@ mod tests {
         k = hash_key(k, &mut old, i32::from(b'a'), &mut eql);
         assert_eq!(k, before.wrapping_mul(2).wrapping_add(97 + SMPSZE as u32));
         assert_eq!(eql, SMPSZE);
+    }
+
+    /// RollingHash bundles exactly the hash_key channel state: rolling a byte
+    /// sequence gives the same key/eql as the raw three-variable form, and the
+    /// EOF seed matches the C++ locals (`lcValPrv = EOF`, key 0, eql 0).
+    #[test]
+    fn rolling_hash_matches_raw_channel() {
+        let mut rh = RollingHash::new();
+        let mut raw_key = 0_u32;
+        let mut raw_prv = EOF;
+        let mut raw_eql = 0_i32;
+        for b in b"the quick brown fox" {
+            let via_struct = rh.roll(i32::from(*b));
+            raw_key = hash_key(raw_key, &mut raw_prv, i32::from(*b), &mut raw_eql);
+            assert_eq!(via_struct, raw_key);
+            assert_eq!(rh.key(), raw_key);
+            assert_eq!(rh.eql(), raw_eql);
+        }
     }
 
     /// Deterministic pseudo-random filler byte stream (LCG, bits 8..=15),
