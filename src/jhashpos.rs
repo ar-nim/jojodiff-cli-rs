@@ -61,9 +61,7 @@
 //! }
 //! tbl.add(key, 4242, 0); // store the sample (highest quality)
 //!
-//! let mut pos = 0i64;
-//! assert!(tbl.get(key, &mut pos));
-//! assert_eq!(pos, 4242);
+//! assert_eq!(tbl.get(key), Some(4242));
 //! ```
 
 use crate::defs::{SMPSZE, get_lower_prime};
@@ -266,19 +264,15 @@ impl JHashPos {
 
     /// Hashtable lookup (`JHashPos.cpp:158-171`): exact-key match at
     /// `key % prime` only; increments the hit counter on match. On a
-    /// zero-filled untouched bucket (`key == 0`) this answers `(true, 0)` —
+    /// zero-filled untouched bucket (`key == 0`) this answers `Some(0)` —
     /// the C++ UB reads zero pages in practice (spec §21.5 deviation).
-    pub fn get(&mut self, key: u32, pos: &mut i64) -> bool {
-        // Calculate the index in the hashtable for the given key.
+    pub fn get(&mut self, key: u32) -> Option<i64> {
         let idx = (key % self.prime as u32) as usize;
-
-        // Lookup value into hashtable for new file.
         if self.tbl_hsh[idx] == key {
             self.hits += 1;
-            *pos = self.tbl_pos[idx];
-            return true;
+            return Some(self.tbl_pos[idx]);
         }
-        false
+        None
     }
 
     /// Return the reliability range: the estimated number of bytes to verify
@@ -497,13 +491,11 @@ mod tests {
 
     /// The table is zero-initialized (spec §21.5 deviation: 0.8.5 `malloc`s
     /// without `memset`, Rust zero-fills for determinism): an untouched
-    /// bucket answers `get(0)` with `(true, 0)`.
+    /// bucket answers `get(0)` with `Some(0)`.
     #[test]
     fn zero_initialized_table() {
         let mut tbl = JHashPos::new(1).expect("test table");
-        let mut pos = -1i64;
-        assert!(tbl.get(0, &mut pos));
-        assert_eq!(pos, 0);
+        assert_eq!(tbl.get(0), Some(0));
     }
 
     /// Down-counting collision counter (`JHashPos.cpp:49,116-137`): col_cnt
@@ -514,25 +506,21 @@ mod tests {
     #[test]
     fn down_counter_store_cadence() {
         let mut tbl = JHashPos::new(1).expect("test table");
-        let mut pos = 0i64;
 
         tbl.add(10, 100, 0); // 4 - 4 = 0 <= 0: stored, col_cnt reset to 4
-        assert!(tbl.get(10, &mut pos));
-        assert_eq!(pos, 100);
+        assert_eq!(tbl.get(10), Some(100));
 
         // Overwrite semantics on the same bucket (87369 % 87359 == 10): the
         // exact-key lookup answers the new key only.
         tbl.add(87369, 200, 0);
-        assert!(tbl.get(87369, &mut pos));
-        assert_eq!(pos, 200);
-        assert!(!tbl.get(10, &mut pos)); // key 10 was overwritten
+        assert_eq!(tbl.get(87369), Some(200));
+        assert_eq!(tbl.get(10), None); // key 10 was overwritten
 
         // Quality gate at SMPSZE * 2 = 64 (`JHashPos.cpp:116`): eql_cnt 64
         // is still high quality (the 0.8.1 gate was SMPSZE - 4 = 28).
         let mut hi = JHashPos::new(1).expect("test table");
         hi.add(10, 100, 64);
-        assert!(hi.get(10, &mut pos));
-        assert_eq!(pos, 100);
+        assert_eq!(hi.get(10), Some(100));
 
         // A low-quality add (eql_cnt 65 > 64) decrements by COLLISION_LOW 1:
         // on a fresh table 4 - 1 = 3 > 0, so it does NOT store (0.8.1's
@@ -540,14 +528,13 @@ mod tests {
         // low-quality adds reach 0: 3, 2, 1, 0.
         let mut lo = JHashPos::new(1).expect("test table");
         lo.add(10, 100, 65);
-        assert!(!lo.get(10, &mut pos));
+        assert_eq!(lo.get(10), None);
         lo.add(10, 101, 65);
-        assert!(!lo.get(10, &mut pos));
+        assert_eq!(lo.get(10), None);
         lo.add(10, 102, 65);
-        assert!(!lo.get(10, &mut pos));
+        assert_eq!(lo.get(10), None);
         lo.add(10, 103, 65); // 0 <= 0: stored
-        assert!(lo.get(10, &mut pos));
-        assert_eq!(pos, 103);
+        assert_eq!(lo.get(10), Some(103));
     }
 
     /// Down-counting load counter (`JHashPos.cpp:68,104-110`): load_cnt
@@ -578,12 +565,10 @@ mod tests {
         // 4 (> 0, lost), the one after to 0 (stored). Keys 90000/90001
         // land on buckets the loop above stored under other keys (2641/
         // 2642) — the exact-key lookup still answers per the last store.
-        let mut pos = 0i64;
         tbl.add(90000, 1, 0); // 8 - 4 = 4 > 0: lost
-        assert!(!tbl.get(90000, &mut pos));
+        assert_eq!(tbl.get(90000), None);
         tbl.add(90001, 2, 0); // 4 - 4 = 0: stored
-        assert!(tbl.get(90001, &mut pos));
-        assert_eq!(pos, 2);
+        assert_eq!(tbl.get(90001), Some(2));
     }
 
     /// Adds 32-byte-window keys (as the diff engine samples files), then
@@ -593,12 +578,10 @@ mod tests {
     fn add_then_get_roundtrip_and_hits() {
         const PRIME: u32 = 87359;
         let mut tbl = JHashPos::new(1).expect("test table");
-        let mut pos = -1i64;
 
         // The table is zero-initialized (spec §21.5): an untouched bucket
-        // answers get(0) with (true, 0). Replicated 1:1.
-        assert!(tbl.get(0, &mut pos));
-        assert_eq!(pos, 0);
+        // answers get(0) with Some(0). Replicated 1:1.
+        assert_eq!(tbl.get(0), Some(0));
 
         // Deterministic pseudo-random bytes (LCG, bits 8..=15 so the byte
         // period exceeds the sampled range) such that all 1000 window keys
@@ -653,19 +636,42 @@ mod tests {
         let mut hits = 1;
         for &(k, wp) in &keys {
             let idx = (k % PRIME) as usize;
-            let found = tbl.get(k, &mut pos);
-            assert_eq!(found, k == oracle_key[idx], "key {k} bucket {idx}");
-            if found {
-                assert_eq!(pos, oracle_pos[idx], "key {k} bucket {idx}");
-                assert_eq!(pos, wp);
+            let found = tbl.get(k);
+            assert_eq!(
+                found.is_some(),
+                k == oracle_key[idx],
+                "key {k} bucket {idx}"
+            );
+            if let Some(p) = found {
+                assert_eq!(p, oracle_pos[idx], "key {k} bucket {idx}");
+                assert_eq!(p, wp);
                 hits += 1;
             }
         }
         assert_eq!(tbl.hash_hits(), hits);
         assert!(hits < keys.len() as i32); // misses really occurred
 
-        // A key that was never stored answers false.
-        assert!(!tbl.get(u32::MAX, &mut pos));
+        // A key that was never stored answers None.
+        assert_eq!(tbl.get(u32::MAX), None);
+    }
+
+    /// The typed lookup: Some(pos) on hit (hits counter bumped), None on miss.
+    /// The untouched zero-bucket quirk (§21.5) answers Some(0) for key 0.
+    #[test]
+    fn get_returns_option_position() {
+        let mut tbl = JHashPos::new(1).expect("test table");
+        let mut feeder_old = -1i32; // EOF: no data byte equals it
+        let mut feeder_eql = 0i32;
+        let mut key = 0u32;
+        for b in 0i32..40 {
+            key = crate::jdiff::hash_key(key, &mut feeder_old, b, &mut feeder_eql);
+        }
+        tbl.add(key, 1234, 32);
+        let hits_before = tbl.hash_hits();
+        assert_eq!(tbl.get(key), Some(1234));
+        assert_eq!(tbl.hash_hits(), hits_before + 1);
+        assert_eq!(tbl.get(key ^ 0xFFFF_0000), None); // different key, same table
+        assert_eq!(tbl.get(0), Some(0)); // untouched zero bucket (§21.5)
     }
 
     /// The 0.8.5 rolling key (`JDiff::hash`, `JDiff.cpp:361-371`): with eql

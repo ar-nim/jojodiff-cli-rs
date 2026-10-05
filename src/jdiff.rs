@@ -629,10 +629,11 @@ impl<'a> JDiff<'a> {
         skp_new: &mut i64,
         ahd: &mut i64,
     ) -> Result<i32, JDiffError> {
-        let mut lz_fnd_org: i64 = 0; /* Found position within original file;
-         * the C++ also declares lzFndNew (out
-         * parameter of gpMch->getbest), which the
-         * Option return replaces here. */
+        /* Found positions within the files (C++ lzFndOrg/lzFndNew) arrive
+         * as typed returns from the two lookups below: the hashtable
+         * lookup (hsh.get -> Option<i64>) replaces the C++ lzFndOrg
+         * out-parameter, and getbest's Option<(i64, i64)> return replaces
+         * the C++ lzFndNew out-parameter of gpMch->getbest. */
         let mut lz_lap: i64 = 0; /* Stop-lap for progress counter */
 
         let mut li_max: i32; /* Max number of bytes to look ahead */
@@ -877,7 +878,7 @@ impl<'a> JDiff<'a> {
 
                 /* lookup the new value in the hashtable and add it to the
                  * table of matches... (JDiff.cpp:594) */
-                if self.hsh.get(self.sst.hsh_new, &mut lz_fnd_org) {
+                if let Some(lz_fnd_org) = self.hsh.get(self.sst.hsh_new) {
                     /* ...unless it's not usable because we've been instructed
                      * not to backtrack on source file (JDiff.cpp:596) */
                     if lz_fnd_org > lz_bse_org {
