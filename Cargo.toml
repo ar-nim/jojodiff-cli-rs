@@ -27,7 +27,7 @@ default = []
 debug = []
 
 [lints.rust]
-future-incompatible = "deny"
+future_incompatible = "deny"
 
 [lints.clippy]
 cast_lossless = "deny"
