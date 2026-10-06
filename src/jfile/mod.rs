@@ -66,6 +66,14 @@ impl ByteOrEof {
     }
 
     /// Maps a legacy `get` return onto the typed form.
+    ///
+    /// Dead code in non-test builds since the ahead reader's `get` returns
+    /// `ByteOrEof` directly (the typed channel replaced the `i32`
+    /// round-trip): the remaining callers are the test helpers that still
+    /// speak the legacy channel (`JFileMem`'s `raw`, the patch decoder's
+    /// `FailingJFile` probe). Kept as the reconstruction rim of the legacy
+    /// channel for those boundaries.
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn from_raw(v: i32) -> ByteOrEof {
         match v {
             0..=255 => ByteOrEof::Byte(v as u8),
