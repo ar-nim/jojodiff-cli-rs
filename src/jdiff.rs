@@ -155,6 +155,17 @@ pub struct JDiff<'a> {
     sst: SearchState,
 }
 
+/// Result of one find-ahead pass (`JDiff::search`, the C++ `azSkp*`/`azAhd`
+/// reference out-parameters plus its 0/1 return): `found` is the C++ `int`
+/// return (1 = solution found), the offsets are the skip/advance vector.
+#[derive(Debug, Clone, Copy)]
+struct SearchOutcome {
+    found: bool,  // C++ returns 1 when a solution was found, else 0
+    skp_org: i64, // bytes to skip on the original file (negative = backtrack)
+    skp_new: i64, // bytes to skip on the new file
+    ahd: i64,     // bytes both cursors advance to reach the solution
+}
+
 impl<'a> JDiff<'a> {
     /// Create JDiff for working on the specified files (`JDiff.cpp:103-125`).
     ///
@@ -347,8 +358,6 @@ impl<'a> JDiff<'a> {
 
         let mut li_fnd: i32 = 0; /* offsets are pointing to a valid solution (= equal regions)? */
         let mut lz_ahd: i64 = 0; /* number of bytes to advance on both files to reach the solution */
-        let mut lz_skp_org: i64 = 0; /* number of bytes to skip on original file to reach the solution */
-        let mut lz_skp_new: i64 = 0; /* number of bytes to skip on new file to reach the solution */
         /* lap for reducing the number of progress messages for -vv */
         let mut lz_lap_sml: i64 = MAX_OFF_T;
 
@@ -507,16 +516,14 @@ impl<'a> JDiff<'a> {
                         self.out.put(Op::Esc, 0, 0, 0, lz_pos_org, lz_pos_new);
                     }
 
-                    /* Find a new equals-region (JDiff.cpp:276-279): the int
-                     * return is LIVE at 0.8.5 — a negative error aborts the
+                    /* Find a new equals-region (JDiff.cpp:276-279): the found
+                     * flag is LIVE at 0.8.5 — a negative error aborts the
                      * diff (the 0.8.1 bool collapse is fixed, spec §18.E). */
-                    li_fnd = self.search(
-                        lz_pos_org,
-                        lz_pos_new,
-                        &mut lz_skp_org,
-                        &mut lz_skp_new,
-                        &mut lz_ahd,
-                    )?;
+                    let outcome = self.search(lz_pos_org, lz_pos_new)?;
+                    li_fnd = i32::from(outcome.found);
+                    let lz_skp_org = outcome.skp_org;
+                    let mut lz_skp_new = outcome.skp_new;
+                    lz_ahd = outcome.ahd;
 
                     /* Debug: find-ahead result and progress traces
                      * (JDiff.cpp:280-286). */
@@ -629,17 +636,11 @@ impl<'a> JDiff<'a> {
     /// if characters need to be inserted in the original file, negative if
     /// they need to be removed from it.
     ///
-    /// Returns `Ok(0)` = no solution found, `Ok(1)` = solution found, or
-    /// the `JDiffError` (propagated live by [`JDiff::jdiff`]). The 0/1
-    /// payload stays: jdiff's "inaccurate solution" arm consumes it.
-    fn search(
-        &mut self,
-        red_org: i64,
-        red_new: i64,
-        skp_org: &mut i64,
-        skp_new: &mut i64,
-        ahd: &mut i64,
-    ) -> Result<i32, JDiffError> {
+    /// Returns the [`SearchOutcome`] — `found: false` = no solution found,
+    /// `found: true` = solution found — or the `JDiffError` (propagated
+    /// live by [`JDiff::jdiff`]). The found flag stays: jdiff's "inaccurate
+    /// solution" arm consumes it.
+    fn search(&mut self, red_org: i64, red_new: i64) -> Result<SearchOutcome, JDiffError> {
         /* Found positions within the files (C++ lzFndOrg/lzFndNew) arrive
          * as typed returns from the two lookups below: the hashtable
          * lookup (hsh.get -> Option<i64>) replaces the C++ lzFndOrg
@@ -1012,48 +1013,59 @@ impl<'a> JDiff<'a> {
                 // files are simply different. Anyway, iterating over the same
                 // search windows makes no sense, so jump forward for at least
                 // SMPSZE bytes.
-                *skp_org = 0;
-                *skp_new = 0;
-                *ahd = self.sst.az_new - red_new;
-                if *ahd < i64::from(SMPSZE) {
+                let mut ahd = self.sst.az_new - red_new;
+                if ahd < i64::from(SMPSZE) {
                     #[cfg(feature = "debug")]
                     if dbg(DBGAHD) {
                         dbg_print(format_args!("\nForcing skip of SMPSZE bytes\n"));
                     }
-                    *ahd = i64::from(SMPSZE);
+                    ahd = i64::from(SMPSZE);
                 }
-                Ok(0)
+                Ok(SearchOutcome {
+                    found: false,
+                    skp_org: 0,
+                    skp_new: 0,
+                    ahd,
+                })
             }
             Some((lz_fnd_org, lz_fnd_new)) => {
+                let skp_org: i64;
+                let skp_new: i64;
+                let ahd: i64;
                 if lz_fnd_org >= red_org {
                     if lz_fnd_org - red_org >= lz_fnd_new - red_new {
                         /* go forward on original file (JDiff.cpp:691-694) */
-                        *skp_org = lz_fnd_org - red_org + red_new - lz_fnd_new;
-                        *skp_new = 0;
-                        *ahd = lz_fnd_new - red_new;
+                        skp_org = lz_fnd_org - red_org + red_new - lz_fnd_new;
+                        skp_new = 0;
+                        ahd = lz_fnd_new - red_new;
                     } else {
                         /* go forward on new file (JDiff.cpp:696-700) */
-                        *skp_org = 0;
-                        *skp_new = lz_fnd_new - red_new + red_org - lz_fnd_org;
-                        *ahd = lz_fnd_org - red_org;
+                        skp_org = 0;
+                        skp_new = lz_fnd_new - red_new + red_org - lz_fnd_org;
+                        ahd = lz_fnd_org - red_org;
                     }
                 } else {
                     /* backtrack on original file (JDiff.cpp:702-713) */
-                    *skp_org = red_org - lz_fnd_org + lz_fnd_new - red_new;
-                    if *skp_org <= red_org - lz_bse_org {
-                        *skp_new = 0;
-                        *skp_org = -*skp_org;
-                        *ahd = lz_fnd_new - red_new;
+                    let bck = red_org - lz_fnd_org + lz_fnd_new - red_new;
+                    if bck <= red_org - lz_bse_org {
+                        skp_new = 0;
+                        skp_org = -bck;
+                        ahd = lz_fnd_new - red_new;
                     } else {
                         /* do not backtrace before beginning of file */
-                        *skp_new = *skp_org - (red_org - lz_bse_org);
-                        *skp_org = lz_bse_org - red_org;
-                        *ahd = (lz_fnd_new - red_new) - *skp_new;
+                        skp_new = bck - (red_org - lz_bse_org);
+                        skp_org = lz_bse_org - red_org;
+                        ahd = (lz_fnd_new - red_new) - skp_new;
                     }
                     /* 0.8.5: mzAhdOrg is NOT reset on backtrack anymore. */
                 }
 
-                Ok(1)
+                Ok(SearchOutcome {
+                    found: true,
+                    skp_org,
+                    skp_new,
+                    ahd,
+                })
             }
         }
     } /* search */
@@ -1667,6 +1679,28 @@ mod tests {
         );
         assert_eq!(jd.jdiff().unwrap_err().exit_code(), EXI_RED);
         assert_eq!(ops.0.borrow().clone(), vec![op(X, 0, 0, 0)]);
+    }
+
+    /// `search` answers a struct; the no-solution path zeroes the skips and
+    /// floors the advance at SMPSZE (JDiff.cpp:716-717). Fixture: "abcdef"
+    /// vs "zzzzzz" — the six new-file bytes hash to keys the "abcdef" index
+    /// never stored, so `getbest` returns None and the floor genuinely runs
+    /// (azNew - redNew = 6 < SMPSZE).
+    #[test]
+    fn search_no_solution_returns_smpsze_floor() {
+        let ops = Ops::default();
+        let mut jd = engine(
+            Box::new(JFileMem::new(b"abcdef".to_vec())),
+            Box::new(JFileMem::new(b"zzzzzz".to_vec())),
+            Box::new(RecordingOut::new(ops)),
+        );
+        let out = jd
+            .search(0, 0)
+            .expect("search never errors on in-memory files");
+        assert!(!out.found);
+        assert_eq!(out.skp_org, 0);
+        assert_eq!(out.skp_new, 0);
+        assert!(out.ahd >= i64::from(SMPSZE));
     }
 
     /// Brief step-1 test: with `src_scn = 0` (`-ff`) the source index builds
