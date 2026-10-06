@@ -77,12 +77,12 @@ No new files except this plan. All edits are in place:
 
 **Interfaces:** none (build metadata only).
 
-- [ ] **Step 1: Reproduce the warning**
+- [x] **Step 1: Reproduce the warning**
 
 Run: `cargo build 2>&1 | grep -c "future-incompatible"`
 Expected: `2` (one per manifest parse — the tree's only build warnings today).
 
-- [ ] **Step 2: Apply the rename**
+- [x] **Step 2: Apply the rename**
 
 In the `[lints]` table, change the rust subsection key `future-incompatible` to
 `future_incompatible` ( Cargo's documented name; the hyphenated form is the
@@ -90,13 +90,13 @@ deprecated alias). Everything under it (`level = "deny"`) is unchanged. If the
 table also carries `clippy::cast_lossless = "deny"` or equivalent entries, leave
 them exactly as they are.
 
-- [ ] **Step 3: Verify zero warnings and that the deny still binds**
+- [x] **Step 3: Verify zero warnings and that the deny still binds**
 
 Run: `cargo build 2>&1 | grep -ci "warning"` → expect `0`.
 Run: `cargo clippy --all-targets --all-features -- -D warnings` → expect exit 0
 (this exercises the lint table; a broken table fails the manifest parse outright).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add Cargo.toml Cargo.lock 2>/dev/null || git add Cargo.toml
@@ -120,7 +120,7 @@ Rationale: `#[allow]` silences forever, even after the reason disappears; `#[exp
 errors the moment the lint stops firing, so the justification stays honest. Where the
 existing comment does not already state the reason, add one line stating it.
 
-- [ ] **Step 1: Write the verification probe (red)**
+- [x] **Step 1: Write the verification probe (red)**
 
 Temporarily neutralize one suppression to prove the lint still fires — e.g. change
 `#[allow(dead_code)]` to `#[deny(dead_code)]` on `ahd_max`:
@@ -128,21 +128,21 @@ Temporarily neutralize one suppression to prove the lint still fires — e.g. ch
 Run: `cargo clippy --all-targets --all-features -- -D warnings`
 Expected: FAIL — `field ahd_max is never read` (the §21.13 parity reason holds).
 
-- [ ] **Step 2: Convert all five sites**
+- [x] **Step 2: Convert all five sites**
 
 Each site: `#[allow(LINT)]` → `#[expect(LINT)]`. The existing doc/comment blocks
 already carry the justifications (dead-code parity §21.13, the C++ if/else-if clamp
 spelling, the 1:1 same-branch port, the ported dead stores, the 11-arg C++ ctor);
 keep them. Restore the Task-1 probe site to `#[expect(dead_code)]`.
 
-- [ ] **Step 3: Verify the expects are live**
+- [x] **Step 3: Verify the expects are live**
 
 Run: `cargo clippy --all-targets --all-features -- -D warnings`
 Expected: exit 0. (If any `#[expect]` did NOT fire, rustc errors with
 `this lint expectation is unfulfilled` — that would mean the reason is stale and
 the suppression should be deleted instead; investigate, don't force it.)
 
-- [ ] **Step 4: Full gate + commit**
+- [x] **Step 4: Full gate + commit**
 
 Run the Global-Constraints gate bare. Then:
 
@@ -165,7 +165,7 @@ git commit -m "refactor: self-verifying #[expect] lint suppressions replace #[al
 - Produces: same `put_len(&mut self, len: i64)` private method, byte-identical
   output, no `unwrap()`.
 
-- [ ] **Step 1: Write the failing test first**
+- [x] **Step 1: Write the failing test first**
 
 Add to `mod tests` in `src/jout/bin.rs` (adapt the sink construction to the file's
 existing test driver: if the driver returns `(Vec<u8>, OutStats)` via
@@ -202,7 +202,7 @@ Note: `put_len` is private and `JOutBin::new` wraps a raw sink (no IgnoringWrite
 here), so this test exercises the exact byte path; write errors are impossible on
 `Vec<u8>`.
 
-- [ ] **Step 2: Run it — expect PASS first (pin step)**
+- [x] **Step 2: Run it — expect PASS first (pin step)**
 
 Run: `cargo test --all-features put_len_emits_exact_tier_bytes`
 Expected: PASS. This is deliberate: the test pins CURRENT behavior so the
@@ -210,7 +210,7 @@ restructure in Step 3 provably changes nothing. (If it fails, the assumed vector
 are wrong — recompute them from the `put_len` doc table before touching the code,
 and re-verify one vector by printing `buf` with `-- --nocatch`-style debugging.)
 
-- [ ] **Step 3: Restructure the marker emission**
+- [x] **Step 3: Restructure the marker emission**
 
 In each multi-byte arm of `put_len`, replace
 
@@ -231,12 +231,12 @@ if let Some(marker) = tier.marker() {
 untouched. Do NOT hoist the emission above the `match` — arm-local keeps the diff
 minimal and review trivial.)
 
-- [ ] **Step 4: Verify green**
+- [x] **Step 4: Verify green**
 
 Run: `cargo test --all-features put_len_emits_exact_tier_bytes` → PASS.
 Run the full gate bare (goldens byte-compare the real patch streams).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/jout/bin.rs
@@ -258,7 +258,7 @@ git commit -m "refactor: panic-free LenTier marker emission in JOutBin::put_len"
   spec §21.5), `None` otherwise. The `hits` counter still increments exactly on
   the `Some` path.
 
-- [ ] **Step 1: Write the failing test (red = compile error on new shape)**
+- [x] **Step 1: Write the failing test (red = compile error on new shape)**
 
 In `src/jhashpos.rs` tests, add:
 
@@ -286,12 +286,12 @@ fn get_returns_option_position() {
 (The exact feed loop only needs a key that was `add`ed; reuse whatever pattern the
 neighboring `add`/`get` tests already use — copy their feeder, don't invent one.)
 
-- [ ] **Step 2: Verify it fails**
+- [x] **Step 2: Verify it fails**
 
 Run: `cargo test --all-features get_returns_option_position`
 Expected: FAIL to compile — `this method takes 2 arguments but 1 was supplied`.
 
-- [ ] **Step 3: Change the signature and callers**
+- [x] **Step 3: Change the signature and callers**
 
 ```rust
 /// Hashtable lookup (`JHashPos.cpp:158-171`): exact-key match at
@@ -329,12 +329,12 @@ Update every `tbl.get(k, &mut pos)` pattern in the `jhashpos.rs` tests to
 `tbl.get(k)` with `assert_eq!`, and the doc-example comment at `jhashpos.rs:60-65`
 to the new shape.
 
-- [ ] **Step 4: Verify green + full gate**
+- [x] **Step 4: Verify green + full gate**
 
 Run: `cargo test --all-features` (all 9 suites; the roundtrip/oracle suites pin
 the engine behavior end to end).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/jhashpos.rs src/jdiff.rs
@@ -392,7 +392,7 @@ impl RollingHash {
 }
 ```
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 /// RollingHash bundles exactly the hash_key channel state: rolling a byte
@@ -414,12 +414,12 @@ fn rolling_hash_matches_raw_channel() {
 }
 ```
 
-- [ ] **Step 2: Verify it fails**
+- [x] **Step 2: Verify it fails**
 
 Run: `cargo test --all-features rolling_hash_matches_raw_channel`
 Expected: FAIL to compile — `RollingHash` not found.
 
-- [ ] **Step 3: Introduce the struct and migrate the six call sites**
+- [x] **Step 3: Introduce the struct and migrate the six call sites**
 
 In `SearchState`, replace the two field triplets (`hsh_org`/`prv_org`/`eql_org`
 and `hsh_new`/`prv_new`/`eql_new` — exact names per the struct definition; keep
@@ -447,12 +447,12 @@ fn hash_add_org(&mut self, lc_org: i32) {
 - Update any `SearchState` construction site (the `Default`/initializer) and the
   struct's doc comment to name the bundle.
 
-- [ ] **Step 4: Verify green + full gate**
+- [x] **Step 4: Verify green + full gate**
 
 The roundtrip/golden suites exercise the hash math on every byte; any drift is a
 suite failure.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/jdiff.rs
@@ -486,7 +486,7 @@ struct SearchOutcome {
 
   New signature: `fn search(&mut self, red_org: i64, red_new: i64) -> Result<SearchOutcome, JDiffError>`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 The suite already pins `search` end-to-end through `jdiff` (engine tests at
 ~1404–1760 drive it via `JDiff::jdiff`). Add a direct compile-shape pin:
@@ -509,12 +509,12 @@ Adapt the fixture name to the actual test helper in `src/jdiff.rs` tests (there
 are `JDiff::new(...).expect("test engine")` fixtures around line 1372 — reuse one;
 `search` is private, so this test lives inside the file's `#[cfg(test)] mod`).
 
-- [ ] **Step 2: Verify it fails**
+- [x] **Step 2: Verify it fails**
 
 Run: `cargo test --all-features search_no_solution_returns_smpsze_floor`
 Expected: FAIL to compile — wrong arg count / unknown field `found`.
 
-- [ ] **Step 3: Migrate signature, writes, and caller**
+- [x] **Step 3: Migrate signature, writes, and caller**
 
 - Signature drops `skp_org`/`skp_new`/`ahd` params; the `Ok(0)`/`Ok(1)` returns
   become `Ok(SearchOutcome { found: false/true, skp_org, skp_new, ahd })` with
@@ -538,10 +538,10 @@ lz_ahd = outcome.ahd;
   becomes `li_fnd == 1` against the i32, unchanged — and resets `li_fnd = 0`.
   Keep the debug trace at ~513 reading the outcome fields.)
 
-- [ ] **Step 4: Verify green + full gate** (the golden/oracle suites are the
+- [x] **Step 4: Verify green + full gate** (the golden/oracle suites are the
   behavior authority for the offset math).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/jdiff.rs
@@ -583,7 +583,7 @@ fn getbuf_off(&mut self, pos: i64, typ: ReadType) -> Result<(usize, i64), GetBuf
 fn get_frombuffer(&mut self, pos: i64, typ: ReadType) -> ByteOrEof;
 ```
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 /// The typed channel: each miss reason maps onto the same ByteOrEof the
@@ -606,12 +606,12 @@ fn get_frombuffer_typed_misses() {
 neighboring `getbuf_off` tests already prove — ~1135–1186 pin the exact miss
 positions; copy those.)
 
-- [ ] **Step 2: Verify it fails**
+- [x] **Step 2: Verify it fails**
 
 Run: `cargo test --all-features get_frombuffer_typed_misses`
 Expected: FAIL to compile — arity/type mismatch.
 
-- [ ] **Step 3: Reshape the channel**
+- [x] **Step 3: Reshape the channel**
 
 - `getbuf_off`: delete the `len: &mut i64` parameter. The four early-return arms
   (`EndOfBuffer`/`EndOfFile`/`SeekError`/`ReadError` from `get_fromfile`, plus
@@ -634,12 +634,12 @@ Expected: FAIL to compile — arity/type mismatch.
   `let mut lc_tst = LC_TST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);`
   (matching `jdebug.rs` — a poisoned debug scratch buffer must not abort the run).
 
-- [ ] **Step 4: Verify green + full gate**
+- [x] **Step 4: Verify green + full gate**
 
 The ahead-buffer tests (~733–1190) and every golden/oracle run exercise this
 channel on every byte read.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/jfile/ahead.rs
@@ -652,7 +652,7 @@ git commit -m "refactor: typed internal get channel in JFileAhead (GetBufMiss, n
 
 **Files:** none (verification only).
 
-- [ ] **Step 1: Full gate, bare, judged on exit code**
+- [x] **Step 1: Full gate, bare, judged on exit code**
 
 ```bash
 cargo fmt --all --check
@@ -662,12 +662,12 @@ cargo test --all-features
 
 Expected: all three exit 0; test count ≥ 253 + the four new tests from Tasks 3–7.
 
-- [ ] **Step 2: Zero-byte-diff proof**
+- [x] **Step 2: Zero-byte-diff proof**
 
 `git diff --stat main` must show NO files under `tests/fixtures/` (goldens
 untouched) and no `*.stderr`/`*.jdf` changes anywhere.
 
-- [ ] **Step 3: Oracle layer (if the oracle binary is available)**
+- [x] **Step 3: Oracle layer (if the oracle binary is available)**
 
 ```bash
 scripts/build-oracle.sh   # only if target/oracle is absent
@@ -676,7 +676,7 @@ JOJODIFF_ORACLE=target/oracle cargo test --all-features --test oracle
 
 Expected: PASS (skip gracefully if the oracle cannot build — CI runs it).
 
-- [ ] **Step 4: Grep residue checks**
+- [x] **Step 4: Grep residue checks**
 
 ```bash
 grep -rn 'marker().unwrap()' src/          # expect none
@@ -686,7 +686,7 @@ grep -rn 'getbuf_off(.*&mut' src/          # expect none
 grep -rnE '\bunsafe\b' src/                # doc comments only
 ```
 
-- [ ] **Step 5: Update this plan's checkboxes and commit any doc touch-ups**
+- [x] **Step 5: Update this plan's checkboxes and commit any doc touch-ups**
 
 ```bash
 git add docs/superpowers/plans/2026-10-05-rust-pitfall-audit.md
