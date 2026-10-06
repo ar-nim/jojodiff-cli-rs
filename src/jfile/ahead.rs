@@ -48,7 +48,7 @@ use std::io::{Read, Seek, SeekFrom};
 use super::{ByteOrEof, JFile, ReadType};
 #[cfg(feature = "debug")]
 use crate::defs::p8;
-use crate::defs::{EOB, EOF, EXI_OK, EXI_RED, EXI_SEK};
+use crate::defs::{EOF, EXI_OK, EXI_SEK};
 use crate::error::JDiffError;
 use crate::jdebug::dbg_print;
 #[cfg(feature = "debug")]
@@ -78,6 +78,17 @@ enum BufDone {
     Added,
     EndOfFile,
     EndOfBuffer,
+    SeekError,
+    ReadError,
+}
+
+/// Failure half of the buffered-read channel: which sentinel ended the run.
+/// Same information as today's `*len` out-parameter writes
+/// (JFileAhead.cpp:222-225), typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GetBufMiss {
+    Eof,
+    Eob,
     SeekError,
     ReadError,
 }
@@ -260,20 +271,13 @@ impl<R: Read + Seek> JFileAhead<R> {
     /// Tries to get data from the buffer; calls
     /// [`get_fromfile`](Self::get_fromfile) via
     /// [`getbuf_off`](Self::getbuf_off) if that is not possible (C++
-    /// `get_frombuffer`, `JFileAhead.cpp:134-199`).
-    fn get_frombuffer(&mut self, pos: i64, typ: ReadType) -> i32 {
-        // lzLen is set on every null-return path of getbuf
-        // (JFileAhead.cpp:222-225).
-        let mut len: i64 = 0;
-        match self.getbuf_off(pos, &mut len, typ) {
-            None => {
-                // EOF, EOB or any other problem (JFileAhead.cpp:142-147)
-                self.pos_red = -1;
-                self.ptr_red = 0; // C++: mpRed = null; kept safe by red_sze == 0
-                self.red_sze = 0;
-                len as i32
-            }
-            Some(off) => {
+    /// `get_frombuffer`, `JFileAhead.cpp:134-199`). Returns the byte
+    /// directly: on a miss the [`GetBufMiss`] maps onto the same
+    /// `Eof`/`Eob`/`Err(JDiffError::Seek|Read)` the legacy `i32` channel
+    /// carried through `from_raw`.
+    fn get_frombuffer(&mut self, pos: i64, typ: ReadType) -> ByteOrEof {
+        match self.getbuf_off(pos, typ) {
+            Ok((off, len)) => {
                 #[cfg(feature = "debug")]
                 self.verify_buffer(pos, len, off, typ);
 
@@ -287,7 +291,19 @@ impl<R: Read + Seek> JFileAhead<R> {
                 }
 
                 // return data at current position (JFileAhead.cpp:197)
-                i32::from(self.buf[off])
+                ByteOrEof::Byte(self.buf[off])
+            }
+            Err(miss) => {
+                // EOF, EOB or any other problem (JFileAhead.cpp:142-147)
+                self.pos_red = -1;
+                self.ptr_red = 0; // C++: mpRed = null; kept safe by red_sze == 0
+                self.red_sze = 0;
+                match miss {
+                    GetBufMiss::Eof => ByteOrEof::Eof,
+                    GetBufMiss::Eob => ByteOrEof::Eob,
+                    GetBufMiss::SeekError => ByteOrEof::Err(JDiffError::Seek),
+                    GetBufMiss::ReadError => ByteOrEof::Err(JDiffError::Read),
+                }
             }
         }
     }
@@ -320,7 +336,9 @@ impl<R: Read + Seek> JFileAhead<R> {
         }
 
         // detect buffer contents failure (JFileAhead.cpp:164-184)
-        let mut lc_tst = LC_TST.lock().unwrap();
+        let mut lc_tst = LC_TST
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _ = self.jseek(pos); // result ignored, like the C++
         let li_len = if len > lc_tst.len() as i64 {
             lc_tst.len() as i64
@@ -358,9 +376,11 @@ impl<R: Read + Seek> JFileAhead<R> {
     /// into the buffer replaces the `jchar*`, so
     /// [`get_frombuffer`](Self::get_frombuffer) can derive `mpRed` from it.
     ///
-    /// On success `*len` holds the number of available bytes; on failure it
-    /// holds the EOF/EOB/EXI sentinel.
-    fn getbuf_off(&mut self, pos: i64, len: &mut i64, typ: ReadType) -> Option<usize> {
+    /// `Ok((off, len))`: `off` is the offset into `buf` and `len` the number
+    /// of available bytes (the run never wraps the ring — post-conditions
+    /// identical to the replaced `*len` out-parameter). `Err` names the
+    /// EOF/EOB/EXI sentinel that out-parameter used to carry.
+    fn getbuf_off(&mut self, pos: i64, typ: ReadType) -> Result<(usize, i64), GetBufMiss> {
         if pos >= self.pos_eof || pos < 0 {
             /* eof (JFileAhead.cpp:213-216). `pos < 0` is the port's
              * deviation 4 (module docs): the C++ gate is only
@@ -371,42 +391,27 @@ impl<R: Read + Seek> JFileAhead<R> {
              * debug build trips the getbuf assert (exit 6). Negative
              * positions cannot be valid in any file, so the port ends the
              * file there, like `JFileMem` (`pos < 0` → EOF). */
-            *len = i64::from(EOF);
-            return None;
+            return Err(GetBufMiss::Eof);
         } else if pos < self.pos_inp && pos >= self.pos_inp - self.buf_usd {
             // Data is already in the buffer (JFileAhead.cpp:217-218)
         } else {
             // Get data from underlying file (JFileAhead.cpp:220-228)
             match self.get_fromfile(pos, typ) {
-                BufDone::EndOfBuffer => {
-                    *len = i64::from(EOB);
-                    return None;
-                }
-                BufDone::EndOfFile => {
-                    *len = i64::from(EOF);
-                    return None;
-                }
-                BufDone::SeekError => {
-                    *len = i64::from(EXI_SEK);
-                    return None;
-                }
-                BufDone::ReadError => {
-                    *len = i64::from(EXI_RED);
-                    return None;
-                }
+                BufDone::EndOfBuffer => return Err(GetBufMiss::Eob),
+                BufDone::EndOfFile => return Err(GetBufMiss::Eof),
+                BufDone::SeekError => return Err(GetBufMiss::SeekError),
+                BufDone::ReadError => return Err(GetBufMiss::ReadError),
                 BufDone::Added => {} // data added
             }
         }
 
         // Calculate position of pos (JFileAhead.cpp:231-238)
         let mut az_len = self.pos_inp - pos;
-        *len = az_len;
         let off: i64 = if az_len <= self.ptr_inp as i64 {
             self.ptr_inp as i64 - az_len
         } else {
             let off = self.ptr_inp as i64 + self.buf_sze - az_len;
             az_len = self.buf.len() as i64 - off; // azLen = mpMax - lpDta
-            *len = az_len;
             off
         };
 
@@ -438,7 +443,7 @@ impl<R: Read + Seek> JFileAhead<R> {
             }
         }
 
-        Some(off as usize)
+        Ok((off as usize, az_len))
     }
 
     /// Retrieve requested position into the buffer, trying to keep the buffer
@@ -648,9 +653,7 @@ impl<R: Read + Seek> JFileAhead<R> {
 impl<R: Read + Seek> JFile for JFileAhead<R> {
     /// Gets one byte: the base-class sequential fast path over the read
     /// cursor, else `get_frombuffer` (C++ `JFile::get`, `JFile.h:73-81`;
-    /// replicated here because the trait cannot hold the cursor state). The
-    /// internal machinery stays i32-shaped (`get_frombuffer`/`getbuf_off`
-    /// speak the legacy sentinels); `from_raw` is the typed rim.
+    /// replicated here because the trait cannot hold the cursor state).
     fn get(&mut self, pos: i64, typ: ReadType) -> ByteOrEof {
         if pos == self.pos_red && self.red_sze > 0 {
             // mzPosRed++; miRedSze--; return *mpRed++;
@@ -663,7 +666,7 @@ impl<R: Read + Seek> JFile for JFileAhead<R> {
             }
             ByteOrEof::Byte(byte)
         } else {
-            ByteOrEof::from_raw(self.get_frombuffer(pos, typ))
+            self.get_frombuffer(pos, typ)
         }
     }
 
@@ -705,8 +708,7 @@ impl<R: Read + Seek> JFile for JFileAhead<R> {
     /// success path yields `len == slice.len()`, so the slice length speaks
     /// for the C++ `lzLen` out-parameter.
     fn getbuf(&mut self, pos: i64, typ: ReadType) -> Option<&[u8]> {
-        let mut len: i64 = 0;
-        let off = self.getbuf_off(pos, &mut len, typ)?;
+        let (off, len) = self.getbuf_off(pos, typ).ok()?;
         Some(&self.buf[off..off + len as usize])
     }
 }
@@ -714,7 +716,7 @@ impl<R: Read + Seek> JFile for JFileAhead<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::defs::EXI_RED;
+    use crate::defs::{EOB, EXI_RED};
     use std::cell::Cell;
     use std::io::Cursor;
 
@@ -1133,13 +1135,30 @@ mod tests {
         assert_eq!(f.seekcount(), 0, "in-buffer getbuf does no I/O");
         // The failure sentinels stay observable through the internal
         // `getbuf_off` (the trait-level `getbuf` collapses them to `None`).
-        let mut len = 0;
-        assert_eq!(f.getbuf_off(2048, &mut len, ReadType::Read), None);
-        assert_eq!(len, i64::from(EOF));
-        let mut len = 0;
-        assert_eq!(f.getbuf_off(1500, &mut len, ReadType::SoftAhead), None);
-        assert_eq!(len, i64::from(EOB), "beyond-buffer soft read");
+        assert_eq!(f.getbuf_off(2048, ReadType::Read), Err(GetBufMiss::Eof));
+        assert_eq!(
+            f.getbuf_off(1500, ReadType::SoftAhead),
+            Err(GetBufMiss::Eob),
+            "beyond-buffer soft read"
+        );
         assert_eq!(f.seekcount(), 0);
+    }
+
+    /// The typed channel: each miss reason maps onto the same ByteOrEof the
+    /// trait-level `get` produced via from_raw (EOF at/past end and negative
+    /// positions, EOB on soft-ahead overrun, errors from the file). The miss
+    /// positions are the exact ones `getbuf_direct_fast_path` pins on this
+    /// file (2048, 1500) plus the §21.17 negative gate.
+    #[test]
+    fn get_frombuffer_typed_misses() {
+        let mut f = mk(data(2048));
+        assert_eq!(f.get_frombuffer(-1, ReadType::Read), ByteOrEof::Eof); // §21.17 gate
+        assert_eq!(f.get_frombuffer(2048, ReadType::Read), ByteOrEof::Eof); // past EOF
+        assert_eq!(
+            f.getbuf_off(1500, ReadType::SoftAhead).unwrap_err(),
+            GetBufMiss::Eob
+        );
+        assert!(matches!(f.getbuf_off(100, ReadType::Read), Ok((_, _))));
     }
 
     /// The always-on debug-build invariant asserts (`JFileAhead.cpp:240-251`,
@@ -1182,9 +1201,7 @@ mod tests {
         // The EOF gate precedes the asserts: a negative position returns
         // EOF (§21.17) rather than reaching the `pos < pos_inp - buf_usd`
         // assert arm that the C++ debug build dies on (exit 6).
-        let mut len: i64 = -999;
-        assert_eq!(f.getbuf_off(-1, &mut len, ReadType::Read), None);
-        assert_eq!(len, i64::from(EOF));
+        assert_eq!(f.getbuf_off(-1, ReadType::Read), Err(GetBufMiss::Eof));
     }
 
     /// Cursor whose `seek` fails after `ok` successful `SeekFrom::Start`

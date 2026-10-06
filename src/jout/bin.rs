@@ -137,18 +137,27 @@ impl<W: Write> JOutBin<W> {
                 self.stats.ctl += tier.size();
             }
             LenTier::L508 => {
-                self.raw(tier.marker().unwrap());
+                // L252 has no marker; the multi-byte tiers emit theirs.
+                if let Some(marker) = tier.marker() {
+                    self.raw(marker);
+                }
                 self.raw((len - 253) as u8);
                 self.stats.ctl += tier.size();
             }
             LenTier::L16 => {
-                self.raw(tier.marker().unwrap());
+                // L252 has no marker; the multi-byte tiers emit theirs.
+                if let Some(marker) = tier.marker() {
+                    self.raw(marker);
+                }
                 self.raw((len >> 8) as u8);
                 self.raw(len as u8);
                 self.stats.ctl += tier.size();
             }
             LenTier::L32 => {
-                self.raw(tier.marker().unwrap());
+                // L252 has no marker; the multi-byte tiers emit theirs.
+                if let Some(marker) = tier.marker() {
+                    self.raw(marker);
+                }
                 self.raw((len >> 24) as u8);
                 self.raw((len >> 16) as u8);
                 self.raw((len >> 8) as u8);
@@ -156,7 +165,10 @@ impl<W: Write> JOutBin<W> {
                 self.stats.ctl += tier.size();
             }
             LenTier::L64 => {
-                self.raw(tier.marker().unwrap());
+                // L252 has no marker; the multi-byte tiers emit theirs.
+                if let Some(marker) = tier.marker() {
+                    self.raw(marker);
+                }
                 self.raw((len >> 56) as u8);
                 self.raw((len >> 48) as u8);
                 self.raw((len >> 40) as u8);
@@ -352,6 +364,33 @@ mod tests {
             assert_eq!(st.ctl, ctl, "ctl for len {len}");
             assert_eq!(st.del, len, "del for len {len}");
             assert_eq!(st.dta, 0, "dta for len {len}");
+        }
+    }
+
+    /// `put_len` emits exactly the documented tier encoding for one length
+    /// per tier: L252 (len-1), L508 (252, len-253), L16 (253, hi, lo),
+    /// L32 (254, 4 bytes BE), L64 (255, 8 bytes BE). Byte-identical to the
+    /// oracle tier table; guards the marker-emit restructure.
+    #[test]
+    fn put_len_emits_exact_tier_bytes() {
+        let cases: &[(i64, &[u8])] = &[
+            (1, &[0x00]),                               // L252: len-1
+            (252, &[0xFB]),                             // L252: len-1 = 251
+            (253, &[252, 0x00]),                        // L508: marker + len-253
+            (508, &[252, 0xFF]),                        // L508: 508-253 = 255
+            (509, &[253, 0x01, 0xFD]),                  // L16: 509 = 0x01FD
+            (0xFFFF, &[253, 0xFF, 0xFF]),               // L16
+            (0x1_0000, &[254, 0x00, 0x01, 0x00, 0x00]), // L32: 65536 BE
+            (
+                0x1_0000_0000,
+                &[255, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00],
+            ), // L64
+        ];
+        for &(len, want) in cases {
+            let mut out = JOutBin::new(Vec::new());
+            out.put_len(len);
+            let buf = out.into_inner();
+            assert_eq!(buf.as_slice(), want, "put_len({len})");
         }
     }
 

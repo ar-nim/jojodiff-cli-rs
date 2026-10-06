@@ -81,29 +81,32 @@ const PGSMSK: i64 = 0x1ffffff;
 /// advances. Extracted from `JDiff` so the scan methods can borrow the
 /// state and the file readers disjointly — the C++ reaches into these
 /// members through pointer aliasing, which the two field-disjoint
-/// destructures used to emulate.
+/// destructures used to emulate. The rolling-hash member triplets
+/// (`mlHsh*`/`miPrv*`/`miEql*`) are bundled in [`RollingHash`].
 struct SearchState {
     /// Current ahead position on the original file (`mzAhdOrg`). Not reset on
     /// backtrack anymore (0.8.5).
     az_org: i64,
     /// Current ahead position on the new file (`mzAhdNew`).
     az_new: i64,
-    /// Current hash value for the original file (`mlHshOrg`).
-    hsh_org: u32,
-    /// Current hash value for the new file (`mlHshNew`).
-    hsh_new: u32,
-    /// Previous file value, original (`miPrvOrg`).
-    prv_org: i32,
+    /// Rolling sample hash, original: the C++ `mlHshOrg`/`miPrvOrg`/
+    /// `miEqlOrg` member triplet (`JDiff.h:267-269,272`) bundled into
+    /// [`RollingHash`]. Initialized to the member defaults (key 0, previous
+    /// byte **0**, equal-run 0) — the `src_scn == 0` paths hash straight
+    /// from them (`JDiff.cpp:186,206,441`); deliberately NOT
+    /// [`RollingHash::new`], whose EOF previous-byte seed is the C++
+    /// local/reseed seed.
+    rh_org: RollingHash,
     /// Current file value, new (`miValNew`). Typed read result: a data
     /// byte, or the sentinel (`EOF`/`EOB`/error) of the read that ended the
     /// scan — checked by the error gate after the scan loops.
     val_new: ByteOrEof,
-    /// Previous file value, new (`miPrvNew`).
-    prv_new: i32,
-    /// Equal-run counter in the current sample, original (`miEqlOrg`).
-    eql_org: i32,
-    /// Equal-run counter in the current sample, new (`miEqlNew`).
-    eql_new: i32,
+    /// Rolling sample hash, new: the C++ `mlHshNew`/`miPrvNew`/`miEqlNew`
+    /// member triplet (`JDiff.h:268,271,273`) bundled into [`RollingHash`],
+    /// with the same zero member defaults as `rh_org`. `search` reseeds it
+    /// with [`RollingHash::new`] (key 0, equal-run 0, previous byte EOF,
+    /// `JDiff.cpp:543-545`) before the look-ahead loop reads it.
+    rh_new: RollingHash,
     /// Reliability range for the current hashtable (`miRlb`, cached by
     /// `search` after each prescan; the 085ac tuning commit, spec §18.E).
     rlb: i32,
@@ -152,6 +155,17 @@ pub struct JDiff<'a> {
     sst: SearchState,
 }
 
+/// Result of one find-ahead pass (`JDiff::search`, the C++ `azSkp*`/`azAhd`
+/// reference out-parameters plus its 0/1 return): `found` is the C++ `int`
+/// return (1 = solution found), the offsets are the skip/advance vector.
+#[derive(Debug, Clone, Copy)]
+struct SearchOutcome {
+    found: bool,  // C++ returns 1 when a solution was found, else 0
+    skp_org: i64, // bytes to skip on the original file (negative = backtrack)
+    skp_new: i64, // bytes to skip on the new file
+    ahd: i64,     // bytes both cursors advance to reach the solution
+}
+
 impl<'a> JDiff<'a> {
     /// Create JDiff for working on the specified files (`JDiff.cpp:103-125`).
     ///
@@ -171,7 +185,9 @@ impl<'a> JDiff<'a> {
     /// [`JDiffError::Memory`] when the OS refuses one of the engine
     /// allocations (memory guard Layer B — exit 10 at the CLI boundary
     /// instead of an allocation abort).
-    #[allow(clippy::too_many_arguments)]
+    /// Eleven parameters, the C++ constructor's exact arity
+    /// (`JDiff.cpp:103-125`) — kept 1:1.
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         org: Box<dyn JFile + 'a>,
         r#new: Box<dyn JFile + 'a>,
@@ -209,13 +225,23 @@ impl<'a> JDiff<'a> {
             sst: SearchState {
                 az_org: 0,
                 az_new: 0,
-                hsh_org: 0,
-                hsh_new: 0,
-                prv_org: 0,
+                // C++ member defaults (`JDiff.h:267-273`): key 0, previous
+                // byte **0**, equal-run 0. Deliberately not
+                // `RollingHash::new()` — its EOF previous-byte seed is the
+                // C++ local/reseed seed (`JDiff.cpp:545`, `:731`); seeding
+                // EOF here would change the hash of a first 0x00 byte on
+                // the `src_scn == 0` paths (byte contract).
+                rh_org: RollingHash {
+                    key: 0,
+                    prv: 0,
+                    eql: 0,
+                },
+                rh_new: RollingHash {
+                    key: 0,
+                    prv: 0,
+                    eql: 0,
+                },
                 val_new: ByteOrEof::Byte(0),
-                prv_new: 0,
-                eql_org: 0,
-                eql_new: 0,
                 rlb: 0,
                 hsh_err: 0,
             },
@@ -269,14 +295,12 @@ impl<'a> JDiff<'a> {
     /// original stream's rolling key and add the sample to the hashtable.
     /// Only reached while `miSrcScn == 0 && lzPosOrg == mzAhdOrg`.
     fn hash_add_org(&mut self, lc_org: i32) {
-        self.sst.hsh_org = hash_key(
-            self.sst.hsh_org,
-            &mut self.sst.prv_org,
-            lc_org,
-            &mut self.sst.eql_org,
+        self.sst.rh_org.roll(lc_org);
+        self.hsh.add(
+            self.sst.rh_org.key(),
+            self.sst.az_org,
+            self.sst.rh_org.eql(),
         );
-        self.hsh
-            .add(self.sst.hsh_org, self.sst.az_org, self.sst.eql_org);
         self.sst.az_org += 1;
     }
 
@@ -334,8 +358,6 @@ impl<'a> JDiff<'a> {
 
         let mut li_fnd: i32 = 0; /* offsets are pointing to a valid solution (= equal regions)? */
         let mut lz_ahd: i64 = 0; /* number of bytes to advance on both files to reach the solution */
-        let mut lz_skp_org: i64 = 0; /* number of bytes to skip on original file to reach the solution */
-        let mut lz_skp_new: i64 = 0; /* number of bytes to skip on new file to reach the solution */
         /* lap for reducing the number of progress messages for -vv */
         let mut lz_lap_sml: i64 = MAX_OFF_T;
 
@@ -494,16 +516,14 @@ impl<'a> JDiff<'a> {
                         self.out.put(Op::Esc, 0, 0, 0, lz_pos_org, lz_pos_new);
                     }
 
-                    /* Find a new equals-region (JDiff.cpp:276-279): the int
-                     * return is LIVE at 0.8.5 — a negative error aborts the
+                    /* Find a new equals-region (JDiff.cpp:276-279): the found
+                     * flag is LIVE at 0.8.5 — a negative error aborts the
                      * diff (the 0.8.1 bool collapse is fixed, spec §18.E). */
-                    li_fnd = self.search(
-                        lz_pos_org,
-                        lz_pos_new,
-                        &mut lz_skp_org,
-                        &mut lz_skp_new,
-                        &mut lz_ahd,
-                    )?;
+                    let outcome = self.search(lz_pos_org, lz_pos_new)?;
+                    li_fnd = i32::from(outcome.found);
+                    let lz_skp_org = outcome.skp_org;
+                    let mut lz_skp_new = outcome.skp_new;
+                    lz_ahd = outcome.ahd;
 
                     /* Debug: find-ahead result and progress traces
                      * (JDiff.cpp:280-286). */
@@ -616,21 +636,16 @@ impl<'a> JDiff<'a> {
     /// if characters need to be inserted in the original file, negative if
     /// they need to be removed from it.
     ///
-    /// Returns `Ok(0)` = no solution found, `Ok(1)` = solution found, or
-    /// the `JDiffError` (propagated live by [`JDiff::jdiff`]). The 0/1
-    /// payload stays: jdiff's "inaccurate solution" arm consumes it.
-    fn search(
-        &mut self,
-        red_org: i64,
-        red_new: i64,
-        skp_org: &mut i64,
-        skp_new: &mut i64,
-        ahd: &mut i64,
-    ) -> Result<i32, JDiffError> {
-        let mut lz_fnd_org: i64 = 0; /* Found position within original file;
-         * the C++ also declares lzFndNew (out
-         * parameter of gpMch->getbest), which the
-         * Option return replaces here. */
+    /// Returns the [`SearchOutcome`] — `found: false` = no solution found,
+    /// `found: true` = solution found — or the `JDiffError` (propagated
+    /// live by [`JDiff::jdiff`]). The found flag stays: jdiff's "inaccurate
+    /// solution" arm consumes it.
+    fn search(&mut self, red_org: i64, red_new: i64) -> Result<SearchOutcome, JDiffError> {
+        /* Found positions within the files (C++ lzFndOrg/lzFndNew) arrive
+         * as typed returns from the two lookups below: the hashtable
+         * lookup (hsh.get -> Option<i64>) replaces the C++ lzFndOrg
+         * out-parameter, and getbest's Option<(i64, i64)> return replaces
+         * the C++ lzFndNew out-parameter of gpMch->getbest. */
         let mut lz_lap: i64 = 0; /* Stop-lap for progress counter */
 
         let mut li_max: i32; /* Max number of bytes to look ahead */
@@ -674,14 +689,12 @@ impl<'a> JDiff<'a> {
                     ByteOrEof::Byte(lc_org) => lc_org,
                     _ => break,
                 };
-                self.sst.hsh_org = hash_key(
-                    self.sst.hsh_org,
-                    &mut self.sst.prv_org,
-                    i32::from(lc_org),
-                    &mut self.sst.eql_org,
+                self.sst.rh_org.roll(i32::from(lc_org));
+                self.hsh.add(
+                    self.sst.rh_org.key(),
+                    self.sst.az_org,
+                    self.sst.rh_org.eql(),
                 );
-                self.hsh
-                    .add(self.sst.hsh_org, self.sst.az_org, self.sst.eql_org);
                 self.sst.az_org += 1;
                 li_scan -= 1;
             }
@@ -798,9 +811,9 @@ impl<'a> JDiff<'a> {
                     li_bck = SMPSZE * 2 - 1; // to initialize mkHsh and miEql
                 }
                 self.sst.az_new -= 1; // switch to pre-increments
-                self.sst.hsh_new = 0;
-                self.sst.eql_new = 0;
-                self.sst.prv_new = EOF;
+                // Fresh look-ahead hash state (JDiff.cpp:543-545): key 0,
+                // equal-run 0, previous byte EOF.
+                self.sst.rh_new = RollingHash::new();
                 let mut li_idx: i32 = 0;
                 while li_idx < li_bck {
                     self.sst.val_new = self.r#new.get(self.sst.az_new + 1, li_sft_new); // ++mzAhdNew
@@ -814,12 +827,7 @@ impl<'a> JDiff<'a> {
                         self.sst.az_new -= 1;
                         break;
                     };
-                    self.sst.hsh_new = hash_key(
-                        self.sst.hsh_new,
-                        &mut self.sst.prv_new,
-                        i32::from(*lc_val),
-                        &mut self.sst.eql_new,
-                    );
+                    self.sst.rh_new.roll(i32::from(*lc_val));
 
                     // The following line needs some explication.
                     // The goal of this line is to terminate the initialization ASAP.
@@ -838,7 +846,7 @@ impl<'a> JDiff<'a> {
                     // and initialization will be ok after SMPSZE-1 bytes (position D in the example)
                     // Reset can be detected by miEql != liIdx. Hence, when miEql != liIdx,
                     // we can reduce liMax to liIdx + SMPSZE - 1.
-                    if li_idx != self.sst.eql_new && li_bck > li_idx + (SMPSZE - 1) {
+                    if li_idx != self.sst.rh_new.eql() && li_bck > li_idx + (SMPSZE - 1) {
                         li_bck = li_idx + (SMPSZE - 1);
                     }
                     li_idx += 1;
@@ -865,17 +873,12 @@ impl<'a> JDiff<'a> {
                     self.sst.az_new -= 1;
                     break;
                 };
-                self.sst.hsh_new = hash_key(
-                    self.sst.hsh_new,
-                    &mut self.sst.prv_new,
-                    i32::from(*lc_val),
-                    &mut self.sst.eql_new,
-                );
+                self.sst.rh_new.roll(i32::from(*lc_val));
                 li_max -= 1;
 
                 /* lookup the new value in the hashtable and add it to the
                  * table of matches... (JDiff.cpp:594) */
-                if self.hsh.get(self.sst.hsh_new, &mut lz_fnd_org) {
+                if let Some(lz_fnd_org) = self.hsh.get(self.sst.rh_new.key()) {
                     /* ...unless it's not usable because we've been instructed
                      * not to backtrack on source file (JDiff.cpp:596) */
                     if lz_fnd_org > lz_bse_org {
@@ -1010,48 +1013,59 @@ impl<'a> JDiff<'a> {
                 // files are simply different. Anyway, iterating over the same
                 // search windows makes no sense, so jump forward for at least
                 // SMPSZE bytes.
-                *skp_org = 0;
-                *skp_new = 0;
-                *ahd = self.sst.az_new - red_new;
-                if *ahd < i64::from(SMPSZE) {
+                let mut ahd = self.sst.az_new - red_new;
+                if ahd < i64::from(SMPSZE) {
                     #[cfg(feature = "debug")]
                     if dbg(DBGAHD) {
                         dbg_print(format_args!("\nForcing skip of SMPSZE bytes\n"));
                     }
-                    *ahd = i64::from(SMPSZE);
+                    ahd = i64::from(SMPSZE);
                 }
-                Ok(0)
+                Ok(SearchOutcome {
+                    found: false,
+                    skp_org: 0,
+                    skp_new: 0,
+                    ahd,
+                })
             }
             Some((lz_fnd_org, lz_fnd_new)) => {
+                let skp_org: i64;
+                let skp_new: i64;
+                let ahd: i64;
                 if lz_fnd_org >= red_org {
                     if lz_fnd_org - red_org >= lz_fnd_new - red_new {
                         /* go forward on original file (JDiff.cpp:691-694) */
-                        *skp_org = lz_fnd_org - red_org + red_new - lz_fnd_new;
-                        *skp_new = 0;
-                        *ahd = lz_fnd_new - red_new;
+                        skp_org = lz_fnd_org - red_org + red_new - lz_fnd_new;
+                        skp_new = 0;
+                        ahd = lz_fnd_new - red_new;
                     } else {
                         /* go forward on new file (JDiff.cpp:696-700) */
-                        *skp_org = 0;
-                        *skp_new = lz_fnd_new - red_new + red_org - lz_fnd_org;
-                        *ahd = lz_fnd_org - red_org;
+                        skp_org = 0;
+                        skp_new = lz_fnd_new - red_new + red_org - lz_fnd_org;
+                        ahd = lz_fnd_org - red_org;
                     }
                 } else {
                     /* backtrack on original file (JDiff.cpp:702-713) */
-                    *skp_org = red_org - lz_fnd_org + lz_fnd_new - red_new;
-                    if *skp_org <= red_org - lz_bse_org {
-                        *skp_new = 0;
-                        *skp_org = -*skp_org;
-                        *ahd = lz_fnd_new - red_new;
+                    let bck = red_org - lz_fnd_org + lz_fnd_new - red_new;
+                    if bck <= red_org - lz_bse_org {
+                        skp_new = 0;
+                        skp_org = -bck;
+                        ahd = lz_fnd_new - red_new;
                     } else {
                         /* do not backtrace before beginning of file */
-                        *skp_new = *skp_org - (red_org - lz_bse_org);
-                        *skp_org = lz_bse_org - red_org;
-                        *ahd = (lz_fnd_new - red_new) - *skp_new;
+                        skp_new = bck - (red_org - lz_bse_org);
+                        skp_org = lz_bse_org - red_org;
+                        ahd = (lz_fnd_new - red_new) - skp_new;
                     }
                     /* 0.8.5: mzAhdOrg is NOT reset on backtrack anymore. */
                 }
 
-                Ok(1)
+                Ok(SearchOutcome {
+                    found: true,
+                    skp_org,
+                    skp_new,
+                    ahd,
+                })
             }
         }
     } /* search */
@@ -1066,10 +1080,10 @@ impl<'a> JDiff<'a> {
             org, hsh, verbose, ..
         } = self;
 
-        let mut lk_hsh_org: u32 = 0; // Current hash value for original file
-        let mut li_eql_org: i32 = 0; // Number of times current value occurs in hash value
+        // The C++ locals (`JDiff.cpp:728-731`): fresh rolling-hash state —
+        // key 0, equal-run 0, previous byte EOF.
+        let mut rh = RollingHash::new();
         let mut lc_val_org = ByteOrEof::Byte(0); // Current  file value (C: int zero-init)
-        let mut lc_val_prv: i32 = EOF; // Previous file value
         let mut lz_pos_org: i64 = -1; // Position within original file
 
         let mut li_idx: i32;
@@ -1090,12 +1104,7 @@ impl<'a> JDiff<'a> {
             let ByteOrEof::Byte(lc_val) = &lc_val_org else {
                 break;
             };
-            lk_hsh_org = hash_key(
-                lk_hsh_org,
-                &mut lc_val_prv,
-                i32::from(*lc_val),
-                &mut li_eql_org,
-            );
+            rh.roll(i32::from(*lc_val));
             li_idx += 1;
         }
 
@@ -1111,13 +1120,8 @@ impl<'a> JDiff<'a> {
             let ByteOrEof::Byte(lc_val) = &lc_val_org else {
                 break;
             };
-            lk_hsh_org = hash_key(
-                lk_hsh_org,
-                &mut lc_val_prv,
-                i32::from(*lc_val),
-                &mut li_eql_org,
-            );
-            hsh.add(lk_hsh_org, lz_pos_org, li_eql_org);
+            rh.roll(i32::from(*lc_val));
+            hsh.add(rh.key(), lz_pos_org, rh.eql());
 
             /* Debug: hash trace (JDiff.cpp:758-762); the trailing field
              * is `%8d` of the literal 0 here, not a P8zd position. */
@@ -1126,7 +1130,7 @@ impl<'a> JDiff<'a> {
                 dbg_print(format_args!(
                     "ufHshAdd({:2x} -> {:8x}, {}, {:8})\n",
                     u32::from(*lc_val),
-                    lk_hsh_org,
+                    rh.key(),
                     crate::defs::p8(lz_pos_org),
                     0,
                 ));
@@ -1161,6 +1165,54 @@ impl<'a> JDiff<'a> {
             _ => Ok(()),
         }
     } /* buildFullIndex */
+}
+
+/// The rolling sample hash (`ufHshAdd` state): the current key, the previous
+/// byte, and the equal-run counter, bundled so the three values update as one
+/// unit instead of threading through `&mut` out-parameters.
+///
+/// Two seeds matter (C++ port anchors):
+///
+/// * [`RollingHash::new`] is the C++ *fresh* state — key 0, previous byte
+///   EOF, equal-run 0 — the `JDiff.cpp:728-731` index locals and the
+///   `:543-545` look-ahead reseed.
+/// * The `JDiff.h:267-273` *member* defaults seed the previous byte to 0:
+///   the org-side members are hashed straight from that default in the
+///   `src_scn == 0` paths (`JDiff.cpp:186,206,441`), so the port mirrors
+///   them with a literal at the [`SearchState`] initializer instead.
+#[derive(Clone, Copy)]
+pub(crate) struct RollingHash {
+    key: u32, // current hash value (lzHshOrg / lzHshNew)
+    prv: i32, // previous byte (EOF-seeded)
+    eql: i32, // equal-character run feeding the hash
+}
+
+impl RollingHash {
+    /// Fresh state, matching the C++ locals' zero/EOF initialization
+    /// (`JDiff.cpp:728-731`, reseed `:543-545`).
+    pub(crate) fn new() -> Self {
+        RollingHash {
+            key: 0,
+            prv: EOF,
+            eql: 0,
+        }
+    }
+
+    /// Fold one byte (the raw i32 channel value, EOF included) into the hash.
+    pub(crate) fn roll(&mut self, new: i32) -> u32 {
+        self.key = hash_key(self.key, &mut self.prv, new, &mut self.eql);
+        self.key
+    }
+
+    /// Current key (for table lookups and adds).
+    pub(crate) fn key(&self) -> u32 {
+        self.key
+    }
+
+    /// Current equal-run length (the `add` quality argument).
+    pub(crate) fn eql(&self) -> i32 {
+        self.eql
+    }
 }
 
 /// The hash function (`JDiff::hash`, `JDiff.cpp:361-371`): generate a new
@@ -1264,6 +1316,24 @@ mod tests {
         k = hash_key(k, &mut old, i32::from(b'a'), &mut eql);
         assert_eq!(k, before.wrapping_mul(2).wrapping_add(97 + SMPSZE as u32));
         assert_eq!(eql, SMPSZE);
+    }
+
+    /// RollingHash bundles exactly the hash_key channel state: rolling a byte
+    /// sequence gives the same key/eql as the raw three-variable form, and the
+    /// EOF seed matches the C++ locals (`lcValPrv = EOF`, key 0, eql 0).
+    #[test]
+    fn rolling_hash_matches_raw_channel() {
+        let mut rh = RollingHash::new();
+        let mut raw_key = 0_u32;
+        let mut raw_prv = EOF;
+        let mut raw_eql = 0_i32;
+        for b in b"the quick brown fox" {
+            let via_struct = rh.roll(i32::from(*b));
+            raw_key = hash_key(raw_key, &mut raw_prv, i32::from(*b), &mut raw_eql);
+            assert_eq!(via_struct, raw_key);
+            assert_eq!(rh.key(), raw_key);
+            assert_eq!(rh.eql(), raw_eql);
+        }
     }
 
     /// Deterministic pseudo-random filler byte stream (LCG, bits 8..=15),
@@ -1609,6 +1679,28 @@ mod tests {
         );
         assert_eq!(jd.jdiff().unwrap_err().exit_code(), EXI_RED);
         assert_eq!(ops.0.borrow().clone(), vec![op(X, 0, 0, 0)]);
+    }
+
+    /// `search` answers a struct; the no-solution path zeroes the skips and
+    /// floors the advance at SMPSZE (JDiff.cpp:716-717). Fixture: "abcdef"
+    /// vs "zzzzzz" — the six new-file bytes hash to keys the "abcdef" index
+    /// never stored, so `getbest` returns None and the floor genuinely runs
+    /// (azNew - redNew = 6 < SMPSZE).
+    #[test]
+    fn search_no_solution_returns_smpsze_floor() {
+        let ops = Ops::default();
+        let mut jd = engine(
+            Box::new(JFileMem::new(b"abcdef".to_vec())),
+            Box::new(JFileMem::new(b"zzzzzz".to_vec())),
+            Box::new(RecordingOut::new(ops)),
+        );
+        let out = jd
+            .search(0, 0)
+            .expect("search never errors on in-memory files");
+        assert!(!out.found);
+        assert_eq!(out.skp_org, 0);
+        assert_eq!(out.skp_new, 0);
+        assert!(out.ahd >= i64::from(SMPSZE));
     }
 
     /// Brief step-1 test: with `src_scn = 0` (`-ff`) the source index builds
